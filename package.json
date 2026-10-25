@@ -1,0 +1,35 @@
+{
+  "name": "replybek-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Replybek API: workspaces, agents, knowledge, answers, inbox and the public widget API.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "worker": "node src/worker.js",
+    "migrate": "node scripts/migrate.js",
+    "db:up": "docker compose -f docker-compose.dev.yml up -d",
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "test": "node scripts/migrate.js --test && node --test --test-concurrency=1 \"test/*.test.js\"",
+    "smoke": "node scripts/smoke-openai.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cheerio": "^1.2.0",
+    "cookie": "^1.1.1",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.3",
+    "mammoth": "^1.13.0",
+    "morgan": "^1.12.1",
+    "multer": "^2.4.0",
+    "openai": "^4.104.0",
+    "pdf-parse": "^1.1.4",
+    "pg": "^8.23.1",
+    "zod": "^3.25.76"
+  }
+}

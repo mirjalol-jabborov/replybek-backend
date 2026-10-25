@@ -1,0 +1,19 @@
+# Local development database only: Postgres 16 with the pgvector extension.
+#   npm run db:up    starts it on localhost:54329
+#   npm run db:down  stops it (the data stays in the named volume)
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: replybek-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: replybek
+      POSTGRES_PASSWORD: replybek
+      POSTGRES_DB: replybek
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - replybek-db:/var/lib/postgresql/data
+      - ./sql/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+volumes:
+  replybek-db:
