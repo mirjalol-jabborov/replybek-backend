@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS usage (
   messages INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (workspace_id, period)
 );
+-- When the owners were told this month's AI messages ran out (one email a month).
+ALTER TABLE usage ADD COLUMN IF NOT EXISTS limit_emailed_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS activity (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -332,3 +334,175 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS tool_calls_pending ON tool_calls (conversation_id) WHERE status = 'pending';
+
+-- Generic integration builder: reusable procedures and test status.
+ALTER TABLE integrations ADD COLUMN IF NOT EXISTS procedures JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE integrations ADD COLUMN IF NOT EXISTS last_test JSONB;
+CREATE TABLE IF NOT EXISTS procedure_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  integration_id UUID NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+  definition JSONB NOT NULL,
+  args JSONB NOT NULL,
+  results JSONB NOT NULL DEFAULT '{}',
+  trace JSONB NOT NULL DEFAULT '[]',
+  step_index INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','waiting','completed','failed','cancelled')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS procedure_run_id UUID REFERENCES procedure_runs(id) ON DELETE CASCADE;
+ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS tool_snapshot JSONB;
+ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS integration_test_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  integration_id UUID NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+  definition JSONB NOT NULL,
+  request JSONB NOT NULL,
+  scope JSONB NOT NULL,
+  result JSONB,
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '10 minutes'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Revisions bind tests and pending approvals to the configuration they reviewed.
+ALTER TABLE integrations ADD COLUMN IF NOT EXISTS config_revision integer NOT NULL DEFAULT 1;
+ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS integration_revision integer;
+
+-- Admin-curated starter questions; AI generation is an explicit, unsaved draft action.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS suggested_questions JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS suggested_questions_i18n JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS suggestion_default_language TEXT NOT NULL DEFAULT 'en';
+
+CREATE TABLE IF NOT EXISTS integration_ai_drafts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  source TEXT NOT NULL,
+  goal TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT 'en',
+  snapshot JSONB NOT NULL,
+  batches JSONB NOT NULL,
+  results JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'running',
+  revision INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '24 hours'
+);
+CREATE INDEX IF NOT EXISTS integration_ai_drafts_workspace ON integration_ai_drafts(workspace_id, created_at DESC);
+
+-- ───── Billing through Polar ─────
+-- Billing went through Whop before Polar; its columns (and any test state they held) go.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'workspaces' AND column_name = 'whop_membership_id') THEN
+    UPDATE workspaces SET subscription_status = NULL, renews_at = NULL, cancel_at_period_end = false;
+    ALTER TABLE workspaces DROP COLUMN whop_membership_id;
+    DELETE FROM billing_checkouts;
+  END IF;
+END $$;
+ALTER TABLE workspaces DROP COLUMN IF EXISTS billing_manage_url;
+-- The workspace's current Polar subscription. Null until the owner starts one through Polar checkout.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS polar_subscription_id TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_status TEXT;      -- Polar's status: trialing, active, past_due, canceled…
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS renews_at TIMESTAMPTZ;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS cancel_at_period_end BOOLEAN NOT NULL DEFAULT false;
+-- The free trial is Polar's (card required, status "trialing"); an app-side trial column was tried and dropped.
+ALTER TABLE workspaces DROP COLUMN IF EXISTS trial_ends_at;
+CREATE INDEX IF NOT EXISTS workspaces_polar_subscription ON workspaces (polar_subscription_id) WHERE polar_subscription_id IS NOT NULL;
+-- Checkouts the dashboard started, so a payment finds its workspace and the owner who paid.
+CREATE TABLE IF NOT EXISTS billing_checkouts (
+  id TEXT PRIMARY KEY,                                    -- Polar checkout session id
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  plan TEXT NOT NULL,
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Polar retries a delivery with the same webhook-id; each one is applied once.
+CREATE TABLE IF NOT EXISTS billing_events (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ───── Teammates and email ─────
+-- The dashboard language a person last used; emails to them follow it.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT;
+-- An invitation by email to join a workspace. One open invitation per address; it works for 7 days.
+CREATE TABLE IF NOT EXISTS invitations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  email CITEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'agent')),
+  token_hash TEXT NOT NULL UNIQUE,
+  invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  accepted_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS invitations_open ON invitations (workspace_id, email) WHERE accepted_at IS NULL;
+-- "Forgot password" links: one hour, one use.
+CREATE TABLE IF NOT EXISTS password_resets (
+  token_hash TEXT PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ
+);
+-- When the team was last emailed that this conversation is waiting (at most once an hour).
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+
+-- ───── Files and photos in conversations ─────
+-- One row per file on a message; the bytes live in UPLOAD_DIR/attachments/<id>
+-- (src/services/attachments.service.js). Deleting a conversation removes the rows; the files stay
+-- on disk until a cleanup job exists.
+CREATE TABLE IF NOT EXISTS attachments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,      -- from the file's own bytes, never from the upload's name
+  size INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS attachments_message ON attachments (message_id);
+-- What the AI read from a customer's file (a photo's description, a document's text), so later
+-- answers in the conversation still know it. NULL: not read yet, or unreadable.
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS ai_text TEXT;
+
+-- ───── Live updates ─────
+-- Every change to a conversation, its messages or its tool calls is announced on the channel
+-- replybek_events as {"w": workspace, "c": conversation, "t": table, "r": message role}.
+-- src/services/events.service.js passes it on to open dashboards and widgets, which then fetch
+-- the details the usual way. Updates that change nothing (marking an already-read chat read) stay quiet.
+CREATE OR REPLACE FUNCTION replybek_notify() RETURNS trigger AS $$
+DECLARE
+  r RECORD;
+  payload JSON;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NULL; END IF;
+  IF TG_OP = 'DELETE' THEN r := OLD; ELSE r := NEW; END IF;
+  IF TG_TABLE_NAME = 'conversations' THEN
+    payload := json_build_object('w', r.workspace_id, 'c', r.id, 't', TG_TABLE_NAME);
+  ELSIF TG_TABLE_NAME = 'messages' THEN
+    payload := json_build_object('w', r.workspace_id, 'c', r.conversation_id, 't', TG_TABLE_NAME, 'r', r.role);
+  ELSE
+    payload := json_build_object('c', r.conversation_id, 't', TG_TABLE_NAME);
+  END IF;
+  PERFORM pg_notify('replybek_events', payload::text);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS conversations_notify ON conversations;
+CREATE TRIGGER conversations_notify AFTER INSERT OR UPDATE OR DELETE ON conversations FOR EACH ROW EXECUTE FUNCTION replybek_notify();
+DROP TRIGGER IF EXISTS messages_notify ON messages;
+CREATE TRIGGER messages_notify AFTER INSERT OR UPDATE ON messages FOR EACH ROW EXECUTE FUNCTION replybek_notify();
+DROP TRIGGER IF EXISTS tool_calls_notify ON tool_calls;
+CREATE TRIGGER tool_calls_notify AFTER INSERT OR UPDATE ON tool_calls FOR EACH ROW EXECUTE FUNCTION replybek_notify();
+
+-- ───── Sign in with Google ─────
+-- Google accounts are matched by Google's stable id; a Google-only account has no password.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT UNIQUE;
+ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+-- A person's own photo: a small image as a data: URL (the dashboard crops it to 256 px).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;

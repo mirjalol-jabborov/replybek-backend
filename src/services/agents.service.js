@@ -1,8 +1,9 @@
 import { query } from "../db.js";
 import { notFound } from "../lib/http.js";
 import { logActivity } from "./activity.service.js";
+import { assertRoomFor } from "./workspaces.service.js";
 
-const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins"];
+const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins", "suggested_questions", "suggested_questions_i18n", "suggestion_default_language"];
 
 export async function listAgents(workspaceId) {
   const { rows } = await query(
@@ -28,6 +29,7 @@ export async function getAgent(workspaceId, agentId) {
 }
 
 export async function createAgent(workspace, user, input) {
+  await assertRoomFor(workspace.id, "agents");
   const business = workspace.name;
   const { rows } = await query(
     `INSERT INTO agents (workspace_id, name, purpose, instructions, tone, welcome, fallback, handoff)
@@ -36,7 +38,7 @@ export async function createAgent(workspace, user, input) {
       workspace.id,
       input.name,
       input.purpose,
-      input.instructions ?? `You are ${input.name}, the assistant for ${business}.\n- ${input.purpose || "Answer customer questions."}\n- Answer only from your knowledge sources.\n- If you're unsure, offer to connect the customer with the team.`,
+      input.instructions ?? `You are ${input.name}, the AI agent for ${business}.\n- ${input.purpose || "Answer customer questions."}\n- Answer only from your knowledge sources.\n- If you're unsure, offer to connect the customer with the team.`,
       input.tone,
       input.welcome ?? `Hi! I'm ${input.name} from ${business}. How can I help?`,
       input.fallback ?? `I don't have a confident answer to that yet. I can pass your question to the ${business} team.`,
@@ -53,7 +55,7 @@ export async function updateAgent(workspaceId, agentId, input) {
   const values = [agentId, workspaceId];
   for (const f of FIELDS) {
     if (input[f] !== undefined) {
-      values.push(input[f]);
+      values.push(["suggested_questions", "suggested_questions_i18n"].includes(f) ? JSON.stringify(input[f]) : input[f]);
       sets.push(`${f} = $${values.length}`);
     }
   }

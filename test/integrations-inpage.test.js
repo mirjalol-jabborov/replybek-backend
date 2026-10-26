@@ -101,6 +101,7 @@ async function drive(s, headers, base) {
     const r = (await s.v.call("GET", `/widget/${s.key}/conversations/${s.cid}/messages`, null, headers)).body;
     for (const tc of r.pending || []) {
       const req = tc.request;
+      s.inspectRequest?.(req);
       const res = await fetch(s.sysUrl + req.path, {
         method: req.method || "POST",
         headers: { "x-session": "valid", "Content-Type": "application/json", ...(req.headers || {}) },
@@ -174,4 +175,20 @@ test("in-page: when the chat is not inside the system, the tool can't run", asyn
   const reply = await ask(s, "orders [tool:list_orders {}]", plain);
   assert.match(reply.body, /inside ERP|only works/i);
   assert.equal(sys.seen.length, before, "the system was never called");
+});
+
+
+test("in-page host-token configuration reaches every browser request without storing a credential", async () => {
+  const s = await setup();
+  await query("UPDATE integrations SET auth=$2 WHERE agent_id=$1", [s.agent.id, {browser_auth:"host_token",header:"Authorization",prefix:"Bearer "}]);
+  let requests = 0;
+  s.inspectRequest = req => {
+    requests++;
+    assert.deepEqual(req.browser_auth, {provider:"host_token",header:"Authorization",prefix:"Bearer "});
+    assert.equal(req.headers.Authorization, undefined);
+  };
+  await ask(s, "Read orders [tool:list_orders {}]");
+  assert.ok(requests >= 3, "context, account and action all require the host token provider");
+  const stored = (await query("SELECT access_token_enc FROM integration_connections WHERE conversation_id=$1",[s.cid])).rows;
+  assert.ok(stored.every(row => !row.access_token_enc));
 });

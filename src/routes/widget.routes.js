@@ -2,7 +2,10 @@ import { Router } from "express";
 import { wrap } from "../lib/http.js";
 import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema } from "../validators.js";
 import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
-import { widgetAgent, widgetConfig, startConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool } from "../services/widget.service.js";
+import { languageOf } from "../services/suggestions.service.js";
+import { widgetAgent, widgetConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees } from "../services/widget.service.js";
+import { stream } from "../services/events.service.js";
+import { acceptFile, visitorAttachment, sendAttachment } from "../services/attachments.service.js";
 
 /**
  * The public API the chat widget calls from customers' websites. No cookies: a conversation
@@ -17,15 +20,29 @@ router.use(wrap(async (req, res, next) => {
   next();
 }));
 
-router.get("/config", (req, res) => res.json(widgetConfig(req.agent)));
+router.get("/config", (req, res) => res.json(widgetConfig(req.agent, languageOf(req.query.lang || req.headers["accept-language"]))));
 router.post("/conversations", startsPerIP, validate(widgetStartSchema), wrap(async (req, res) => {
   const visitor = { ...req.valid, user_agent: String(req.headers["user-agent"] || "").slice(0, 200) };
-  res.status(201).json({ ...(await startConversation(req.agent, visitor)), config: widgetConfig(req.agent) });
+  res.status(201).json({ ...(await startConversation(req.agent, visitor)), config: widgetConfig(req.agent, languageOf(req.query.lang || req.headers["accept-language"])) });
 }));
 const token = (req) => req.headers["x-visitor-token"];
 const inpage = (req) => { const o = req.headers["x-replybek-inpage"]; return typeof o === "string" && /^https?:\/\/[^/]+$/.test(o) ? o : null; };
-router.post("/conversations/:cid/messages", perIP, validate(widgetMessageSchema), wrap(async (req, res) => {
-  res.json(await postVisitorMessage(req.agent, req.params.cid, token(req), req.valid.text, inpage(req)));
+// Live updates for one conversation: says when to fetch messages again (see events.service.js).
+router.get("/conversations/:cid/stream", perIP, wrap(async (req, res) => {
+  const conv = await ownConversation(req.agent, req.params.cid, token(req));
+  await stream(req, res, [`c:${conv.id}`], visitorSees);
+}));
+// Files: at most 20 per 10 minutes from one network, on top of the message limit.
+const filesPerIP = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, key: clientIP, message: "Too many files from this network. Wait a few minutes." });
+const fileLimit = (req, res, next) => (req.file ? filesPerIP(req, res, next) : next());
+router.post("/conversations/:cid/messages", perIP, acceptFile, fileLimit, validate(widgetMessageSchema), wrap(async (req, res) => {
+  res.json(await postVisitorMessage(req.agent, req.params.cid, token(req), req.valid.text, inpage(req), req.file));
+}));
+// A file on this conversation's visible messages. Fetched with the token header, never by a bare URL.
+const filesRead = rateLimit({ windowMs: 60 * 1000, max: 120, key: clientIP, message: "Too many requests. Wait a moment." });
+router.get("/conversations/:cid/files/:fid", filesRead, wrap(async (req, res) => {
+  const conv = await ownConversation(req.agent, req.params.cid, token(req));
+  await sendAttachment(res, await visitorAttachment(conv, req.params.fid));
 }));
 router.get("/conversations/:cid/messages", perIP, wrap(async (req, res) => {
   const after = typeof req.query.after === "string" && !Number.isNaN(Date.parse(req.query.after)) ? req.query.after : null;

@@ -1,9 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
 import { query } from "../db.js";
 import { HttpError, notFound } from "../lib/http.js";
 import { encrypt, decrypt, sign, verify } from "../lib/secrets.js";
 import { render, pick } from "../lib/template.js";
 import { assertPublicHost } from "../lib/safeFetch.js";
 import { logActivity } from "./activity.service.js";
+import { integrationSchema } from "../validators.js";
+import { validateDefinitions, resolveInputs, modelInput } from "../lib/integration-config.js";
 import * as bridge from "../lib/bridge.js";
 
 /**
@@ -35,6 +38,9 @@ const shape = (row) => ({
   context: row.context,
   account: row.account,
   tools: row.tools,
+  procedures: row.procedures || [],
+  last_test: row.last_test,
+  readiness: !row.tools?.length ? "needs_actions" : !row.last_test?.ok ? "needs_test" : row.last_test.mode === "mock" ? "simulated" : "tested",
   enabled: row.enabled,
   connections: Number(row.connections || 0),
   created_at: row.created_at,
@@ -50,7 +56,7 @@ export async function listIntegrations(workspaceId) {
   return rows.map(shape);
 }
 
-async function loadIntegration(workspaceId, id) {
+export async function loadIntegration(workspaceId, id) {
   if (!/^[0-9a-f-]{36}$/i.test(id || "")) throw notFound("Integration not found");
   const { rows } = await query("SELECT * FROM integrations WHERE id = $1 AND workspace_id = $2", [id, workspaceId]);
   if (!rows[0]) throw notFound("Integration not found");
@@ -66,13 +72,16 @@ function checkTools(tools) {
 }
 
 export async function createIntegration(workspace, user, input) {
-  checkTools(input.tools);
+  input = integrationSchema.parse(input);
+  validateDefinitions(input);
+  if (input.auth?.type === "api_key" && !input.client_secret) throw new HttpError(400, "Add an API key.");
   const { rows: agents } = await query("SELECT id FROM agents WHERE id = $1 AND workspace_id = $2", [input.agent_id, workspace.id]);
   if (!agents[0]) throw notFound("Agent not found");
+  await checkAgentNames(input.agent_id, input);
   const { rows } = await query(
-    `INSERT INTO integrations (workspace_id, agent_id, name, mode, base_url, auth, client_secret_enc, headers, context, account, tools, enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-    [workspace.id, input.agent_id, input.name, input.mode, input.base_url.replace(/\/$/, ""), input.auth, encrypt(input.client_secret), input.headers, JSON.stringify(input.context), input.account, JSON.stringify(input.tools), input.enabled]
+    `INSERT INTO integrations (workspace_id, agent_id, name, mode, base_url, auth, client_secret_enc, headers, context, account, tools, enabled, procedures)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+    [workspace.id, input.agent_id, input.name, input.mode, input.base_url.replace(/\/$/, ""), input.auth, encrypt(input.client_secret), input.headers, JSON.stringify(input.context), input.account, JSON.stringify(input.tools), input.enabled, JSON.stringify(input.procedures)]
   );
   await logActivity(workspace.id, user.id, "{actor} added the integration “{name}”", { actor: user.name, name: input.name });
   return shape(rows[0]);
@@ -81,10 +90,18 @@ export async function createIntegration(workspace, user, input) {
 export async function updateIntegration(workspaceId, id, input) {
   const current = await loadIntegration(workspaceId, id);
   if (input.tools) checkTools(input.tools);
-  const next = { ...current, ...input };
+  const parsed = integrationSchema.safeParse({ ...current, ...input });
+  if (!parsed.success) throw new HttpError(400, parsed.error.issues.map(x => x.message).join("; "));
+  const next = parsed.data;
+  validateDefinitions(next);
+  if (next.auth?.type === "api_key" && !(input.client_secret || (current.auth?.type === "api_key" && current.client_secret_enc))) throw new HttpError(400, "Add an API key.");
+  await checkAgentNames(current.agent_id, next, id);
+  const keys = ["mode", "base_url", "auth", "headers", "context", "account", "tools", "procedures"];
+  const normalizedCurrent = integrationSchema.parse(current);
+  const changed = !!input.client_secret || keys.some(k => !isDeepStrictEqual(next[k], normalizedCurrent[k]));
   const { rows } = await query(
     `UPDATE integrations SET name = $3, mode = $4, base_url = $5, auth = $6, client_secret_enc = $7, headers = $8, context = $9, account = $10,
-            tools = $11, enabled = $12, updated_at = now()
+            tools = $11, enabled = $12, procedures = $13, last_test = CASE WHEN $14 THEN NULL ELSE last_test END, config_revision = config_revision + CASE WHEN $14 THEN 1 ELSE 0 END, updated_at = now()
       WHERE id = $1 AND workspace_id = $2 RETURNING *`,
     [
       id,
@@ -99,8 +116,13 @@ export async function updateIntegration(workspaceId, id, input) {
       next.account,
       JSON.stringify(next.tools),
       next.enabled,
+      JSON.stringify(next.procedures),
+      changed,
     ]
   );
+  if (!!input.client_secret || ["mode", "base_url", "auth", "headers", "context", "account"].some(k => !isDeepStrictEqual(next[k], normalizedCurrent[k]))) {
+    await query("DELETE FROM integration_connections WHERE integration_id=$1",[id]);
+  }
   return shape(rows[0]);
 }
 
@@ -128,22 +150,28 @@ function absolute(integration, path) {
   return integration.base_url + (path.startsWith("/") ? path : `/${path}`);
 }
 
-async function send(integration, { method = "POST", path, headers = {}, body }, accessToken) {
+export async function send(integration, { method = "POST", path, headers = {}, body }, accessToken) {
   const url = absolute(integration, path);
+  if (new URL(url).username || new URL(url).password) throw new HttpError(400, "Put credentials in authentication settings, not the URL.");
   await guardHost(url);
+  const credentialHeaders = integration.auth?.type === "api_key" ? { [integration.auth.header || "Authorization"]: (integration.auth.prefix ?? "Bearer ") + decrypt(integration.client_secret_enc) } : {};
   const res = await fetch(url, {
     method,
     headers: {
       Accept: "application/json",
       ...(body !== undefined && method !== "GET" ? { "Content-Type": "application/json" } : {}),
       ...headers,
+      ...credentialHeaders,
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: body !== undefined && method !== "GET" ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(TIMEOUT_MS),
     redirect: "manual",
   });
-  const text = await res.text();
+  const reader = res.body?.getReader();
+  let size = 0; const chunks = [];
+  if (reader) { while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > 1024 * 1024) { await reader.cancel(); throw new HttpError(502, "Response exceeds 1 MB. Request fewer records."); } chunks.push(Buffer.from(value)); } }
+  const text = Buffer.concat(chunks).toString("utf8");
   let data = text;
   try {
     data = text ? JSON.parse(text) : null;
@@ -159,7 +187,7 @@ const stripTags = (s) => String(s).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
 const cleanHeaders = (h) => Object.fromEntries(Object.entries(h).filter(([, v]) => v != null && v !== "").map(([k, v]) => [k, String(v)]));
 
 /** Builds a request from a config block and the current scope (args, context, now). */
-function request(integration, block, scope) {
+export function request(integration, block, scope) {
   return {
     method: (block.method || "POST").toUpperCase(),
     path: render(block.path, scope),
@@ -183,7 +211,7 @@ function capResult(result) {
 }
 
 /** Reads a tool's answer: a table (column names + row arrays), or a JSON value. */
-function readResponse(spec = {}, data, scope) {
+export function readResponse(spec = {}, data, scope) {
   if (spec.type === "rows") {
     const columns = render(spec.columns, scope);
     let rows = (pick(data, spec.rows || "data") || []).map((r) => (Array.isArray(r) ? Object.fromEntries(columns.map((c, i) => [c, r[i]])) : r));
@@ -196,7 +224,11 @@ function readResponse(spec = {}, data, scope) {
     const total = pick(data, spec.count || "count");
     return capResult({ rows: rows.slice(0, spec.limit || MAX_ROWS), total: total == null ? rows.length : Number(total) });
   }
-  const value = spec.pick ? pick(data, spec.pick) : data;
+  let value = spec.pick ? pick(data, spec.pick) : data;
+  if (spec.fields && Object.keys(spec.fields).length) {
+    const map = (row) => Object.fromEntries(Object.entries(spec.fields).map(([name, path]) => [name, pick(row, path) ?? null]));
+    value = Array.isArray(value) ? value.map(map) : map(value);
+  }
   return capResult(value === undefined ? null : value);
 }
 
@@ -207,7 +239,7 @@ export async function previewTool(workspaceId, integrationId, toolName, args = {
   const tool = draft.tool && draft.tool.name === toolName ? draft.tool : (saved.tools || []).find((t) => t.name === toolName);
   if (!tool || !tool.request) throw notFound("Tool not found");
   const integration = { base_url: (draft.base_url || saved.base_url || "").replace(/\/$/, ""), headers: draft.headers || saved.headers || {} };
-  const req = request(integration, tool.request, { args, context, now: new Date() });
+  const req = request(integration, tool.request, { args: resolveInputs(tool, args, context), context, now: new Date() });
   return { kind: tool.kind || "read", request: req };
 }
 
@@ -218,7 +250,7 @@ export const redirectUri = () => `${PUBLIC_API_URL()}/oauth/callback`;
 export async function connectUrl(agent, conversationId, integrationId) {
   const { rows } = await query("SELECT * FROM integrations WHERE id = $1 AND agent_id = $2 AND enabled", [integrationId, agent.id]);
   const integration = rows[0];
-  if (!integration) throw notFound("This connection isn't available.");
+  if (!integration || integration.mode !== "server" || ["api_key", "none"].includes(integration.auth?.type)) throw notFound("This connection isn't available.");
   const a = integration.auth || {};
   const url = new URL(absolute(integration, a.authorize_url));
   url.searchParams.set("response_type", "code");
@@ -327,6 +359,8 @@ export async function disconnect(conversationId, integrationId) {
 
 /** Hands one rendered request to the browser and waits for the result (or a timeout). */
 async function runInPage(integrationId, conversationId, rendered) {
+  const integration = (await query("SELECT auth FROM integrations WHERE id=$1", [integrationId])).rows[0];
+  if (integration?.auth?.browser_auth === "host_token") rendered = { ...rendered, browser_auth: { provider: "host_token", header: integration.auth.header || "Authorization", prefix: integration.auth.prefix ?? "Bearer " } };
   const { rows } = await query("INSERT INTO tool_calls (conversation_id, integration_id, request) VALUES ($1, $2, $3) RETURNING id", [conversationId, integrationId, rendered]);
   const res = await bridge.wait(rows[0].id);
   if (res.timedOut) {
@@ -375,7 +409,10 @@ export async function deliverToolResult(conversationId, toolCallId, result) {
 /** The enabled tools of an agent, each with its integration. */
 export async function agentTools(agentId) {
   const { rows } = await query("SELECT * FROM integrations WHERE agent_id = $1 AND enabled ORDER BY created_at", [agentId]);
-  return rows.flatMap((integration) => (integration.tools || []).map((tool) => ({ integration, tool })));
+  return rows.flatMap((integration) => [
+    ...(integration.tools || []).filter(tool => !Object.values(tool.bindings || {}).some(b => b.source === "step")).map((tool) => ({ integration, tool: { ...tool, modelInput: modelInput(tool) } })),
+    ...(integration.procedures || []).map((p) => ({ integration, tool: { ...p, procedure: true } })),
+  ]);
 }
 
 /** True when the agent has an enabled in-page integration (its tools run in the customer's browser). */
@@ -426,6 +463,11 @@ export async function callTool(integration, tool, args, conn, conversationId = n
     }
     return { ok: true, result: readResponse(tool.response, res.data, scope) };
   }
+  if (["api_key", "none"].includes(integration.auth?.type)) {
+    const res = await send(integration, req);
+    return res.ok ? { ok: true, result: readResponse(tool.response, res.data, scope) } : { error: "failed", status: res.status, message: `The system returned HTTP ${res.status}. Check authentication and the endpoint.` };
+  }
+  if (!conn) return { error: "signed_out", message: "Sign in again to continue." };
   let token = decrypt(conn.access_token_enc);
   if (conn.expires_at && new Date(conn.expires_at) < new Date(Date.now() + 30000)) token = (await refresh(integration, conn)) || token;
   let res = await send(integration, req, token);
@@ -446,15 +488,18 @@ export async function callTool(integration, tool, args, conn, conversationId = n
  * pending action and run only when the customer presses Confirm.
  * Returns { output (for the model), card? (for the customer) }.
  */
-export async function runTool({ conversationId, integration, tool, args, inpageOrigin = null }) {
-  if (integration.mode === "in_page") return runToolInPage({ conversationId, integration, tool, args, inpageOrigin });
-  const conn = await connection(integration.id, conversationId);
+export async function runTool({ conversationId, integration, tool, args, inpageOrigin = null, steps = {} }) {
+  if (tool.procedure) return startProcedure({ conversationId, integration, procedure: tool, args, inpageOrigin });
+  if (!conversationId) return { output: { error: "test_context_required", message: "Use the integration test panel for actions. The Playground has no signed-in customer session." } };
+  if (integration.mode === "in_page") return runToolInPage({ conversationId, integration, tool, args, inpageOrigin, steps });
+  const conn = ["api_key", "none"].includes(integration.auth?.type) ? await ensureServerContext(integration, conversationId) : await connection(integration.id, conversationId);
   if (!conn) {
     return {
       output: { error: "not_signed_in", message: `The customer isn't signed in to ${integration.name}. A sign-in button is shown to them; ask them to sign in.` },
       card: { type: "connect", integration_id: integration.id, name: integration.name },
     };
   }
+  try { args = resolveInputs(tool, args, conn.context || {}, steps); } catch (e) { return { output: { error: "invalid_inputs", message: e.message } }; }
   if (tool.kind === "write") {
     const scope = { args, context: conn.context || {}, now: new Date() };
     const summary = {
@@ -463,8 +508,8 @@ export async function runTool({ conversationId, integration, tool, args, inpageO
       total: tool.confirm?.total ? render(tool.confirm.total, scope) : null,
     };
     const { rows } = await query(
-      "INSERT INTO pending_actions (conversation_id, integration_id, tool, args, summary) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-      [conversationId, integration.id, tool.name, args, summary]
+      "INSERT INTO pending_actions (conversation_id, integration_id, tool, args, summary, tool_snapshot, integration_revision) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+      [conversationId, integration.id, tool.name, args, summary, tool, integration.config_revision]
     );
     return {
       output: { status: "waiting_for_customer", message: "A confirmation card is shown to the customer. Nothing has changed yet; tell them to check the details and press Confirm." },
@@ -476,11 +521,12 @@ export async function runTool({ conversationId, integration, tool, args, inpageO
 }
 
 /** In-page version of runTool: the browser runs reads now; writes still wait for Confirm. */
-async function runToolInPage({ conversationId, integration, tool, args, inpageOrigin }) {
+async function runToolInPage({ conversationId, integration, tool, args, inpageOrigin, steps = {} }) {
   if (!inpageOrigin || safeOrigin(integration.base_url) !== inpageOrigin) {
     return { output: { error: "not_in_app", message: `This only works inside ${integration.name}. Tell the customer to open the chat from within ${integration.name} and try again.` } };
   }
-  await ensureInPageContext(integration, conversationId);
+  const inputConn = await ensureInPageContext(integration, conversationId);
+  try { args = resolveInputs(tool, args, inputConn?.context || {}, steps); } catch (e) { return { output: { error: "invalid_inputs", message: e.message } }; }
   if (tool.kind === "write") {
     const conn = await connection(integration.id, conversationId);
     const scope = { args, context: conn?.context || {}, now: new Date() };
@@ -489,7 +535,7 @@ async function runToolInPage({ conversationId, integration, tool, args, inpageOr
       lines: render(tool.confirm?.lines || [], scope).filter((l) => Array.isArray(l) && l[0]),
       total: tool.confirm?.total ? render(tool.confirm.total, scope) : null,
     };
-    const { rows } = await query("INSERT INTO pending_actions (conversation_id, integration_id, tool, args, summary) VALUES ($1, $2, $3, $4, $5) RETURNING id", [conversationId, integration.id, tool.name, args, summary]);
+    const { rows } = await query("INSERT INTO pending_actions (conversation_id, integration_id, tool, args, summary, tool_snapshot, integration_revision) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", [conversationId, integration.id, tool.name, args, summary, tool, integration.config_revision]);
     return {
       output: { status: "waiting_for_customer", message: "A confirmation card is shown to the customer. Nothing has changed yet; tell them to check the details and press Confirm." },
       card: { type: "confirm", action_id: rows[0].id, integration_id: integration.id, name: integration.name, ...summary, status: "pending" },
@@ -500,25 +546,134 @@ async function runToolInPage({ conversationId, integration, tool, args, inpageOr
   return { output: out.ok ? out.result : out };
 }
 
-/** The customer pressed Confirm or Cancel on a pending action. */
+/** Atomically claim a confirmation so double-clicks cannot repeat a business write. */
 export async function decideAction(conversationId, actionId, confirm, inpageOrigin = null) {
   if (!/^[0-9a-f-]{36}$/i.test(actionId || "")) throw notFound("Action not found");
-  const { rows } = await query(
-    "SELECT a.*, i.* , a.id AS action_id, a.status AS action_status FROM pending_actions a JOIN integrations i ON i.id = a.integration_id WHERE a.id = $1 AND a.conversation_id = $2",
-    [actionId, conversationId]
-  );
-  const row = rows[0];
-  if (!row) throw notFound("Action not found");
-  if (row.action_status !== "pending") throw new HttpError(409, "This request was already handled.");
-  if (!confirm) {
-    await query("UPDATE pending_actions SET status = 'cancelled', decided_at = now() WHERE id = $1", [actionId]);
-    return { status: "cancelled", name: row.name, summary: row.summary, integration_id: row.integration_id };
-  }
-  const tool = (row.tools || []).find((t) => t.name === row.tool && t.kind === "write");
-  const conn = await connection(row.integration_id, conversationId);
+  const { rows } = await query("SELECT a.*, i.*, a.id AS action_id, a.status AS action_status FROM pending_actions a JOIN integrations i ON i.id = a.integration_id WHERE a.id = $1 AND a.conversation_id = $2", [actionId, conversationId]);
+  const row = rows[0]; if (!row) throw notFound("Action not found");
+  if (confirm && row.mode === "in_page" && safeOrigin(row.base_url) !== inpageOrigin) throw new HttpError(403, "Confirm this action inside the connected system.");
+  const claim = await query("UPDATE pending_actions SET claimed_at = now() WHERE id = $1 AND conversation_id = $2 AND status = 'pending' AND claimed_at IS NULL RETURNING id", [actionId, conversationId]);
+  if (!claim.rowCount) throw new HttpError(409, "This request was already handled.");
   const integration = { ...row, id: row.integration_id };
-  const out = !tool ? { error: "failed", message: "This action is no longer available." } : (!conn && integration.mode !== "in_page") ? { error: "signed_out", message: "Sign in again to continue." } : await callTool(integration, tool, row.args, conn, conversationId);
-  const status = out.ok ? "done" : "failed";
+  let out = { error: "failed", message: "This action is no longer available." };
+  if (confirm && row.enabled) {
+    const current = (row.tools || []).find(t => t.name === row.tool && t.kind === "write");
+    const tool = row.tool_snapshot || current;
+    // A changed/deleted action cannot silently change what the customer approved.
+    if (current && tool && sameAction(current, tool) && (row.integration_revision == null || row.integration_revision === row.config_revision)) {
+      try { out = await callTool(integration, tool, row.args, await connection(row.integration_id, conversationId), conversationId); }
+      catch { out = { error: "failed", message: "The request did not complete. Verify the result in the connected system before trying again." }; }
+    }
+  }
+  const status = !confirm ? "cancelled" : out.ok ? "done" : "failed";
   await query("UPDATE pending_actions SET status = $2, result = $3, decided_at = now() WHERE id = $1", [actionId, status, out]);
-  return { status, name: row.name, summary: row.summary, integration_id: row.integration_id, result: out.ok ? out.result : null, error: out.ok ? null : out.message };
+  const outcome = { status, name: row.name, summary: row.summary, integration_id: row.integration_id, result: out.ok ? out.result : null, error: confirm && !out.ok ? out.message : null };
+  if (row.procedure_run_id) outcome.continuation = await resumeProcedure(row.procedure_run_id, outcome, inpageOrigin);
+  return outcome;
+}
+
+async function checkAgentNames(agentId, config, exclude = null) {
+  const existing = (await query("SELECT tools, procedures FROM integrations WHERE agent_id = $1 AND ($2::uuid IS NULL OR id <> $2)", [agentId, exclude])).rows;
+  const names = new Set(existing.flatMap(i => [...(i.tools || []), ...(i.procedures || [])].map(t => t.name)));
+  for (const t of [...config.tools, ...config.procedures]) if (names.has(t.name)) throw new HttpError(400, `An action named ${t.name} already belongs to this agent. Choose a unique name.`);
+}
+async function ensureServerContext(integration, conversationId) {
+  let conn = await connection(integration.id, conversationId); if (conn) return conn;
+  const context = {};
+  for (const step of integration.context || []) {
+    const res = await send(integration, request(integration, step.request, { context, now: new Date() }));
+    if (!res.ok) throw new HttpError(502, `Unable to load account context (HTTP ${res.status}).`);
+    context[step.name] = pick(res.data, step.pick) ?? null;
+  }
+  await query("INSERT INTO integration_connections (integration_id, conversation_id, context) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [integration.id, conversationId, context]);
+  return connection(integration.id, conversationId);
+}
+export function conditionMatches(condition, scope) {
+  if (!condition) return true;
+  const value = pick(scope, condition.path);
+  if (condition.op === "exists") return value !== null && value !== undefined && value !== "";
+  if (condition.op === "equals") return JSON.stringify(value) === JSON.stringify(condition.value);
+  if (condition.op === "not_equals") return JSON.stringify(value) !== JSON.stringify(condition.value);
+  if (condition.op === "greater_than") return typeof value === "number" && value > Number(condition.value);
+  if (condition.op === "less_than") return typeof value === "number" && value < Number(condition.value);
+  return false;
+}
+async function startProcedure({ conversationId, integration, procedure, args, inpageOrigin }) {
+  if (!conversationId) return { output: { error: "test_context_required", message: "Simulate this procedure in the integration test panel." } };
+  try { args = resolveInputs(procedure, args); } catch (e) { return { output: { error: "invalid_inputs", message: e.message } }; }
+  if (integration.mode === "in_page") {
+    if (!inpageOrigin || safeOrigin(integration.base_url) !== inpageOrigin) return {output:{error:"not_in_app",message:"Open the chat inside the connected system to run this procedure."}};
+    await ensureInPageContext(integration,conversationId);
+  } else if (["none","api_key"].includes(integration.auth?.type)) await ensureServerContext(integration,conversationId);
+  else if (!(await connection(integration.id,conversationId))) return {output:{error:"not_signed_in",message:"Sign in before starting this procedure."},card:{type:"connect",integration_id:integration.id,name:integration.name}};
+  const row = (await query("INSERT INTO procedure_runs (conversation_id, integration_id, definition, args) VALUES ($1,$2,$3,$4) RETURNING *", [conversationId, integration.id, { procedure, tools: integration.tools, revision: integration.config_revision }, args])).rows[0];
+  return advanceProcedure(row, integration, inpageOrigin);
+}
+async function saveRun(run, status) {
+  run.status = status;
+  await query("UPDATE procedure_runs SET results=$2, trace=$3, step_index=$4, status=$5, updated_at=now() WHERE id=$1", [run.id, run.results, JSON.stringify(run.trace), run.step_index, status]);
+}
+async function advanceProcedure(run, integration, inpageOrigin) {
+  if (run.definition.revision !== integration.config_revision) {
+    await saveRun(run, "failed"); return { output: { error: "configuration_changed", message: "The connection changed. Start the procedure again." } };
+  }
+  const p = run.definition.procedure;
+  for (; run.step_index < p.steps.length; run.step_index++) {
+    const step = p.steps[run.step_index]; const scope = { args: run.args, steps: run.results, context: (await connection(integration.id,run.conversation_id))?.context || {}, now: new Date() };
+    if (!conditionMatches(step.condition, scope)) {
+      run.trace.push({ step: step.id, status: step.kind === "check" ? "failed" : "skipped" });
+      if (step.kind === "check") { await saveRun(run, "failed"); return { output: { error:"condition_failed", message:step.message || "The procedure's requirements were not met.", trace:run.trace } }; }
+      continue;
+    }
+    if (step.kind === "check") { run.trace.push({ step:step.id, status:"passed" }); continue; }
+    const tool = run.definition.tools.find(t => t.name === step.tool);
+    const current = integration.tools.find(t => t.name === step.tool);
+    if (!tool || !sameAction(tool, current)) { await saveRun(run, "failed"); return { output: { error:"configuration_changed", message:"The action changed. Start the procedure again." } }; }
+    let result;
+    try { result = await runTool({ conversationId:run.conversation_id, integration, tool, args:render(step.args, scope), inpageOrigin, steps:run.results }); }
+    catch { result = { output: { error:"failed", message:"The action did not complete. Check the connected system before retrying." } }; }
+    if (result.card?.type === "confirm") {
+      await query("UPDATE pending_actions SET procedure_run_id=$2 WHERE id=$1", [result.card.action_id,run.id]);
+      run.trace.push({step:step.id,status:"waiting_for_confirmation"}); await saveRun(run,"waiting"); return result;
+    }
+    if (result.card || result.output?.error) { run.trace.push({step:step.id,status:"failed"}); await saveRun(run,"failed"); return result; }
+    run.results[step.id] = result.output; run.trace.push({step:step.id,status:"completed"});
+    await saveRun(run,"running");
+  }
+  await saveRun(run,"completed"); return { output:{ status:"completed", results:run.results, trace:run.trace } };
+}
+async function resumeProcedure(id, outcome, inpageOrigin) {
+  const run = (await query("UPDATE procedure_runs SET status='running' WHERE id=$1 AND status='waiting' RETURNING *", [id])).rows[0];
+  if (!run) return null;
+  if (outcome.status !== "done") { await saveRun(run,outcome.status === "cancelled" ? "cancelled" : "failed"); return {output:{status:run.status}}; }
+  const step = run.definition.procedure.steps[run.step_index]; run.results[step.id] = outcome.result;
+  run.trace.push({step:step.id,status:"completed"}); run.step_index++;
+  const integration = (await query("SELECT * FROM integrations WHERE id=$1 AND enabled", [run.integration_id])).rows[0];
+  if (!integration) { await saveRun(run,"failed"); return {output:{error:"disabled",message:"The integration was turned off."}}; }
+  return advanceProcedure(run,integration,inpageOrigin);
+}
+
+/** Deterministic simulation: never calls a system, including for write steps. */
+export function simulateProcedure({procedure, tools, args, context, mocks}) {
+  validateDefinitions({tools,procedures:[procedure]}); args = resolveInputs(procedure,args);
+  const results={}, trace=[];
+  for (const step of procedure.steps) {
+    const scope={args,context,steps:results,now:new Date()};
+    if (!conditionMatches(step.condition,scope)) { trace.push({step:step.id,status:step.kind === "check" ? "failed":"skipped"}); if(step.kind === "check") return {ok:false,trace,message:step.message || "Condition not met"}; continue; }
+    if(step.kind === "check") { trace.push({step:step.id,status:"passed"}); continue; }
+    const tool=tools.find(t=>t.name===step.tool);
+    const inputs=resolveInputs(tool,render(step.args,scope),context,results);
+    if (!(step.id in mocks)) return {ok:false,trace,message:`Add a mock response for step ${step.id}.`};
+    const mock=mocks[step.id];
+    if (mock?.error) {trace.push({step:step.id,status:"failed",error:mock.error});return {ok:false,trace};}
+    results[step.id]=readResponse(tool.response,mock,{...scope,args:inputs});
+    trace.push({step:step.id,status:"simulated",confirmation_required:tool.kind === "write",result:results[step.id]});
+  }
+  return {ok:true,results,trace,mode:"mock"};
+}
+
+function sameAction(a, b) {
+  if (!a || !b) return false;
+  const { modelInput: _a, ...left } = a; const { modelInput: _b, ...right } = b;
+  return isDeepStrictEqual(left, right);
 }

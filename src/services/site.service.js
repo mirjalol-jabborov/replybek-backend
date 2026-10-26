@@ -70,7 +70,8 @@ export async function previewSite(input, pageLimit) {
 /** Fetches one page and extracts its main text. Never throws: failures come back as { ok: false }. */
 async function fetchPage(url, timeoutMs = 10000) {
   try {
-    const res = await safeFetch(url, { timeoutMs });
+    // Pages heavy with inline CSS or scripts are read up to 10 MB rather than skipped.
+    const res = await safeFetch(url, { timeoutMs, maxBytes: 10 * 1024 * 1024, truncate: true });
     if (res.status >= 500 || res.status === 429) return { url, ok: false, retry: true, error: `The page returned “${res.status}”.` };
     if (res.status >= 400) return { url, ok: false, error: `The page returned “${res.status}”.` };
     if (!/text\/html|text\/plain|application\/xhtml/.test(res.type)) return { url, ok: false, error: "Not a web page." };

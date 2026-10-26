@@ -1,9 +1,9 @@
 import crypto from "crypto";
-import fs from "fs/promises";
 import { query, tx } from "../db.js";
 import { ai } from "../ai.js";
 import { HttpError } from "../lib/http.js";
 import { fileToSections } from "../lib/extract.js";
+import { getFile } from "../lib/storage.js";
 import { chunkSections, toVector } from "../lib/chunk.js";
 import { stripBoilerplate } from "../lib/boilerplate.js";
 import { inPaths } from "../lib/sitemap.js";
@@ -33,9 +33,8 @@ async function ingestDocument(source) {
   if (source.type === "qa") {
     sections = source.qa.map((p) => ({ heading: `Q: ${p.q}`, text: `Q: ${p.q}\nA: ${p.a}`, whole: true }));
   } else {
-    const buffer = await fs.readFile(source.file_path).catch(() => {
-      throw userError("The uploaded file is missing. Upload it again.");
-    });
+    const buffer = await getFile(source.file_path);
+    if (!buffer) throw userError("The uploaded file is missing. Upload it again.");
     try {
       ({ sections, pages } = await fileToSections(buffer, source.name));
     } catch (e) {

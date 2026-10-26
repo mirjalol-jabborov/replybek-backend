@@ -1,16 +1,15 @@
-import fs from "fs/promises";
 import path from "path";
 import { query, tx } from "../db.js";
 import { notFound, HttpError } from "../lib/http.js";
 import { normalizeUrl, assertPublicHost } from "../lib/safeFetch.js";
 import { checkFileSignature } from "../lib/extract.js";
+import { putFile, removeFile } from "../lib/storage.js";
 import { enqueue } from "./jobs.service.js";
 import { previewSite, defaultPaths } from "./site.service.js";
-import { PLANS } from "./workspaces.service.js";
+import { PLANS, assertRoomFor } from "./workspaces.service.js";
 import { logActivity } from "./activity.service.js";
 
 const PUBLIC = "id, agent_id, type, name, url, include_linked, mode, include_paths, discovery, mime, bytes, qa, status, error, pages, pages_failed, pages_over_limit, progress, syncing, sync_interval_days, last_synced_at, next_sync_at, chunk_count, created_at, updated_at";
-const uploadDir = () => path.resolve(process.env.UPLOAD_DIR || "./data/uploads");
 
 export async function listSources(workspaceId, agentId) {
   const { rows } = await query(`SELECT ${PUBLIC} FROM sources WHERE workspace_id = $1 AND agent_id = $2 ORDER BY created_at`, [workspaceId, agentId]);
@@ -35,6 +34,7 @@ export async function getSource(workspaceId, sourceId) {
 }
 
 async function create(agent, user, fields) {
+  await assertRoomFor(agent.workspace_id, "sources");
   return tx(async (c) => {
     const { rows } = await c.query(
       `INSERT INTO sources (workspace_id, agent_id, type, name, url, include_linked, mode, include_paths, sync_interval_days, mime, bytes, qa, created_by)
@@ -92,11 +92,9 @@ export async function addFile(agent, user, file) {
   if (!/\.(pdf|docx|txt|md|csv)$/i.test(name)) throw new HttpError(415, "Upload a PDF, DOCX, TXT, MD or CSV file.");
   checkFileSignature(file.buffer, name);
   const source = await create(agent, user, { type: "file", name, mime: file.mimetype, bytes: file.size });
-  const dir = path.join(uploadDir(), agent.workspace_id);
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, `${source.id}${path.extname(name).toLowerCase()}`);
-  await fs.writeFile(filePath, file.buffer);
-  await query("UPDATE sources SET file_path = $2 WHERE id = $1", [source.id, filePath]);
+  const key = `${agent.workspace_id}/${source.id}${path.extname(name).toLowerCase()}`;
+  await putFile(key, file.buffer, file.mimetype);
+  await query("UPDATE sources SET file_path = $2 WHERE id = $1", [source.id, key]);
   await logActivity(agent.workspace_id, user.id, "{actor} uploaded “{name}”", { actor: user.name, name }, agent.name);
   return source;
 }
@@ -151,7 +149,7 @@ export async function retrySource(workspaceId, sourceId) {
 export async function removeSource(workspaceId, sourceId, user) {
   const { rows } = await query("DELETE FROM sources WHERE id = $1 AND workspace_id = $2 RETURNING name, file_path", [sourceId, workspaceId]);
   if (!rows[0]) throw notFound("Source not found");
-  if (rows[0].file_path) await fs.rm(rows[0].file_path, { force: true });
+  if (rows[0].file_path) await removeFile(rows[0].file_path);
   await logActivity(workspaceId, user.id, "{actor} removed “{name}”", { actor: user.name, name: rows[0].name });
 }
 

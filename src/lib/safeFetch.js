@@ -53,8 +53,12 @@ export function normalizeUrl(input) {
 
 export const USER_AGENT = "ReplybekBot/0.1 (knowledge import)";
 
-/** GET with redirects checked hop by hop, a timeout and a size cap. Returns { url, status, type, body }. */
-export async function safeFetch(input, { maxBytes = 3 * 1024 * 1024, timeoutMs = 10000 } = {}) {
+/**
+ * GET with redirects checked hop by hop, a timeout and a size cap. Returns { url, status, type, body, truncated }.
+ * With `truncate`, a bigger response is cut at `maxBytes` instead of refused (HTML pages heavy with inline
+ * CSS or scripts still have their text, and their <head> comes first).
+ */
+export async function safeFetch(input, { maxBytes = 3 * 1024 * 1024, timeoutMs = 10000, truncate = false } = {}) {
   let url = normalizeUrl(String(input));
   for (let hop = 0; hop < 5; hop++) {
     await assertPublicHost(url.hostname);
@@ -65,12 +69,18 @@ export async function safeFetch(input, { maxBytes = 3 * 1024 * 1024, timeoutMs =
     }
     const chunks = [];
     let size = 0;
+    let truncated = false;
     for await (const chunk of res.body || []) {
+      if (size + chunk.length > maxBytes) {
+        if (!truncate) throw new HttpError(400, `That page is larger than Replybek can import (${Math.round(maxBytes / 1024 / 1024) || 1} MB).`);
+        chunks.push(chunk.subarray(0, maxBytes - size));
+        truncated = true;
+        break; // leaving the loop cancels the rest of the download
+      }
       size += chunk.length;
-      if (size > maxBytes) throw new HttpError(400, "That page is larger than Replybek can import (3 MB).");
       chunks.push(chunk);
     }
-    return { url: url.href, status: res.status, type: res.headers.get("content-type") || "", body: Buffer.concat(chunks) };
+    return { url: url.href, status: res.status, type: res.headers.get("content-type") || "", body: Buffer.concat(chunks), truncated };
   }
   throw new HttpError(400, "That address redirects too many times.");
 }

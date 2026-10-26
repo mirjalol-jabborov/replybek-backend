@@ -57,3 +57,24 @@ test("dashboard writes must be JSON (cross-site form posts are refused)", async 
   });
   assert.equal(r.status, 415);
 });
+
+test("people can set their own name and photo; teammates see the photo", async () => {
+  const { b, ws } = await owner();
+  const photo = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==";
+  const r = await b.call("PATCH", "/auth/me", { name: "Alex M.", avatar: photo });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.user.name, "Alex M.");
+  assert.equal(r.body.user.avatar, photo);
+  assert.equal((await b.call("GET", "/auth/me")).body.user.avatar, photo);
+  assert.equal((await b.call("GET", `/w/${ws.id}/members`)).body[0].avatar, photo);
+
+  // Only the photo changes when only the photo is sent; "" removes it.
+  assert.equal((await b.call("PATCH", "/auth/me", { avatar: "" })).body.user.name, "Alex M.");
+  assert.equal((await b.call("GET", "/auth/me")).body.user.avatar, null);
+
+  for (const avatar of ["data:image/svg+xml;base64,PHN2Zz4=", "javascript:alert(1)", "x".repeat(200001)]) {
+    assert.equal((await b.call("PATCH", "/auth/me", { avatar })).status, 400);
+  }
+  assert.equal((await b.call("PATCH", "/auth/me", {})).status, 400);
+  assert.equal((await browser().call("PATCH", "/auth/me", { name: "Someone" })).status, 401);
+});

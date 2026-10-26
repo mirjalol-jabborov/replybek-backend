@@ -2,6 +2,7 @@ import { query, tx } from "../db.js";
 import { notFound, HttpError } from "../lib/http.js";
 import { summarize } from "./answer.service.js";
 import { logActivity } from "./activity.service.js";
+import { ATTACHMENTS_SQL, checkFile, storeAttachment } from "./attachments.service.js";
 
 const VIEWS = {
   all: "TRUE",
@@ -26,7 +27,8 @@ export async function listConversations(workspaceId, userId, { view = "all", age
   }
   const { rows } = await query(
     `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.visitor, c.subject, c.unread, c.created_at, c.last_message_at,
-            (SELECT json_build_object('role', m.role, 'body', m.body, 'author_id', m.author_id) FROM messages m
+            (SELECT json_build_object('role', m.role, 'body', m.body, 'author_id', m.author_id,
+                    'files', (SELECT count(*) FROM attachments a WHERE a.message_id = m.id)) FROM messages m
               WHERE m.conversation_id = c.id AND m.role NOT IN ('system', 'note') ORDER BY m.seq DESC LIMIT 1) AS last_message
        FROM conversations c WHERE ${where.join(" AND ")}
       ORDER BY c.last_message_at DESC LIMIT 200`,
@@ -43,7 +45,7 @@ async function load(workspaceId, id) {
 }
 
 const messagesOf = async (id) =>
-  (await query("SELECT id, role, author_id, body, kind, sources, created_at FROM messages WHERE conversation_id = $1 ORDER BY seq", [id])).rows;
+  (await query(`SELECT m.id, m.role, m.author_id, m.body, m.kind, m.sources, m.created_at, ${ATTACHMENTS_SQL} FROM messages m WHERE m.conversation_id = $1 ORDER BY m.seq`, [id])).rows;
 
 export async function getConversation(workspaceId, id, { markRead = true } = {}) {
   const c = await load(workspaceId, id);
@@ -52,12 +54,24 @@ export async function getConversation(workspaceId, id, { markRead = true } = {})
   return { ...rest, unread: markRead ? false : c.unread, messages: await messagesOf(id) };
 }
 
+/** Adds a message and returns its id. */
 export async function addMessage(db, conv, { role, body, author_id = null, kind = null, sources = null, card = null, unread }) {
-  await db.query(
-    "INSERT INTO messages (conversation_id, workspace_id, role, author_id, body, kind, sources, card) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+  const { rows } = await db.query(
+    "INSERT INTO messages (conversation_id, workspace_id, role, author_id, body, kind, sources, card) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     [conv.id, conv.workspace_id, role, author_id, body, kind, sources ? JSON.stringify(sources) : null, card]
   );
   await db.query(`UPDATE conversations SET last_message_at = now()${unread === undefined ? "" : ", unread = " + (unread ? "true" : "false")} WHERE id = $1`, [conv.id]);
+  return rows[0].id;
+}
+
+/** Adds a message with an optional file in one transaction, so nobody sees one without the other. */
+export async function addMessageWithFile(conv, message, file) {
+  const checked = file ? checkFile(file) : null;
+  return tx(async (c) => {
+    const id = await addMessage(c, conv, message);
+    if (file) await storeAttachment(c, conv, id, file, checked);
+    return id;
+  });
 }
 
 const event = (db, conv, text) => addMessage(db, conv, { role: "system", body: text });
@@ -83,16 +97,18 @@ export async function handBack(workspaceId, id, user) {
   return getConversation(workspaceId, id);
 }
 
-export async function reply(workspaceId, id, user, text) {
+export async function reply(workspaceId, id, user, text, file = null) {
   const conv = await load(workspaceId, id);
   if (conv.status !== "human" || conv.assignee_id !== user.id) throw new HttpError(409, "Take over the conversation before replying.");
-  await addMessage({ query }, conv, { role: "human", body: text, author_id: user.id });
+  if (!text && !file) throw new HttpError(400, "Write a reply or attach a file.");
+  await addMessageWithFile(conv, { role: "human", body: text, author_id: user.id }, file);
   return getConversation(workspaceId, id);
 }
 
-export async function addNote(workspaceId, id, user, text) {
+export async function addNote(workspaceId, id, user, text, file = null) {
   const conv = await load(workspaceId, id);
-  await addMessage({ query }, conv, { role: "note", body: text, author_id: user.id });
+  if (!text && !file) throw new HttpError(400, "Write a note or attach a file.");
+  await addMessageWithFile(conv, { role: "note", body: text, author_id: user.id }, file);
   return getConversation(workspaceId, id);
 }
 

@@ -26,12 +26,18 @@ export async function requireUser(req, res, next) {
     const token = parse(req.headers.cookie || "")[COOKIE];
     if (!token) throw new HttpError(401, "Sign in required");
     const { rows } = await query(
-      `SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+      `SELECT u.id, u.name, u.email, u.avatar, u.lang FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token_hash = $1 AND s.expires_at > now()`,
       [hash(token)]
     );
     if (!rows[0]) throw new HttpError(401, "Your session expired. Sign in again.");
-    req.user = rows[0];
+    const { lang, ...user } = rows[0];
+    req.user = user;
+    // The dashboard sends its language with every request; emails to this person follow it.
+    // Only an explicit en/uz/ru counts ("*" or another language says nothing about the dashboard).
+    const asked = String(req.headers["accept-language"] || "").toLowerCase().split(/[-,;]/)[0];
+    const now = ["en", "uz", "ru"].includes(asked) ? asked : null;
+    if (now && now !== lang) await query("UPDATE users SET lang = $2 WHERE id = $1", [user.id, now]);
     next();
   } catch (e) {
     next(e);

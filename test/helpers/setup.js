@@ -8,10 +8,12 @@ import { after, before } from "node:test";
 process.env.NODE_ENV = "test";
 process.env.ALLOW_PRIVATE_URLS = "true"; // tests crawl a local server
 process.env.UPLOAD_DIR = path.join(os.tmpdir(), `replybek-test-uploads-${process.pid}`);
+process.env.S3_BUCKET = ""; // files go to UPLOAD_DIR, even when .env names a bucket
 
 const { default: app } = await import("../../src/app.js");
 const { query, closeDb } = await import("../../src/db.js");
 const { drainJobs } = await import("../../src/services/jobs.service.js");
+const { stopEvents } = await import("../../src/services/events.service.js");
 const { dbConfig } = await import("../../src/dbConfig.js");
 
 let server;
@@ -20,12 +22,13 @@ export { query, drainJobs };
 
 before(async () => {
   assert.equal(dbConfig().database, "replybek_test", "tests only run against the replybek_test database");
-  await query("TRUNCATE users, workspaces, jobs CASCADE");
+  await query("TRUNCATE users, workspaces, jobs, billing_events CASCADE");
   await new Promise((done) => (server = app.listen(0, "127.0.0.1", done)));
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
 after(async () => {
+  await stopEvents();
   await new Promise((done) => server.close(done));
   await closeDb();
 });

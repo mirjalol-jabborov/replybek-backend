@@ -15,7 +15,7 @@ export function pick(value, path) {
   if (!path) return value;
   let cur = value;
   for (const part of String(path).match(/[^.[\]]+/g) || []) {
-    if (cur == null) return undefined;
+    if (cur == null || ["__proto__", "constructor", "prototype"].includes(part)) return undefined;
     cur = cur[/^\d+$/.test(part) ? Number(part) : part];
   }
   return cur;
@@ -49,6 +49,7 @@ function evaluate(expr, scope) {
     const arg = rest.join(":").trim();
     if (name === "default") value = value == null || value === "" ? arg : value;
     else if (name === "date") value = value == null ? null : formatDate(value, arg || "DD.MM.YYYY");
+    else if (name === "url") value = value == null ? "" : encodeURIComponent(String(value));
     else if (name === "number") value = value == null || value === "" ? null : Number(value);
     else if (name === "string") value = value == null ? "" : String(value);
   }

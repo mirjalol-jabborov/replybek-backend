@@ -1,6 +1,7 @@
-# Local development database only: Postgres 16 with the pgvector extension.
-#   npm run db:up    starts it on localhost:54329
-#   npm run db:down  stops it (the data stays in the named volume)
+# Local development services only: Postgres 16 with pgvector, and MinIO for uploaded files.
+#   npm run db:up    starts them: Postgres on localhost:54329, MinIO on localhost:59000
+#                    (its console on localhost:59001, user/password replybek / replybek-dev)
+#   npm run db:down  stops them (the data stays in the named volumes)
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -15,5 +16,20 @@ services:
     volumes:
       - replybek-db:/var/lib/postgresql/data
       - ./sql/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+  minio:
+    # MinIO no longer publishes images; pgsty/minio is the maintained community build of it.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: replybek-minio
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: replybek
+      MINIO_ROOT_PASSWORD: replybek-dev
+    ports:
+      - "127.0.0.1:59000:9000"
+      - "127.0.0.1:59001:9001"
+    volumes:
+      - replybek-files:/data
 volumes:
   replybek-db:
+  replybek-files:
