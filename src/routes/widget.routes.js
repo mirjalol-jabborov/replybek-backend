@@ -15,8 +15,19 @@ const router = Router({ mergeParams: true });
 const perIP = rateLimit({ windowMs: 60 * 1000, max: 40, key: clientIP, message: "You're sending messages too quickly. Wait a moment." });
 const startsPerIP = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, key: clientIP, message: "Too many new chats from this network. Try again later." });
 
+// The website the request comes from. Browsers leave Origin off same-site GET requests (the chat on
+// the dashboard's own domain); the Referer still names the page then.
+function pageOrigin(req) {
+  if (req.headers.origin) return req.headers.origin;
+  try {
+    return new URL(req.headers.referer).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 router.use(wrap(async (req, res, next) => {
-  req.agent = await widgetAgent(req.params.key, req.headers.origin);
+  req.agent = await widgetAgent(req.params.key, pageOrigin(req));
   next();
 }));
 

@@ -49,6 +49,11 @@ test("allowed websites are enforced", async () => {
   await b.call("PATCH", `${w}/agents/${agent.id}`, { allowed_origins: ["https://northstar.example"] });
   assert.equal((await visitor(agent.public_key, "https://evil.example").start()).status, 403);
   assert.equal((await visitor(agent.public_key).start()).status, 201);
+  // A same-site page's GET comes without Origin: its Referer decides.
+  const config = (headers) => browser().call("GET", `/widget/${agent.public_key}/config`, null, headers);
+  assert.equal((await config({ Referer: "https://northstar.example/help/faq" })).status, 200);
+  assert.equal((await config({ Referer: "https://evil.example/" })).status, 403);
+  assert.equal((await config({})).status, 403, "no Origin and no Referer: not this website");
 });
 
 test("visitor → AI answer → handoff → takeover → human reply, with notes kept internal", async () => {
