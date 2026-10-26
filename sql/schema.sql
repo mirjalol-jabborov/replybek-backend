@@ -470,6 +470,10 @@ CREATE INDEX IF NOT EXISTS attachments_message ON attachments (message_id);
 -- answers in the conversation still know it. NULL: not read yet, or unreadable.
 ALTER TABLE attachments ADD COLUMN IF NOT EXISTS ai_text TEXT;
 
+-- The welcome message in other languages ({"uz": …, "ru": …, "en": …}). The widget shows the one for
+-- the page's language, and `welcome` when there's none.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS welcome_i18n JSONB NOT NULL DEFAULT '{}'::jsonb;
+
 -- ───── Live updates ─────
 -- Every change to a conversation, its messages or its tool calls is announced on the channel
 -- replybek_events as {"w": workspace, "c": conversation, "t": table, "r": message role}.

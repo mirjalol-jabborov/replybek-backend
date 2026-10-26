@@ -37,7 +37,7 @@ export async function widgetAgent(publicKey, origin) {
 export const widgetConfig = (agent, language = "en") => ({
   name: agent.name,
   display_name: agent.widget.display_name || agent.workspace_name,
-  welcome: agent.welcome,
+  welcome: agent.welcome_i18n?.[language] || agent.welcome,
   suggestions: savedQuestions(agent, language),
   accent: agent.widget.accent || "#111215",
   logo: agent.widget.logo || null,

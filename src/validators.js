@@ -78,6 +78,8 @@ export const agentUpdateSchema = z.object({
   suggested_questions: z.array(text(180)).max(5).optional(),
   suggested_questions_i18n: z.object({ en: z.array(text(180)).max(5).optional(), uz: z.array(text(180)).max(5).optional(), ru: z.array(text(180)).max(5).optional() }).strict().optional(),
   suggestion_default_language: z.enum(["en", "uz", "ru"]).optional(),
+  // Empty means "show the main welcome message" for that language.
+  welcome_i18n: z.object({ en: z.string().trim().max(500).optional(), uz: z.string().trim().max(500).optional(), ru: z.string().trim().max(500).optional() }).strict().optional(),
   allowed_origins: z.array(z.string().trim().url().max(200)).max(20).optional(),
   widget: z
     .object({

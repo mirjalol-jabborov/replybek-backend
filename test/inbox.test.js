@@ -43,6 +43,19 @@ test("draft agents aren't reachable from the widget; published ones are", async 
   assert.match(cfg.body.welcome, /Store Support/);
 });
 
+test("the welcome message follows the visitor's language, with the main one as the fallback", async () => {
+  const { b, w, agent } = await liveAgent();
+  await b.call("POST", `${w}/agents/${agent.id}/publish`);
+  const saved = await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Hi! How can I help?", welcome_i18n: { uz: "Salom! Qanday yordam bera olaman?", ru: "" } });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const welcome = async (lang) => (await browser().call("GET", `/widget/${agent.public_key}/config?lang=${lang}`, null, { Origin: "https://northstar.example" })).body.welcome;
+  assert.equal(await welcome("uz"), "Salom! Qanday yordam bera olaman?");
+  assert.equal(await welcome("ru"), "Hi! How can I help?", "an empty translation shows the main message");
+  assert.equal(await welcome("en"), "Hi! How can I help?");
+  assert.deepEqual((await b.call("GET", `${w}/agents`)).body.find((a) => a.id === agent.id).welcome_i18n, { uz: "Salom! Qanday yordam bera olaman?", ru: "" });
+  assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome_i18n: { de: "Hallo" } })).status, 400, "only Uzbek, Russian and English");
+});
+
 test("allowed websites are enforced", async () => {
   const { b, w, agent } = await liveAgent();
   await b.call("POST", `${w}/agents/${agent.id}/publish`);

@@ -3,7 +3,7 @@ import { notFound } from "../lib/http.js";
 import { logActivity } from "./activity.service.js";
 import { assertRoomFor } from "./workspaces.service.js";
 
-const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins", "suggested_questions", "suggested_questions_i18n", "suggestion_default_language"];
+const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins", "suggested_questions", "suggested_questions_i18n", "suggestion_default_language", "welcome_i18n"];
 
 export async function listAgents(workspaceId) {
   const { rows } = await query(
@@ -55,7 +55,7 @@ export async function updateAgent(workspaceId, agentId, input) {
   const values = [agentId, workspaceId];
   for (const f of FIELDS) {
     if (input[f] !== undefined) {
-      values.push(["suggested_questions", "suggested_questions_i18n"].includes(f) ? JSON.stringify(input[f]) : input[f]);
+      values.push(["suggested_questions", "suggested_questions_i18n", "welcome_i18n"].includes(f) ? JSON.stringify(input[f]) : input[f]);
       sets.push(`${f} = $${values.length}`);
     }
   }
