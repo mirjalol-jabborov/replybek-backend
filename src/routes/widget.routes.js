@@ -3,7 +3,7 @@ import { wrap } from "../lib/http.js";
 import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema } from "../validators.js";
 import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
 import { languageOf } from "../services/suggestions.service.js";
-import { widgetAgent, widgetConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees } from "../services/widget.service.js";
+import { widgetAgent, widgetConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation } from "../services/widget.service.js";
 import { stream } from "../services/events.service.js";
 import { acceptFile, visitorAttachment, sendAttachment } from "../services/attachments.service.js";
 
@@ -33,8 +33,9 @@ router.use(wrap(async (req, res, next) => {
 
 router.get("/config", (req, res) => res.json(widgetConfig(req.agent, languageOf(req.query.lang || req.headers["accept-language"]))));
 router.post("/conversations", startsPerIP, validate(widgetStartSchema), wrap(async (req, res) => {
-  const visitor = { ...req.valid, user_agent: String(req.headers["user-agent"] || "").slice(0, 200) };
-  res.status(201).json({ ...(await startConversation(req.agent, visitor)), config: widgetConfig(req.agent, languageOf(req.query.lang || req.headers["accept-language"])) });
+  const { previous, ...given } = req.valid;
+  const visitor = { ...given, user_agent: String(req.headers["user-agent"] || "").slice(0, 200) };
+  res.status(201).json({ ...(await startConversation(req.agent, visitor, previous)), config: widgetConfig(req.agent, languageOf(req.query.lang || req.headers["accept-language"])) });
 }));
 const token = (req) => req.headers["x-visitor-token"];
 const inpage = (req) => { const o = req.headers["x-replybek-inpage"]; return typeof o === "string" && /^https?:\/\/[^/]+$/.test(o) ? o : null; };
@@ -59,6 +60,16 @@ router.get("/conversations/:cid/messages", perIP, wrap(async (req, res) => {
   const after = typeof req.query.after === "string" && !Number.isNaN(Date.parse(req.query.after)) ? req.query.after : null;
   res.json(await pollMessages(req.agent, req.params.cid, token(req), after));
 }));
+// Presence: a check-in every 30 s while the page is open, a typing signal every few seconds while
+// the visitor writes, and "left" when they start a new chat. Their own limit, so they never use up
+// the one for messages.
+const signalsPerIP = rateLimit({ windowMs: 60 * 1000, max: 90, key: clientIP, message: "Too many requests. Wait a moment." });
+router.post("/conversations/:cid/presence", signalsPerIP, wrap(async (req, res) => {
+  await visitorHere(req.agent, req.params.cid, token(req));
+  res.json({ ok: true });
+}));
+router.post("/conversations/:cid/typing", signalsPerIP, wrap(async (req, res) => res.json(await visitorTyping(req.agent, req.params.cid, token(req)))));
+router.post("/conversations/:cid/leave", signalsPerIP, wrap(async (req, res) => res.json(await leaveConversation(req.agent, req.params.cid, token(req)))));
 router.post("/conversations/:cid/handoff", perIP, wrap(async (req, res) => {
   res.json(await requestHuman(req.agent, req.params.cid, token(req)));
 }));

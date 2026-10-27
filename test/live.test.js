@@ -119,3 +119,73 @@ test("the inbox hears new chats in its own workspace and nothing from others", a
     theirs.close();
   }
 });
+
+// ───── Typing and presence ─────
+
+async function visitorChat(agent, extra = {}) {
+  const site = { Origin: "https://northstar.example" };
+  const v = browser();
+  const start = await v.call("POST", `/widget/${agent.public_key}/conversations`, { page: "/", ...extra }, site);
+  const { conversation_id: id, visitor_token: token } = start.body;
+  const as = { ...site, "X-Visitor-Token": token };
+  const post = (p, body) => v.call("POST", `/widget/${agent.public_key}/conversations/${id}${p}`, body, as);
+  return { id, token, as, post };
+}
+
+test("typing shows on the other side at once, and only where it should", async () => {
+  const { b, w, agent, user } = await liveAgent();
+  const chat = await visitorChat(agent);
+  const dash = await openStream(`${w}/stream`, { Cookie: b.cookie });
+  await dash.next((e) => e.event === "ready");
+
+  // The visitor types: the team's open Inbox hears which conversation.
+  assert.equal((await chat.post("/typing")).status, 200);
+  const typing = await dash.next((e) => e.event === "typing");
+  assert.deepEqual(typing?.data, { c: chat.id, who: "visitor" });
+
+  // A teammate types: only once they're handling the chat, and only that visitor hears it.
+  const widget = await openStream(`/widget/${agent.public_key}/conversations/${chat.id}/stream`, chat.as);
+  await widget.next((e) => e.event === "ready");
+  assert.deepEqual((await b.call("POST", `${w}/conversations/${chat.id}/typing`)).body, { ok: false }, "the AI is handling it");
+  await chat.post("/handoff");
+  await b.call("POST", `${w}/conversations/${chat.id}/takeover`);
+  assert.deepEqual((await b.call("POST", `${w}/conversations/${chat.id}/typing`)).body, { ok: true });
+  const team = await widget.next((e) => e.event === "typing");
+  assert.deepEqual(team?.data, { who: "team", name: user.name.split(" ")[0] });
+
+  const other = await visitorChat(agent);
+  const elsewhere = await openStream(`/widget/${agent.public_key}/conversations/${other.id}/stream`, other.as);
+  await elsewhere.next((e) => e.event === "ready");
+  await b.call("POST", `${w}/conversations/${chat.id}/typing`);
+  assert.equal(await elsewhere.next((e) => e.event === "typing", 400), null, "another visitor doesn't hear it");
+  for (const s of [dash, widget, elsewhere]) s.close();
+});
+
+test("the team sees whether the visitor is still there, and follows them into a new chat", async () => {
+  const { b, w, agent } = await liveAgent();
+  const chat = await visitorChat(agent);
+  const seen = async (id) => (await b.call("GET", `${w}/conversations/${id}`)).body;
+  const first = await seen(chat.id);
+  assert.ok(first.visitor_seen_at, "starting the chat counts as being here");
+  assert.ok(Math.abs(Date.parse(first.server_now) - Date.parse(first.visitor_seen_at)) < 5000);
+  assert.equal((await chat.post("/presence")).status, 200);
+  const listed = (await b.call("GET", `${w}/conversations?view=all`)).body.find((c) => c.id === chat.id);
+  assert.ok(listed.visitor_seen_at && listed.server_now, "the list has it too");
+
+  // "Start a new chat": the old one says so, and the two are linked.
+  await chat.post("/messages", { text: "Hello" });
+  assert.equal((await chat.post("/leave")).status, 200);
+  assert.equal((await chat.post("/leave")).status, 200, "leaving twice is fine");
+  const left = await seen(chat.id);
+  assert.ok(left.left_at);
+  assert.equal(left.messages.filter((m) => m.role === "system" && m.body === "Visitor started a new chat").length, 1);
+
+  const next = await visitorChat(agent, { previous: { id: chat.id, token: chat.token } });
+  assert.equal((await seen(next.id)).previous_id, chat.id);
+  assert.equal((await seen(chat.id)).continued_in, next.id);
+  const forged = await visitorChat(agent, { previous: { id: next.id, token: "not-the-real-token" } });
+  assert.equal((await seen(forged.id)).previous_id, null, "a chat is only linked with its own token");
+  assert.equal((await seen(next.id)).continued_in, null);
+  const site = { Origin: "https://northstar.example" };
+  assert.equal((await browser().call("POST", `/widget/${agent.public_key}/conversations/${chat.id}/presence`, null, { ...site, "X-Visitor-Token": "guess" })).status, 404);
+});

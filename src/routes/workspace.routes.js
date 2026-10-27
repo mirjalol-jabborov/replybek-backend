@@ -149,6 +149,7 @@ const withFile = (fn) => wrap(async (req, res) => res.json(await fn(req.workspac
 router.post("/conversations/:cid/reply", acceptFile, v.validate(v.replySchema), withFile(convs.reply));
 router.post("/conversations/:cid/note", acceptFile, v.validate(v.replySchema), withFile(convs.addNote));
 router.get("/files/:fid", wrap(async (req, res) => sendAttachment(res, await workspaceAttachment(req.workspace.id, req.params.fid))));
+router.post("/conversations/:cid/typing", wrap(async (req, res) => res.json(await convs.teamTyping(req.workspace.id, req.params.cid, req.user))));
 router.post("/conversations/:cid/resolve", action(convs.resolve));
 router.post("/conversations/:cid/reopen", action(convs.reopen));
 router.post("/conversations/:cid/assign", v.validate(v.assignSchema), wrap(async (req, res) => res.json(await convs.assign(req.workspace.id, req.params.cid, req.user, req.valid.user_id))));

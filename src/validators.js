@@ -128,6 +128,8 @@ export const widgetStartSchema = z.object({
   name: z.string().trim().max(80).optional(),
   email: z.string().trim().email().max(200).optional(),
   page: z.string().trim().max(500).optional(),
+  // The chat the visitor left with "Start a new chat", proven by its token.
+  previous: z.object({ id: z.string().uuid(), token: z.string().min(10).max(200) }).optional(),
 });
 export const widgetMessageSchema = z.object({ text: z.string().trim().max(2000).default("") });
 

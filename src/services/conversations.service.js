@@ -3,6 +3,7 @@ import { notFound, HttpError } from "../lib/http.js";
 import { summarize } from "./answer.service.js";
 import { logActivity } from "./activity.service.js";
 import { ATTACHMENTS_SQL, checkFile, storeAttachment } from "./attachments.service.js";
+import { signal } from "./events.service.js";
 
 const VIEWS = {
   all: "TRUE",
@@ -27,6 +28,7 @@ export async function listConversations(workspaceId, userId, { view = "all", age
   }
   const { rows } = await query(
     `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.visitor, c.subject, c.unread, c.created_at, c.last_message_at,
+            c.visitor_seen_at, c.left_at, c.continued_in, now() AS server_now,
             (SELECT json_build_object('role', m.role, 'body', m.body, 'author_id', m.author_id,
                     'files', (SELECT count(*) FROM attachments a WHERE a.message_id = m.id)) FROM messages m
               WHERE m.conversation_id = c.id AND m.role NOT IN ('system', 'note') ORDER BY m.seq DESC LIMIT 1) AS last_message
@@ -51,7 +53,16 @@ export async function getConversation(workspaceId, id, { markRead = true } = {})
   const c = await load(workspaceId, id);
   if (markRead && c.unread) await query("UPDATE conversations SET unread = false WHERE id = $1", [id]);
   const { visitor_token_hash, ...rest } = c;
-  return { ...rest, unread: markRead ? false : c.unread, messages: await messagesOf(id) };
+  // server_now: the clock "seen 20 s ago" is measured against, whatever the viewer's clock says.
+  return { ...rest, unread: markRead ? false : c.unread, server_now: new Date().toISOString(), messages: await messagesOf(id) };
+}
+
+/** A teammate is writing a reply: the visitor's chat shows "<name> is typing" for a few seconds. */
+export async function teamTyping(workspaceId, id, user) {
+  const c = await load(workspaceId, id);
+  if (c.status !== "human" || c.assignee_id !== user.id) return { ok: false };
+  await signal(`c:${c.id}`, "typing", { who: "team", name: String(user.name || "").split(/\s+/)[0] });
+  return { ok: true };
 }
 
 /** Adds a message and returns its id. */

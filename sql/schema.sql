@@ -474,6 +474,16 @@ ALTER TABLE attachments ADD COLUMN IF NOT EXISTS ai_text TEXT;
 -- the page's language, and `welcome` when there's none.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS welcome_i18n JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+-- ───── Is the visitor still there? ─────
+-- The widget checks in every 30 s while its page is open (and on every message and keystroke
+-- signal), so the Inbox can tell a visitor in the chat now from one who left. A visitor who starts
+-- a new chat leaves this one: left_at is set, continued_in points at the new conversation and the
+-- new one's previous_id back here.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS visitor_seen_at TIMESTAMPTZ;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS left_at TIMESTAMPTZ;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS continued_in UUID REFERENCES conversations(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS previous_id UUID REFERENCES conversations(id) ON DELETE SET NULL;
+
 -- ───── Live updates ─────
 -- Every change to a conversation, its messages or its tool calls is announced on the channel
 -- replybek_events as {"w": workspace, "c": conversation, "t": table, "r": message role}.

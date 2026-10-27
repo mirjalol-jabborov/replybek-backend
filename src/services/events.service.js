@@ -3,9 +3,12 @@
 // dashboards and widgets that have a stream open. An event only says which conversation changed;
 // screens then fetch it the usual way, with the usual permission checks. Screens keep a slow poll
 // as a fallback, so a dropped connection only makes updates slower, never lost.
+// Signals (someone is typing) are different: nothing is stored, the event carries what screens
+// show, and it goes out at once as a named event (`event: typing`).
 import { EventEmitter } from "node:events";
 import pkg from "pg";
 import { dbConfig } from "../dbConfig.js";
+import { query } from "../db.js";
 
 const CHANNEL = "replybek_events";
 const HEARTBEAT_MS = 25 * 1000;      // proxies (Cloudflare: 100 s) close connections that go quiet
@@ -30,6 +33,7 @@ async function connect() {
     } catch {
       return;
     }
+    if (e.s) return void bus.emit(e.k, e); // a signal, for one stream key
     if (e.w) bus.emit(`w:${e.w}`, e);
     if (e.c) bus.emit(`c:${e.c}`, e);
   });
@@ -120,6 +124,7 @@ export async function stream(req, res, keys, accept = () => true) {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
   const unsubscribe = subscribe(keys, (e) => {
+    if (e.s) return void res.write(`event: ${e.s}\ndata: ${JSON.stringify(e.d)}\n\n`);
     if (!e.resync && !accept(e)) return;
     if (e.resync) resync = true;
     else changed.add(e.c);
@@ -140,6 +145,14 @@ export async function stream(req, res, keys, accept = () => true) {
   res.on("close", close);
   await listen().catch(() => {});
   if (!res.writableEnded) res.write("event: ready\ndata: {}\n\n");
+}
+
+/**
+ * Sends a passing signal to the screens listening on `key` (`w:<workspace>` or `c:<conversation>`):
+ * they get `event: <name>` with `data`. Through Postgres, so it reaches every API process.
+ */
+export async function signal(key, name, data) {
+  await query("SELECT pg_notify($1, $2)", [CHANNEL, JSON.stringify({ s: name, k: key, d: data })]);
 }
 
 /** Whether someone has this workspace's dashboard open right now. */

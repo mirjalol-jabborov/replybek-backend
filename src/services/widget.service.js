@@ -13,6 +13,7 @@ const tellTeam = (conv) => notifyWaiting(conv).catch((e) => console.error(`Hando
 import { logActivity } from "./activity.service.js";
 import { savedQuestions } from "./suggestions.service.js";
 import { assertCanAnswer } from "./workspaces.service.js";
+import { signal } from "./events.service.js";
 
 const hash = (t) => crypto.createHash("sha256").update(t).digest("hex");
 // Visitors see their own messages, the AI's and teammates'. Never internal notes or system events.
@@ -45,13 +46,48 @@ export const widgetConfig = (agent, language = "en") => ({
   handoff: agent.handoff,
 });
 
-export async function startConversation(agent, visitor) {
+/**
+ * Starts a conversation. `previous` ({ id, token }) is the chat this visitor left with "Start a new
+ * chat": the two are linked, so the team can follow the visitor from one to the other.
+ */
+export async function startConversation(agent, visitor, previous = null) {
   const token = crypto.randomBytes(24).toString("base64url");
-  const { rows } = await query(
-    "INSERT INTO conversations (workspace_id, agent_id, visitor, visitor_token_hash, unread) VALUES ($1, $2, $3, $4, false) RETURNING id",
-    [agent.workspace_id, agent.id, visitor, hash(token)]
-  );
-  return { conversation_id: rows[0].id, visitor_token: token };
+  const before = previous ? await ownConversation(agent, previous.id, previous.token).catch(() => null) : null;
+  return tx(async (c) => {
+    const { rows } = await c.query(
+      "INSERT INTO conversations (workspace_id, agent_id, visitor, visitor_token_hash, unread, visitor_seen_at, previous_id) VALUES ($1, $2, $3, $4, false, now(), $5) RETURNING id",
+      [agent.workspace_id, agent.id, visitor, hash(token), before?.id || null]
+    );
+    if (before) await c.query("UPDATE conversations SET continued_in = $2, left_at = COALESCE(left_at, now()) WHERE id = $1", [before.id, rows[0].id]);
+    return { conversation_id: rows[0].id, visitor_token: token };
+  });
+}
+
+// ───── Is the visitor there? ─────
+
+/** The visitor's chat checks in: they're here. Written at most every 20 s. */
+export async function visitorHere(agent, convId, token) {
+  const conv = await ownConversation(agent, convId, token);
+  await query("UPDATE conversations SET visitor_seen_at = now() WHERE id = $1 AND (visitor_seen_at IS NULL OR visitor_seen_at < now() - interval '20 seconds')", [conv.id]);
+  return conv;
+}
+
+/** The visitor is typing: the team's open Inbox shows it for a few seconds. */
+export async function visitorTyping(agent, convId, token) {
+  const conv = await visitorHere(agent, convId, token);
+  await signal(`w:${conv.workspace_id}`, "typing", { c: conv.id, who: "visitor" });
+  return { ok: true };
+}
+
+/** The visitor pressed "Start a new chat": this one is left behind, and the team sees so. */
+export async function leaveConversation(agent, convId, token) {
+  const conv = await ownConversation(agent, convId, token);
+  if (conv.left_at) return { ok: true };
+  await tx(async (c) => {
+    await c.query("UPDATE conversations SET left_at = now() WHERE id = $1", [conv.id]);
+    await addMessage(c, conv, { role: "system", body: "Visitor started a new chat" });
+  });
+  return { ok: true };
 }
 
 export async function ownConversation(agent, id, token) {
@@ -87,6 +123,7 @@ export async function postVisitorMessage(agent, convId, token, text, inpageOrigi
     conv = { ...conv, status: "ai" };
   }
   const messageId = await addMessageWithFile(conv, { role: "visitor", body: text, unread: conv.status !== "ai" }, file);
+  await query("UPDATE conversations SET visitor_seen_at = now() WHERE id = $1", [conv.id]);
   const subject = text || checked?.name || "";
   if (firstMessage) await query("UPDATE conversations SET subject = $2 WHERE id = $1", [conv.id, subject.length > 70 ? subject.slice(0, 67) + "…" : subject]);
 
