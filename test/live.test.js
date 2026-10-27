@@ -189,3 +189,16 @@ test("the team sees whether the visitor is still there, and follows them into a 
   const site = { Origin: "https://northstar.example" };
   assert.equal((await browser().call("POST", `/widget/${agent.public_key}/conversations/${chat.id}/presence`, null, { ...site, "X-Visitor-Token": "guess" })).status, 404);
 });
+
+test("a signed-in page tells the chat who the visitor is", async () => {
+  const { b, w, agent } = await liveAgent();
+  const chat = await visitorChat(agent);
+  assert.equal((await chat.post("/visitor", { name: "Dilnoza Karimova", email: "dilnoza@shop.uz" })).status, 200);
+  const conv = (await b.call("GET", `${w}/conversations/${chat.id}`)).body;
+  assert.equal(conv.visitor.name, "Dilnoza Karimova");
+  assert.equal(conv.visitor.email, "dilnoza@shop.uz");
+  assert.equal(conv.visitor.page, "/", "what the chat already knew stays");
+  assert.equal((await chat.post("/visitor", { email: "not an email" })).status, 400);
+  const site = { Origin: "https://northstar.example" };
+  assert.equal((await browser().call("POST", `/widget/${agent.public_key}/conversations/${chat.id}/visitor`, { name: "Someone else" }, { ...site, "X-Visitor-Token": "guess" })).status, 404, "only with the chat's token");
+});

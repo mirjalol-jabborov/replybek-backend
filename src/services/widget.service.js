@@ -72,6 +72,15 @@ export async function visitorHere(agent, convId, token) {
   return conv;
 }
 
+/** The page says who the visitor is (their name and email on a signed-in page). */
+export async function identifyVisitor(agent, convId, token, who) {
+  const conv = await ownConversation(agent, convId, token);
+  const fields = Object.fromEntries(Object.entries(who).filter(([, v]) => v));
+  if (!Object.keys(fields).length) return { ok: true };
+  await query("UPDATE conversations SET visitor = COALESCE(visitor, '{}'::jsonb) || $2::jsonb WHERE id = $1", [conv.id, JSON.stringify(fields)]);
+  return { ok: true };
+}
+
 /** The visitor is typing: the team's open Inbox shows it for a few seconds. */
 export async function visitorTyping(agent, convId, token) {
   const conv = await visitorHere(agent, convId, token);

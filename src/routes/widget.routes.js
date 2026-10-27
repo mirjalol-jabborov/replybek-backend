@@ -1,9 +1,9 @@
 import { Router } from "express";
 import { wrap } from "../lib/http.js";
-import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema } from "../validators.js";
+import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema, widgetVisitorSchema } from "../validators.js";
 import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
 import { languageOf } from "../services/suggestions.service.js";
-import { widgetAgent, widgetConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation } from "../services/widget.service.js";
+import { widgetAgent, widgetConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "../services/widget.service.js";
 import { stream } from "../services/events.service.js";
 import { acceptFile, visitorAttachment, sendAttachment } from "../services/attachments.service.js";
 
@@ -69,6 +69,7 @@ router.post("/conversations/:cid/presence", signalsPerIP, wrap(async (req, res) 
   res.json({ ok: true });
 }));
 router.post("/conversations/:cid/typing", signalsPerIP, wrap(async (req, res) => res.json(await visitorTyping(req.agent, req.params.cid, token(req)))));
+router.post("/conversations/:cid/visitor", signalsPerIP, validate(widgetVisitorSchema), wrap(async (req, res) => res.json(await identifyVisitor(req.agent, req.params.cid, token(req), req.valid))));
 router.post("/conversations/:cid/leave", signalsPerIP, wrap(async (req, res) => res.json(await leaveConversation(req.agent, req.params.cid, token(req)))));
 router.post("/conversations/:cid/handoff", perIP, wrap(async (req, res) => {
   res.json(await requestHuman(req.agent, req.params.cid, token(req)));

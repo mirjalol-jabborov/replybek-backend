@@ -124,6 +124,11 @@ export const replySchema = z.object({ text: z.string().trim().max(4000).default(
 export const suggestionDraftSchema = z.object({ language: z.enum(["en", "uz", "ru"]).optional(), questions: z.array(text(180)).min(1).max(5).optional() });
 export const assignSchema = z.object({ user_id: z.string().uuid().nullable() });
 
+// The page tells the chat who its visitor is (window.Replybek.identify on a signed-in page).
+export const widgetVisitorSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  email: z.string().trim().email().max(200).optional(),
+});
 export const widgetStartSchema = z.object({
   name: z.string().trim().max(80).optional(),
   email: z.string().trim().email().max(200).optional(),
