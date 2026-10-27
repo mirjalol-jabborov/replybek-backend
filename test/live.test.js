@@ -190,6 +190,51 @@ test("the team sees whether the visitor is still there, and follows them into a 
   assert.equal((await browser().call("POST", `/widget/${agent.public_key}/conversations/${chat.id}/presence`, null, { ...site, "X-Visitor-Token": "guess" })).status, 404);
 });
 
+test("a signed-in page can send everything the team needs: id, contact, photo, company, its own fields", async () => {
+  const { b, w, agent } = await liveAgent();
+  const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const who = {
+    user_id: "u_4127",
+    name: "Dilnoza Karimova",
+    email: "dilnoza@shop.uz",
+    phone: "+998 90 123 45 67",
+    avatar: PNG,
+    company: { id: "w_77", name: "Silk Road Shop", plan: "growth", website: "silkroad.uz" },
+    attributes: { role: "owner", language: "uz", trial: false, seats: 3 },
+  };
+  const chat = await visitorChat(agent, who);
+  const conv = (await b.call("GET", `${w}/conversations/${chat.id}`)).body;
+  for (const k of Object.keys(who)) assert.deepEqual(conv.visitor[k], who[k], k);
+
+  // Lists stay light: no photos or extra fields, just whether there's a photo.
+  const row = (await b.call("GET", `${w}/conversations?view=all`)).body.find((c) => c.id === chat.id);
+  assert.equal(row.has_avatar, true);
+  assert.equal(row.visitor.avatar, undefined);
+  assert.equal(row.visitor.attributes, undefined);
+  assert.equal(row.visitor.company.name, "Silk Road Shop");
+  const photo = await fetch(`${base}${w}/conversations/${chat.id}/avatar`, { headers: { Cookie: b.cookie } });
+  assert.equal(photo.status, 200);
+  assert.equal(photo.headers.get("content-type"), "image/png");
+  assert.equal((await photo.arrayBuffer()).byteLength, 70);
+
+  // An https photo redirects; unsafe ones are refused.
+  assert.equal((await chat.post("/visitor", { avatar: "https://cdn.example/u/4127.jpg" })).status, 200);
+  const linked = await fetch(`${base}${w}/conversations/${chat.id}/avatar`, { headers: { Cookie: b.cookie }, redirect: "manual" });
+  assert.equal(linked.status, 302);
+  assert.equal(linked.headers.get("location"), "https://cdn.example/u/4127.jpg");
+  for (const bad of ["javascript:alert(1)", "http://plain.example/a.png", "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="]) {
+    assert.equal((await chat.post("/visitor", { avatar: bad })).status, 400, bad);
+  }
+  const many = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`k${i}`, i]));
+  assert.equal((await chat.post("/visitor", { attributes: many })).status, 400, "up to 30 attributes");
+
+  // The team finds them by email, user id or company.
+  for (const q of ["dilnoza@shop", "u_4127", "silk road"]) {
+    const found = (await b.call("GET", `${w}/conversations?view=all&q=${encodeURIComponent(q)}`)).body.map((c) => c.id);
+    assert.ok(found.includes(chat.id), q);
+  }
+});
+
 test("a signed-in page tells the chat who the visitor is", async () => {
   const { b, w, agent } = await liveAgent();
   const chat = await visitorChat(agent);

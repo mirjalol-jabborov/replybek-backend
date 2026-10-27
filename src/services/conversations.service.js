@@ -24,10 +24,13 @@ export async function listConversations(workspaceId, userId, { view = "all", age
   if (q) {
     params.push(`%${q.toLowerCase()}%`);
     where.push(`(lower(coalesce(c.visitor->>'name', '')) LIKE $${params.length} OR lower(coalesce(c.subject, '')) LIKE $${params.length}
+      OR lower(coalesce(c.visitor->>'email', '')) LIKE $${params.length} OR lower(coalesce(c.visitor->>'user_id', '')) LIKE $${params.length}
+      OR lower(coalesce(c.visitor->'company'->>'name', '')) LIKE $${params.length}
       OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.role <> 'note' AND lower(m.body) LIKE $${params.length}))`);
   }
   const { rows } = await query(
-    `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.visitor, c.subject, c.unread, c.created_at, c.last_message_at,
+    `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.visitor - 'avatar' - 'attributes' AS visitor, (c.visitor ? 'avatar') AS has_avatar,
+            c.subject, c.unread, c.created_at, c.last_message_at,
             c.visitor_seen_at, c.left_at, c.continued_in, now() AS server_now,
             (SELECT json_build_object('role', m.role, 'body', m.body, 'author_id', m.author_id,
                     'files', (SELECT count(*) FROM attachments a WHERE a.message_id = m.id)) FROM messages m
@@ -55,6 +58,22 @@ export async function getConversation(workspaceId, id, { markRead = true } = {})
   const { visitor_token_hash, ...rest } = c;
   // server_now: the clock "seen 20 s ago" is measured against, whatever the viewer's clock says.
   return { ...rest, unread: markRead ? false : c.unread, server_now: new Date().toISOString(), messages: await messagesOf(id) };
+}
+
+/**
+ * The visitor's photo, as the page sent it: an image this API serves, or a redirect to an https
+ * link. Lists fetch it here instead of carrying every photo in every list.
+ */
+export async function visitorAvatar(workspaceId, id, res) {
+  const c = await load(workspaceId, id);
+  const avatar = c.visitor?.avatar;
+  if (!avatar) throw notFound("No photo");
+  res.set("Cache-Control", "private, max-age=300");
+  if (avatar.startsWith("https://")) return res.redirect(302, avatar);
+  const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.+)$/.exec(avatar);
+  if (!m) throw notFound("No photo");
+  res.set({ "Content-Type": m[1], "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox" });
+  res.end(Buffer.from(m[2], "base64"));
 }
 
 /** A teammate is writing a reply: the visitor's chat shows "<name> is typing" for a few seconds. */

@@ -124,14 +124,34 @@ export const replySchema = z.object({ text: z.string().trim().max(4000).default(
 export const suggestionDraftSchema = z.object({ language: z.enum(["en", "uz", "ru"]).optional(), questions: z.array(text(180)).min(1).max(5).optional() });
 export const assignSchema = z.object({ user_id: z.string().uuid().nullable() });
 
-// The page tells the chat who its visitor is (window.Replybek.identify on a signed-in page).
-export const widgetVisitorSchema = z.object({
+// Who the visitor is, as the page tells the chat (window.Replybek.identify on a signed-in page).
+// Shown to the business's team in the Inbox. The photo is an https link or a small image; it's
+// only ever shown with <img>.
+const PHOTO = /^(https:\/\/[^\s"'<>]{1,2000}|data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+)$/;
+const visitorFields = {
+  user_id: z.string().trim().min(1).max(100).optional(),
   name: z.string().trim().min(1).max(80).optional(),
   email: z.string().trim().email().max(200).optional(),
-});
+  phone: z.string().trim().min(1).max(40).optional(),
+  avatar: z.string().max(300000, "The photo is too large.").regex(PHOTO, "Use an https link or a PNG, JPEG, WebP or GIF image.").optional(),
+  company: z
+    .object({
+      id: z.string().trim().max(100).optional(),
+      name: z.string().trim().max(120).optional(),
+      plan: z.string().trim().max(60).optional(),
+      website: z.string().trim().max(200).optional(),
+    })
+    .strict()
+    .optional(),
+  // Anything else the business wants its team to see: up to 30 short values.
+  attributes: z
+    .record(z.string().trim().min(1).max(60), z.union([z.string().max(500), z.number(), z.boolean(), z.null()]))
+    .refine((o) => Object.keys(o).length <= 30, "Up to 30 attributes.")
+    .optional(),
+};
+export const widgetVisitorSchema = z.object(visitorFields);
 export const widgetStartSchema = z.object({
-  name: z.string().trim().max(80).optional(),
-  email: z.string().trim().email().max(200).optional(),
+  ...visitorFields,
   page: z.string().trim().max(500).optional(),
   // The chat the visitor left with "Start a new chat", proven by its token.
   previous: z.object({ id: z.string().uuid(), token: z.string().min(10).max(200) }).optional(),
