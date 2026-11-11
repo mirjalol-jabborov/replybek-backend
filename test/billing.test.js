@@ -19,6 +19,10 @@ const fakePolar = http.createServer((req, res) => {
       res.statusCode = 201;
       return res.end(JSON.stringify({ id, url: `https://buy.polar.sh/${id}`, metadata: input.metadata }));
     }
+    const list = req.url.match(/^\/v1\/subscriptions\/\?external_customer_id=([^&]+)/);
+    if (req.method === "GET" && list) {
+      return res.end(JSON.stringify({ items: polarHolds.get(decodeURIComponent(list[1])) || [] }));
+    }
     const sub = req.url.match(/^\/v1\/subscriptions\/([^/]+)$/);
     if (req.method === "PATCH" && sub) {
       return res.end(JSON.stringify(subscription({ id: sub[1], ...(input.product_id ? { product_id: input.product_id } : {}), ...(input.cancel_at_period_end ? { cancel_at_period_end: true } : {}) })));
@@ -59,6 +63,8 @@ function subscription(over) {
   return { id: "sub_1", status: "active", product_id: PRODUCTS.business, current_period_end: "2026-11-26T00:00:00.000Z", trial_end: null, cancel_at_period_end: false, checkout_id: null, metadata: {}, customer: { external_id: null }, ...over };
 }
 const lastCheckout = () => polarCalls.filter((c) => c.url === "/v1/checkouts/").at(-1);
+// What Polar holds for a workspace, whether or not its webhook ever arrived here.
+const polarHolds = new Map();
 
 test("webhook secrets work in both Polar formats", () => {
   const raw = '{"type":"subscription.updated"}';
@@ -327,4 +333,39 @@ test("before the trial a workspace is read-only once onboarding is done; the tri
   await deliver("subscription.created", subscription({ id: "sub_unlock", status: "trialing", product_id: PRODUCTS.growth, checkout_id: `co_test${checkoutSeq}` }));
   assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Changed" })).status, 200);
   assert.equal((await b.call("POST", `${w}/agents`, { name: "Second" })).status, 201);
+});
+
+test("a subscription whose webhook never arrived is picked up by checking with Polar", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  await b.call("POST", `${w}/onboarding/complete`, {});
+
+  // Paid on Polar, but nothing ever reached us: the workspace is locked and the owner is stuck.
+  assert.equal((await b.call("GET", w)).body.billing.status, null);
+  assert.equal((await b.call("POST", `${w}/agents`, { name: "Blocked" })).status, 402);
+  polarHolds.set(ws.id, [subscription({ id: "sub_lost", status: "trialing", product_id: PRODUCTS.growth, trial_end: "2026-11-09T00:00:00.000Z", customer: { external_id: ws.id } })]);
+
+  const synced = await b.call("POST", `${w}/billing/sync`);
+  assert.equal(synced.status, 200, JSON.stringify(synced.body));
+  assert.equal(synced.body.status, "trialing");
+  assert.equal(synced.body.changed, true);
+
+  const after = await b.call("GET", w);
+  assert.equal(after.body.plan, "growth");
+  assert.equal(after.body.billing.status, "trialing");
+  assert.equal(after.body.billing.access, "trial");
+  assert.equal((await b.call("POST", `${w}/agents`, { name: "Unblocked" })).status, 201, "the workspace works again");
+
+  // Checking again changes nothing, and a workspace Polar knows nothing about stays as it was.
+  assert.equal((await b.call("POST", `${w}/billing/sync`)).body.changed, false);
+  const other = await owner();
+  assert.deepEqual((await other.b.call("POST", `/w/${other.ws.id}/billing/sync`)).body, { changed: false, status: null });
+});
+
+test("the read-only lock never blocks the one call that can lift it", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  await b.call("POST", `${w}/onboarding/complete`, {});
+  // The read-only lock must not block the one call that can lift it.
+  assert.equal((await b.call("POST", `${w}/billing/sync`)).status, 200);
 });

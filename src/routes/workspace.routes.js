@@ -6,6 +6,7 @@ import { requireWorkspace, requireRole, readOnlyUntilTrial } from "../middleware
 import { rateLimit } from "../middlewares/rateLimit.js";
 import { workspaceSummary, updateWorkspace, listMembers } from "../services/workspaces.service.js";
 import { listAgents, getAgent, createAgent, updateAgent, setAgentStatus, deleteAgent } from "../services/agents.service.js";
+import { listChannels, connectTelegram, disconnectChannel } from "../services/channels.service.js";
 import { listSources, listWorkspaceSources, getSource, addWebsite, previewWebsite, addQA, addFile, retrySource, resyncSource, updateSource, listPages, removeSource, listUnanswered, dismissUnanswered } from "../services/sources.service.js";
 import { answerQuestion } from "../services/answer.service.js";
 import * as convs from "../services/conversations.service.js";
@@ -15,7 +16,7 @@ import { acceptFile, workspaceAttachment, sendAttachment } from "../services/att
 import { listInvites, createInvite, resendInvite, revokeInvite, updateMemberRole, removeMember } from "../services/team.service.js";
 import { analytics } from "../services/analytics.service.js";
 import { changePlan } from "../services/workspaces.service.js";
-import { startCheckout, billingPortal } from "../services/billing.service.js";
+import { startCheckout, billingPortal, syncSubscription } from "../services/billing.service.js";
 import { analyzeSite, completeOnboarding } from "../services/onboarding.service.js";
 import { listIntegrations, createIntegration, updateIntegration, deleteIntegration, redirectUri, previewTool, loadIntegration, simulateProcedure } from "../services/integrations.service.js";
 
@@ -33,6 +34,8 @@ const admin = requireRole("admin");
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 const testLimit = rateLimit({ windowMs: 60 * 1000, max: 30, key: (req) => req.user.id, message: "Too many test questions. Wait a minute." });
 const setupAILimit = rateLimit({ windowMs: 60 * 1000, max: 6, key: (req) => req.user.id, message: "Too many AI setup requests. Wait a minute." });
+// Checking with Polar costs a call to them, and nobody needs to check twice a second.
+const syncLimit = rateLimit({ windowMs: 60 * 1000, max: 10, key: (req) => req.user.id, message: "Checking too often. Wait a minute." });
 const docsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 4, fieldSize: 60000 } });
 
 // Workspace
@@ -66,6 +69,8 @@ router.get("/analytics", v.validate(v.analyticsQuerySchema, "query"), wrap(async
 // gets a checkout link (or a running subscription switches product) and Polar's webhook confirms it.
 router.patch("/plan", requireRole("owner"), v.validate(v.planSchema), wrap(async (req, res) => res.json(await changePlan(req.workspace, req.valid.plan, req.user))));
 router.post("/billing/checkout", requireRole("owner"), v.validate(v.checkoutSchema), wrap(async (req, res) => res.json(await startCheckout(req.workspace, req.valid.plan, req.user, req.valid.return_to))));
+// Picks up a subscription whose webhook never arrived, so a paid workspace can unlock itself.
+router.post("/billing/sync", admin, syncLimit, wrap(async (req, res) => res.json(await syncSubscription(req.workspace, { actor: req.user }))));
 router.post("/billing/portal", requireRole("owner"), wrap(async (req, res) => res.json(await billingPortal(req.workspace))));
 
 // Onboarding: read the business's website, then (in the dashboard) create the first agent from it.
@@ -86,6 +91,13 @@ router.delete("/agents/:aid", admin, wrap(async (req, res) => {
 }));
 
 // Playground: answers with unsaved settings; nothing is stored except usage.
+// Channels: where an agent answers besides its own website widget.
+router.get("/agents/:aid/channels", wrap(async (req, res) => res.json(await listChannels(req.workspace.id, req.params.aid))));
+router.post("/agents/:aid/channels/telegram", admin, v.validate(v.telegramChannelSchema), wrap(async (req, res) => {
+  res.status(201).json(await connectTelegram(req.workspace, req.params.aid, req.user, req.valid.bot_token));
+}));
+router.delete("/agents/:aid/channels/:cid", admin, wrap(async (req, res) => res.json(await disconnectChannel(req.workspace.id, req.params.aid, req.params.cid, req.user))));
+
 router.post("/agents/:aid/suggestions/generate", admin, setupAILimit, v.validate(v.suggestionDraftSchema), wrap(async (req, res) => {
   const agent = await getAgent(req.workspace.id, req.params.aid);
   const language = req.valid.language || languageOf(req.headers["accept-language"]);

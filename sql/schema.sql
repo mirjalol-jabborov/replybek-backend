@@ -524,3 +524,42 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT UNIQUE;
 ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 -- A person's own photo: a small image as a data: URL (the dashboard crops it to 256 px).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+
+-- ───── Channels ─────
+-- An agent answers on its website widget and, once connected, inside a messaging app. The agent,
+-- its knowledge and its integrations are the same everywhere: a channel only carries messages.
+CREATE TABLE IF NOT EXISTS agent_channels (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('telegram')),
+  -- Type-specific: the encrypted bot token, the webhook secret, and what the bot is called.
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  -- Why the channel stopped working (a revoked token), shown in the dashboard.
+  disabled_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS agent_channels_agent ON agent_channels (agent_id);
+-- One bot belongs to one agent: the same token connected twice would steal the first webhook.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_channels_account ON agent_channels (type, (config->>'account_id'));
+
+-- Where a conversation outside the widget happens: the channel and the chat the customer writes in.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES agent_channels(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_chat_id TEXT;
+-- One open conversation per chat. A resolved one can be followed by a fresh thread.
+CREATE UNIQUE INDEX IF NOT EXISTS conversations_open_chat
+  ON conversations (channel_id, channel_chat_id)
+  WHERE channel_chat_id IS NOT NULL AND status <> 'resolved';
+
+-- The message as the channel knows it, so a card's buttons can be replaced once it is decided.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_message_id TEXT;
+
+-- Channels redeliver an update until it is acknowledged, so each one is answered exactly once.
+CREATE TABLE IF NOT EXISTS channel_updates (
+  channel_id UUID NOT NULL REFERENCES agent_channels(id) ON DELETE CASCADE,
+  update_id TEXT NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (channel_id, update_id)
+);
+CREATE INDEX IF NOT EXISTS channel_updates_age ON channel_updates (received_at);

@@ -17,6 +17,7 @@ import workspaceRoutes from "./routes/workspace.routes.js";
 import widgetRoutes from "./routes/widget.routes.js";
 import oauthRoutes from "./routes/oauth.routes.js";
 import billingRoutes from "./routes/billing.routes.js";
+import channelsRoutes from "./routes/channels.routes.js";
 import "./services/ingest.service.js"; // registers the ingest job
 
 const app = express();
@@ -41,6 +42,10 @@ app.use("/widget/:key", cors({ origin: true, credentials: false }), express.json
 
 // Where an integration's sign-in page sends the customer back. A plain page, no CORS or cookies.
 app.use("/oauth", oauthRoutes);
+
+// Messaging platforms deliver customers' messages here: signed server-to-server calls with the
+// channel's own secret, no cookies and no CORS.
+app.use("/channels", express.json({ limit: "256kb" }), channelsRoutes);
 
 // Polar's billing webhooks: signed server-to-server calls, read raw before any JSON parsing.
 app.use("/billing", billingRoutes);

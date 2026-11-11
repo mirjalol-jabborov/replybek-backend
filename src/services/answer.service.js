@@ -96,7 +96,7 @@ async function customerTimeZone(workspaceId, conversationId) {
  * answer and the knowledge search, but only the customer's own words can ask for a person.
  * Returns { kind: answer | fallback | handoff | blocked, text, sources }.
  */
-export async function answerQuestion({ agent, question, file = null, history = [], draft = {}, countUsage = true, conversationId = null, inpageOrigin = null, playground = false }) {
+export async function answerQuestion({ agent, question, file = null, history = [], draft = {}, countUsage = true, conversationId = null, inpageOrigin = null, playground = false, channel = "widget" }) {
   await assertCanAnswer(agent.workspace_id, { playground });
   const cfg = { ...agent, ...Object.fromEntries(Object.entries(draft || {}).filter(([, v]) => v !== undefined)) };
   const done = async (result) => {
@@ -123,7 +123,7 @@ export async function answerQuestion({ agent, question, file = null, history = [
   // A file's first lines help find the right knowledge (a photo of a broken sole finds returns).
   const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history);
   const asked = question || file?.text?.slice(0, 300) || file?.name || "";
-  const tools = await agentTools(agent.id);
+  const tools = await agentTools(agent.id, channel);
   // Nothing in the knowledge matches and there are no tools. Without handoff that's simply the
   // fallback; with it, the model still reads the message, because handoff rules (damaged items,
   // "talk to a person") don't depend on knowledge. Small talk always gets a real reply.

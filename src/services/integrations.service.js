@@ -407,8 +407,16 @@ export async function deliverToolResult(conversationId, toolCallId, result) {
 // ───── Tools for the answering model ─────
 
 /** The enabled tools of an agent, each with its integration. */
-export async function agentTools(agentId) {
-  const { rows } = await query("SELECT * FROM integrations WHERE agent_id = $1 AND enabled ORDER BY created_at", [agentId]);
+/**
+ * The tools an agent may use for a customer on `channel`. In-page integrations act inside the
+ * customer's own browser tab, so they exist only in the widget: on a messaging channel there is
+ * no session to act in, and an agent must never offer an action it cannot carry out.
+ */
+export async function agentTools(agentId, channel = "widget") {
+  const { rows } = await query(
+    "SELECT * FROM integrations WHERE agent_id = $1 AND enabled AND ($2 = 'widget' OR mode <> 'in_page') ORDER BY created_at",
+    [agentId, channel]
+  );
   return rows.flatMap((integration) => [
     ...(integration.tools || []).filter(tool => !Object.values(tool.bindings || {}).some(b => b.source === "step")).map((tool) => ({ integration, tool: { ...tool, modelInput: modelInput(tool) } })),
     ...(integration.procedures || []).map((p) => ({ integration, tool: { ...p, procedure: true } })),

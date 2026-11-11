@@ -150,6 +150,11 @@ const visitorFields = {
     .optional(),
 };
 export const widgetVisitorSchema = z.object(visitorFields);
+
+// A Telegram bot token, as BotFather prints it: the bot's id, a colon, then its secret.
+export const telegramChannelSchema = z.object({
+  bot_token: z.string().trim().regex(/^\d{5,}:[A-Za-z0-9_-]{30,}$/, "That doesn't look like a bot token. Copy the whole line BotFather sent."),
+});
 export const widgetStartSchema = z.object({
   ...visitorFields,
   page: z.string().trim().max(500).optional(),

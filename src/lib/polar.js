@@ -49,6 +49,16 @@ export async function createCheckout({ productId, externalCustomerId, email, met
 }
 
 /** Moves a running subscription to another product; Polar prorates by the organization's default. */
+/**
+ * Every subscription Polar holds for one workspace (the workspace is the Polar customer), newest
+ * first. This is how a subscription can be found again when its webhook never arrived.
+ */
+export async function customerSubscriptions(externalCustomerId) {
+  const page = await call("GET", `/subscriptions/?external_customer_id=${encodeURIComponent(externalCustomerId)}&limit=20`);
+  const items = page?.items || [];
+  return items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+}
+
 export const changeProduct = (id, productId) => call("PATCH", `/subscriptions/${encodeURIComponent(id)}`, { product_id: productId });
 
 /** Stops renewals; the customer keeps what they already paid for until the period ends. */

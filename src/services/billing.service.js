@@ -1,6 +1,6 @@
 import { query } from "../db.js";
 import { HttpError } from "../lib/http.js";
-import { polarProductId, planForPolarProduct, createCheckout, changeProduct, cancelAtPeriodEnd, portalUrl } from "../lib/polar.js";
+import { polarEnabled, polarProductId, planForPolarProduct, createCheckout, changeProduct, cancelAtPeriodEnd, portalUrl, customerSubscriptions } from "../lib/polar.js";
 import { logActivity } from "./activity.service.js";
 import { assertPlanFits, isPaid } from "./workspaces.service.js";
 
@@ -50,6 +50,31 @@ export async function startCheckout(workspace, plan, user, returnTo = "billing")
   }
   await query("INSERT INTO billing_checkouts (id, workspace_id, plan, user_id) VALUES ($1, $2, $3, $4)", [checkout.id, workspace.id, plan, user.id]);
   return { url: checkout.url };
+}
+
+/**
+ * Asks Polar what this workspace is actually subscribed to, and writes that down. Webhooks stay the
+ * fast path, but one can be missed: a restart mid-delivery, an outage, a server not yet reachable
+ * from the internet. Without this, someone who has paid stays locked out of their own workspace
+ * with nothing they can do about it. Safe to call as often as you like.
+ */
+export async function syncSubscription(workspace, { actor = null } = {}) {
+  if (!polarEnabled()) return { changed: false, status: null };
+  let subscriptions;
+  try {
+    subscriptions = await customerSubscriptions(workspace.id);
+  } catch (e) {
+    console.error(e.message);
+    throw new HttpError(502, "Polar isn't reachable right now. Try again in a minute.");
+  }
+  // A live subscription is what matters; an ended one only to record that it ended.
+  const live = subscriptions.find((s) => isPaid(s.status) && planForPolarProduct(s.product_id));
+  const subscription = live || subscriptions.find((s) => s.id === workspace.polar_subscription_id) || null;
+  if (!subscription) return { changed: false, status: null };
+  const before = workspace.subscription_status || null;
+  await applySubscription(subscription, { actor, workspaceId: workspace.id });
+  const { rows } = await query("SELECT plan, subscription_status FROM workspaces WHERE id = $1", [workspace.id]);
+  return { changed: rows[0]?.subscription_status !== before, status: rows[0]?.subscription_status || null, plan: rows[0]?.plan };
 }
 
 /** A signed-in link to Polar's customer portal: card, invoices, cancellation. */

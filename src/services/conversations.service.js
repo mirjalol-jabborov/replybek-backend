@@ -4,6 +4,7 @@ import { summarize } from "./answer.service.js";
 import { logActivity } from "./activity.service.js";
 import { ATTACHMENTS_SQL, checkFile, storeAttachment } from "./attachments.service.js";
 import { signal } from "./events.service.js";
+import { deliver } from "./delivery.service.js";
 
 const VIEWS = {
   all: "TRUE",
@@ -131,7 +132,9 @@ export async function reply(workspaceId, id, user, text, file = null) {
   const conv = await load(workspaceId, id);
   if (conv.status !== "human" || conv.assignee_id !== user.id) throw new HttpError(409, "Take over the conversation before replying.");
   if (!text && !file) throw new HttpError(400, "Write a reply or attach a file.");
-  await addMessageWithFile(conv, { role: "human", body: text, author_id: user.id }, file);
+  const messageId = await addMessageWithFile(conv, { role: "human", body: text, author_id: user.id }, file);
+  // On a messaging channel the customer isn't watching a page: the reply has to be sent to them.
+  await deliver(conv, { id: messageId, body: text, file: file && { buffer: file.buffer, name: file.originalname, type: file.mimetype } });
   return getConversation(workspaceId, id);
 }
 

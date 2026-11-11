@@ -1,0 +1,21 @@
+{
+  "confirm": { "en": "Confirm", "uz": "Tasdiqlash", "ru": "Подтвердить" },
+  "cancel": { "en": "Cancel", "uz": "Bekor qilish", "ru": "Отмена" },
+  "pleaseConfirm": { "en": "Please confirm", "uz": "Tasdiqlang", "ru": "Подтвердите" },
+  "confirmed": { "en": "Confirmed", "uz": "Tasdiqlandi", "ru": "Подтверждено" },
+  "cancelled": { "en": "Cancelled", "uz": "Bekor qilindi", "ru": "Отменено" },
+  "failed": { "en": "Didn't go through", "uz": "Amalga oshmadi", "ru": "Не получилось" },
+  "signIn": { "en": "Sign in", "uz": "Kirish", "ru": "Войти" },
+  "signInTo": { "en": "Sign in to {name}", "uz": "{name} tizimiga kirish", "ru": "Вход в {name}" },
+  "fileType": {
+    "en": "Send a photo, a PDF or a document (TXT, CSV, DOCX, XLSX).",
+    "uz": "Rasm, PDF yoki hujjat yuboring (TXT, CSV, DOCX, XLSX).",
+    "ru": "Отправьте фото, PDF или документ (TXT, CSV, DOCX, XLSX)."
+  },
+  "fileTooBig": {
+    "en": "Files can be up to 10 MB.",
+    "uz": "Fayl hajmi 10 MB dan oshmasin.",
+    "ru": "Файл должен быть не больше 10 МБ."
+  },
+  "wrong": { "en": "Something went wrong.", "uz": "Nimadir xato ketdi.", "ru": "Что-то пошло не так." }
+}
