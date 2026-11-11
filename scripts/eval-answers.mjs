@@ -7,6 +7,8 @@
 //   node scripts/eval-answers.mjs                 every case once
 //   node scripts/eval-answers.mjs --repeat 3      every case three times (catches flaky ones)
 //   node scripts/eval-answers.mjs --only order    cases whose name contains "order"
+//   node scripts/eval-answers.mjs --serve         set everything up, print the API address and the
+//                                                 agent's key, and keep running (to try it in a browser)
 //
 // Uses its own database (replybek_eval in the dev container), never replybek or replybek_test.
 import http from "node:http";
@@ -20,6 +22,7 @@ const arg = (name, fallback) => {
 };
 const REPEAT = Number(arg("--repeat", 1));
 const ONLY = arg("--only", "");
+const SERVE = process.argv.includes("--serve");
 
 process.env.NODE_ENV = "development";
 process.env.PGDATABASE = "replybek_eval";
@@ -66,7 +69,9 @@ const shop = http.createServer((req, res) => {
   const json = (status, data) => res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(data));
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", async () => {
+    // In --serve mode the shop answers like a real system, not instantly, so the chat's progress can be seen.
+    if (SERVE) await new Promise((r) => setTimeout(r, 900));
     hits.push(`${req.method} ${url.pathname}${url.search}`);
     const order = url.pathname.match(/^\/orders\/(\w+)$/);
     if (order && req.method === "GET") return ORDERS[order[1]] ? json(200, ORDERS[order[1]]) : json(404, { message: `Order ${order[1]} not found` });
@@ -176,6 +181,11 @@ await owner("POST", `${w}/integrations`, {
     },
   ],
 });
+
+if (SERVE) {
+  console.log(`SERVING ${JSON.stringify({ api: base, key: agent.public_key })}`);
+  await new Promise(() => {});
+}
 
 // ───── Cases ─────
 // tool: the tool that must be called ("none" = no tool; a list = any of them).

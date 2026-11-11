@@ -181,6 +181,8 @@ export const toolSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/, "Tool names use lowercase letters, digits and underscores."),
   description: text(600),
   when: text(600).optional(),
+  // Shown to the customer while it runs ("Checking your orders…"); the widget has a default.
+  progress: text(80).optional(),
   kind: z.enum(["read", "write"]).default("read"),
   input: z.object({ type: z.literal("object"), properties: z.record(z.any()).default({}), required: z.array(z.string()).optional() }).passthrough().default({ type: "object", properties: {} }),
   bindings: z.record(z.object({ source: z.enum(["customer", "context", "fixed", "step"]), path: z.string().max(200).optional(), value: z.any().optional() })).default({}),

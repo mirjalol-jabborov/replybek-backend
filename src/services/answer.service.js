@@ -9,6 +9,7 @@ import { agentTools, connectionsFor, runTool } from "./integrations.service.js";
 import { fileContext } from "./attachments.service.js";
 import { inventedIds, withEmptyHint } from "../lib/tool-guard.js";
 import { describeNow, validTimeZone } from "../lib/clock.js";
+import { signal } from "./events.service.js";
 
 const HUMAN_RE = /\b(human|person|someone|representative|real person|talk to|speak (to|with)|teammate|staff|operator|live agent)\b/i;
 const TONES = {
@@ -120,8 +121,13 @@ export async function answerQuestion({ agent, question, file = null, history = [
     );
   }
 
+  // What the AI is doing, for the customer's chat ("Checking our system…"). Passing signals,
+  // nothing stored; a missed one only means the customer sees plain dots.
+  const progress = (step, data = {}) => (conversationId ? signal(`c:${conversationId}`, "progress", { step, ...data }).catch(() => {}) : null);
+  // A quick search shows nothing; a slow one (rewritten into three languages) says what it's doing.
+  const slowSearch = setTimeout(() => progress("search"), 1200);
   // A file's first lines help find the right knowledge (a photo of a broken sole finds returns).
-  const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history);
+  const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history).finally(() => clearTimeout(slowSearch));
   const asked = question || file?.text?.slice(0, 300) || file?.name || "";
   const tools = await agentTools(agent.id);
   // Nothing in the knowledge matches and there are no tools. Without handoff that's simply the
@@ -148,7 +154,9 @@ export async function answerQuestion({ agent, question, file = null, history = [
     toolTried = true;
     const invented = inventedIds(args, said.join("\n"));
     if (invented.length) return { error: "value_not_given", message: `Nobody gave ${invented.join(", ")} in this conversation, so nothing was looked up. Ask the customer for it; never guess.` };
+    await progress(found.tool.kind === "write" ? "confirm" : "tool", found.tool.progress ? { label: found.tool.progress } : {});
     const res = await runTool({ conversationId, integration: found.integration, tool: found.tool, args, inpageOrigin });
+    await progress("writing");
     said.push(JSON.stringify(res.output ?? null));
     if (res.card && !(card?.type === "connect")) card = res.card;
     return withEmptyHint(res.output);
