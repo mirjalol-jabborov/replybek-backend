@@ -8,6 +8,7 @@ import { filesForAI } from "./attachments.service.js";
 import { savedQuestions } from "./suggestions.service.js";
 import { signal } from "./events.service.js";
 import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say } from "./chat.service.js";
+import { widgetTexts } from "./translations.service.js";
 
 /**
  * The website widget's side of a conversation: the key that identifies the agent, the token that
@@ -31,6 +32,11 @@ export async function widgetAgent(publicKey, origin) {
     throw new HttpError(403, "This chat isn't enabled for this website.");
   }
   return agent;
+}
+
+/** The widget's settings for a visitor in `language`, with the greeting and questions translated when needed. */
+export async function localizedConfig(agent, language = "en") {
+  return { ...widgetConfig(agent, language), ...(await widgetTexts(agent, language)) };
 }
 
 export const widgetConfig = (agent, language = "en") => ({
@@ -107,9 +113,9 @@ export async function ownConversation(agent, id, token) {
 const statusFor = (conv) => ({ status: conv.status, waiting_for_team: conv.status === "needs_human" || conv.status === "human" });
 
 /** A visitor's message, with an optional file. The AI answers only while it's handling the conversation. */
-export async function postVisitorMessage(agent, convId, token, text, inpageOrigin = null, file = null) {
+export async function postVisitorMessage(agent, convId, token, text, inpageOrigin = null, file = null, language = null) {
   if (!text && !file) throw new HttpError(400, "Write a message or attach a file.");
-  const { conv, seen, thinking } = await receiveMessage(agent, await ownConversation(agent, convId, token), { text, file }, { inpageOrigin });
+  const { conv, seen, thinking } = await receiveMessage(agent, await ownConversation(agent, convId, token), { text, file }, { inpageOrigin, language });
   return { ...statusFor(conv), ...(thinking ? { thinking } : {}), messages: (await visibleMessages(conv.id)).slice(seen.length) };
 }
 

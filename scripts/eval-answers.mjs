@@ -7,6 +7,8 @@
 //   node scripts/eval-answers.mjs                 every case once
 //   node scripts/eval-answers.mjs --repeat 3      every case three times (catches flaky ones)
 //   node scripts/eval-answers.mjs --only order    cases whose name contains "order"
+//   node scripts/eval-answers.mjs --serve         set everything up, print the API address and the
+//                                                 agent's key, and keep running (to try it in a browser)
 //
 // Uses its own database (replybek_eval in the dev container), never replybek or replybek_test.
 import http from "node:http";
@@ -20,6 +22,7 @@ const arg = (name, fallback) => {
 };
 const REPEAT = Number(arg("--repeat", 1));
 const ONLY = arg("--only", "");
+const SERVE = process.argv.includes("--serve");
 
 process.env.NODE_ENV = "development";
 process.env.PGDATABASE = "replybek_eval";
@@ -66,7 +69,9 @@ const shop = http.createServer((req, res) => {
   const json = (status, data) => res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(data));
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", async () => {
+    // In --serve mode the shop answers like a real system, not instantly, so the chat's progress can be seen.
+    if (SERVE) await new Promise((r) => setTimeout(r, 900));
     hits.push(`${req.method} ${url.pathname}${url.search}`);
     const order = url.pathname.match(/^\/orders\/(\w+)$/);
     if (order && req.method === "GET") return ORDERS[order[1]] ? json(200, ORDERS[order[1]]) : json(404, { message: `Order ${order[1]} not found` });
@@ -177,6 +182,11 @@ await owner("POST", `${w}/integrations`, {
   ],
 });
 
+if (SERVE) {
+  console.log(`SERVING ${JSON.stringify({ api: base, key: agent.public_key })}`);
+  await new Promise(() => {});
+}
+
 // ───── Cases ─────
 // tool: the tool that must be called ("none" = no tool; a list = any of them).
 // sources: true = knowledge must be cited, false = must not be, undefined = either.
@@ -224,6 +234,14 @@ const CASES = [
   { name: "kb ru slang", say: "скока стоит доставка в самарканд?", tool: "none", sources: true, lang: "ru" },
   { name: "ok after answer", turns: ["when will order #4127 arrive?"], say: "ok", tool: "none", sources: false },
 
+  // Other languages, and messages with no clear language: the page's language decides.
+  { name: "order ja", page: "ja", say: "注文4127はいつ届きますか？", tool: "get_order", lang: "ja", mentions: /19/ },
+  { name: "kb ar", page: "ar", say: "هل يمكنني الدفع عبر Payme؟", tool: "none", sources: true, lang: "ar" },
+  { name: "kb es", page: "es", say: "¿Cuánto tarda el envío a Samarcanda?", tool: "none", sources: true, lang: "es" },
+  { name: "emoji on ja page", page: "ja", turns: [], say: "👍", tool: "none", sources: false, lang: "ja" },
+  { name: "number on ar page", page: "ar", turns: [], say: "4127", tool: "get_order", lang: "ar" },
+  { name: "ambiguous word on uz page", page: "uz", say: "rahmat", tool: "none", sources: false, lang: "uz" },
+
   // A change: propose it with a Confirm card, don't claim it's done.
   { name: "move delivery uz", say: "4127 buyurtmani 2026-11-22 ga koʻchirib bera olasizmi?", tool: "change_delivery_date", card: "confirm", lang: "uz" },
   { name: "move delivery en", say: "Please move delivery of order 4128 to November 25, 2026", tool: "change_delivery_date", card: "confirm", lang: "en" },
@@ -236,7 +254,11 @@ const CASES = [
 const CYR = /[Ѐ-ӿ]/;
 const UZ_WORDS = /^(siz|sizga|sizning|sizni|qanday|yordam|buyurtma\p{L}*|uchun|kerak|mumkin|bor|yoʻq|yo'q|iltimos|raqam\p{L}*|sana\p{L}*|kun\p{L}*|salom|rahmat|marhamat|arzimaydi|haqida|mamnun\p{L}*|mavjud|emas|hozirda|va|bilan|bu|shu|ham|edi|qiladi|boʻladi|bo'ladi|beraman|bera|olaman|olasiz|kutilmoqda|yetkaz\p{L}*|tasdiq\p{L}*|tugma\p{L}*|bosing|tekshir\p{L}*|topilmadi|ballaringiz|narxi|turadi|omborda|rangda)$/iu;
 const EN_WORDS = /^(the|is|are|your|you|you're|you’re|welcome|hello|hi|thanks|order|please|have|has|will|be|it|and|with|can|for|to|of|in|on|we|our|this|that|confirm|details|delivery|not|found|help)$/i;
+const SCRIPTS = { ja: /[\u3040-\u30ff]/, ar: /[\u0600-\u06ff]/, ko: /[\uac00-\ud7af]/, zh: /[\u4e00-\u9fff]/ };
+const ES_WORDS = /^(el|la|los|las|de|del|en|es|un|una|que|para|por|su|sus|días|envío|tarda|entrega)$/i;
 function langOk(lang, text) {
+  if (SCRIPTS[lang]) return SCRIPTS[lang].test(text);
+  if (lang === "es") return (text.toLowerCase().match(/[\p{L}]+/gu) || []).filter((x) => ES_WORDS.test(x)).length >= 2;
   if (lang === "ru") return CYR.test(text);
   if (CYR.test(text)) return false;
   const words = text.toLowerCase().match(/[\p{L}ʻ'’]+/gu) || [];
@@ -246,14 +268,27 @@ function langOk(lang, text) {
 }
 const ASKS = /\?|raqam|номер|number|phone|telefon|order id/i;
 
+const failures = [];
 const fallbackText = (await owner("GET", `${w}/agents/${agent.id}`)).fallback;
+
+// The widget's first request on a Japanese or Arabic page: greeting and questions in that language.
+if (!ONLY || "config".includes(ONLY)) {
+  await owner("PATCH", `${w}/agents/${agent.id}`, { welcome: "Hi! I'm the Northstar AI agent. How can I help?", suggested_questions_i18n: { en: ["Where is my order?", "How do returns work?"] }, suggestion_default_language: "en" });
+  for (const [lang, script] of [["ja", /[\u3040-\u30ff]/], ["ar", /[\u0600-\u06ff]/]]) {
+    const c = await browser()("GET", `/widget/${agent.public_key}/config?lang=${lang}`);
+    const ok = script.test(c.welcome) && c.suggestions.length === 2 && c.suggestions.every((q) => script.test(q));
+    console.log(`${ok ? "PASS" : "FAIL"} config ${lang}\n     < ${c.welcome} | ${c.suggestions.join(" | ")}`);
+    if (!ok) failures.push(`config ${lang}: not translated`);
+  }
+}
 
 async function runCase(c) {
   const v = browser();
   const key = agent.public_key;
-  const start = await v("POST", `/widget/${key}/conversations`, { timezone: "Asia/Tashkent" });
+  const page = c.page || c.lang;
+  const start = await v("POST", `/widget/${key}/conversations`, { timezone: "Asia/Tashkent", ...(page ? { language: page } : {}) });
   const vt = { "X-Visitor-Token": start.visitor_token };
-  const say = (text) => v("POST", `/widget/${key}/conversations/${start.conversation_id}/messages`, { text }, vt);
+  const say = (text) => v("POST", `/widget/${key}/conversations/${start.conversation_id}/messages`, { text, ...(page ? { language: page } : {}) }, vt);
   for (const t of c.turns || []) await say(t);
   const mark = hits.length;
   const out = await say(c.say);
@@ -285,7 +320,6 @@ async function runCase(c) {
 }
 
 const selected = CASES.filter((c) => !ONLY || c.name.includes(ONLY));
-const failures = [];
 let passed = 0;
 for (const c of selected) {
   for (let i = 0; i < REPEAT; i++) {
