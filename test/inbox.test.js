@@ -53,7 +53,9 @@ test("the welcome message follows the visitor's language, with the main one as t
   assert.equal(await welcome("ru"), "Hi! How can I help?", "an empty translation shows the main message");
   assert.equal(await welcome("en"), "Hi! How can I help?");
   assert.deepEqual((await b.call("GET", `${w}/agents`)).body.find((a) => a.id === agent.id).welcome_i18n, { uz: "Salom! Qanday yordam bera olaman?", ru: "" });
-  assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome_i18n: { de: "Hallo" } })).status, 400, "only Uzbek, Russian and English");
+  assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome_i18n: { de: "Hallo" } })).status, 200, "any of the widget's languages");
+  assert.equal(await welcome("de"), "Hallo");
+  assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome_i18n: { xx: "Hallo" } })).status, 400, "not a language the widget speaks");
 });
 
 test("allowed websites are enforced", async () => {

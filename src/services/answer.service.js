@@ -9,6 +9,8 @@ import { agentTools, connectionsFor, runTool } from "./integrations.service.js";
 import { fileContext } from "./attachments.service.js";
 import { inventedIds, withEmptyHint } from "../lib/tool-guard.js";
 import { describeNow, validTimeZone } from "../lib/clock.js";
+import { languageName } from "../lib/languages.js";
+import { signal } from "./events.service.js";
 
 const HUMAN_RE = /\b(human|person|someone|representative|real person|talk to|speak (to|with)|teammate|staff|operator|live agent)\b/i;
 const TONES = {
@@ -42,7 +44,18 @@ function toolRules(integrations) {
   ].join("\n");
 }
 
-function systemPrompt(cfg, integrations = []) {
+/**
+ * Which language to reply in: the customer's message decides; the page's language (and then the
+ * earlier messages) only settles a message with no clear language of its own.
+ */
+function languageRule(pageLanguage) {
+  const unclear = pageLanguage
+    ? `the page's language, ${languageName(pageLanguage)}, or failing that the language of the customer's earlier messages`
+    : "the language of the customer's earlier messages";
+  return `- Reply in the language of the customer's new message, even when the passages, tool results or your earlier replies are in another language. When the new message has no clear language of its own (only an emoji, a number, a product name or code, or a short word several languages share), reply in ${unclear}.`;
+}
+
+function systemPrompt(cfg, integrations = [], pageLanguage = null) {
   return [
     `You are ${cfg.name}, the customer support assistant for ${cfg.workspace_name}.`,
     cfg.instructions ? `The business's instructions for you:\n"""\n${cfg.instructions}\n"""` : "",
@@ -59,35 +72,43 @@ function systemPrompt(cfg, integrations = []) {
       ? "- Use status \"handoff\" when the customer asks for a person, reports a damaged or wrong item, or the business's instructions say a teammate must handle it. Then tell them briefly that a teammate will help."
       : "- Handoff to a teammate is turned off. Never say a teammate will contact them.",
     "- Keep answers under 90 words unless a list of steps is needed. Plain text, no markdown headings.",
-    "- Reply in the language of the customer's new message (English to English, Russian to Russian, Uzbek to Uzbek), even when the passages, tool results or your earlier replies are in another language. Only when the new message has no language of its own (just a number or an emoji), use the language of the customer's earlier messages. A word that also exists in languages other than Uzbek, Russian and English is meant in one of these three.",
-    `- If neither the passages nor a tool answer it, use status "not_found" and put this fallback message in "answer", translated into the customer's language: "${cfg.fallback}". When a tool looked something up and found nothing, don't use this message: say plainly what wasn't found.`,
+    languageRule(pageLanguage),
+    `- If neither the passages nor a tool answer it, use status "not_found" and put this fallback message in "answer", translated into the language you reply in: "${cfg.fallback}". When a tool looked something up and found nothing, don't use this message: say plainly what wasn't found.`,
     'Reply with JSON only: {"status": "answered" | "not_found" | "handoff", "answer": "<text for the customer>", "citations": [<numbers of the passages you used>]}',
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-function userPrompt(passages, history, question, accounts = [], file = "", now = describeNow("UTC")) {
+function userPrompt(passages, history, question, accounts = [], file = "", now = describeNow("UTC"), pageLanguage = null) {
   const kb = passages.length
     ? passages.map((p, i) => `[${i + 1}] ${p.source_name}${p.heading ? ` · ${p.heading}` : ""}${p.url ? ` (${p.url})` : ""}\n${p.content}`).join("\n\n")
     : "(none match this message)";
   const past = history.length ? `Conversation so far:\n${history.map((m) => `${m.role === "visitor" ? "Customer" : "Assistant"}: ${m.body}`).join("\n")}\n\n` : "";
   const signedIn = accounts.length ? `Signed in: ${accounts.map((a) => `${a.name}${a.account_label ? ` as ${a.account_label}` : ""}`).join("; ")}\n` : "";
   const message = [question, file].filter(Boolean).join("\n\n") || "(no text)";
-  // The language rule is repeated last: after English passages and tool results, the model
-  // otherwise drifts into English for Uzbek and Russian customers.
+  // A message without a single letter (an emoji, an order number) can't tell the model its language.
+  const wordless = !/\p{L}/u.test(question || "") && !file;
+  const replyIn = wordless
+    ? `Write "answer" in ${pageLanguage ? languageName(pageLanguage) : "the language of the customer's earlier messages"}: the new message has no words of its own${pageLanguage ? ", and that's the language of the page they're on" : ""}.`
+    : `Write "answer" in the language of the customer's new message${pageLanguage ? ` (if it has no clear language of its own: ${languageName(pageLanguage)})` : ""}.`;
+  // The language rule is repeated last: otherwise, after passages and tool results in another
+  // language (often English), the model drifts into theirs.
   // Labelled, so a delivery date in a tool result isn't mistaken for today (or the other way round).
   const clock = `Customer's local date and time now: ${now}. Use it for "today", "tomorrow", "this week" and opening hours; dates in passages and tool results are about other things.\n`;
-  return `${clock}${signedIn}Knowledge passages:\n${kb}\n\n${past}Customer's new message:\n${message}\n\nWrite "answer" in the language of the customer's new message.`;
+  return `${clock}${signedIn}Knowledge passages:\n${kb}\n\n${past}Customer's new message:\n${message}\n\n${replyIn}`;
 }
 
-/** The customer's time zone from their browser, else the business's (Telegram and the Playground have no browser). */
-async function customerTimeZone(workspaceId, conversationId) {
+/**
+ * What the chat knows about the customer's setting: their time zone (from their browser, else the
+ * business's; the Playground has no browser) and the language of the page they're on.
+ */
+async function customerContext(workspaceId, conversationId) {
   const { rows } = await query(
-    "SELECT c.visitor->>'timezone' AS visitor, w.timezone AS workspace FROM workspaces w LEFT JOIN conversations c ON c.id = $2 AND c.workspace_id = w.id WHERE w.id = $1",
+    "SELECT c.visitor->>'timezone' AS visitor, c.visitor->>'language' AS language, w.timezone AS workspace FROM workspaces w LEFT JOIN conversations c ON c.id = $2 AND c.workspace_id = w.id WHERE w.id = $1",
     [workspaceId, conversationId]
   );
-  return validTimeZone(rows[0]?.visitor) || validTimeZone(rows[0]?.workspace) || "UTC";
+  return { timeZone: validTimeZone(rows[0]?.visitor) || validTimeZone(rows[0]?.workspace) || "UTC", pageLanguage: rows[0]?.language || null };
 }
 
 /**
@@ -96,7 +117,7 @@ async function customerTimeZone(workspaceId, conversationId) {
  * answer and the knowledge search, but only the customer's own words can ask for a person.
  * Returns { kind: answer | fallback | handoff | blocked, text, sources }.
  */
-export async function answerQuestion({ agent, question, file = null, history = [], draft = {}, countUsage = true, conversationId = null, inpageOrigin = null, playground = false }) {
+export async function answerQuestion({ agent, question, file = null, history = [], draft = {}, countUsage = true, conversationId = null, inpageOrigin = null, playground = false, pageLanguage = null }) {
   await assertCanAnswer(agent.workspace_id, { playground });
   const cfg = { ...agent, ...Object.fromEntries(Object.entries(draft || {}).filter(([, v]) => v !== undefined)) };
   const done = async (result) => {
@@ -120,8 +141,13 @@ export async function answerQuestion({ agent, question, file = null, history = [
     );
   }
 
+  // What the AI is doing, for the customer's chat ("Checking our system…"). Passing signals,
+  // nothing stored; a missed one only means the customer sees plain dots.
+  const progress = (step, data = {}) => (conversationId ? signal(`c:${conversationId}`, "progress", { step, ...data }).catch(() => {}) : null);
+  // A quick search shows nothing; a slow one (rewritten into three languages) says what it's doing.
+  const slowSearch = setTimeout(() => progress("search"), 1200);
   // A file's first lines help find the right knowledge (a photo of a broken sole finds returns).
-  const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history);
+  const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history).finally(() => clearTimeout(slowSearch));
   const asked = question || file?.text?.slice(0, 300) || file?.name || "";
   const tools = await agentTools(agent.id);
   // Nothing in the knowledge matches and there are no tools. Without handoff that's simply the
@@ -134,10 +160,12 @@ export async function answerQuestion({ agent, question, file = null, history = [
 
   let card = null;
   let toolTried = false;
+  const setting = await customerContext(agent.workspace_id, conversationId);
+  const page = pageLanguage || setting.pageLanguage;
   const integrations = [...new Set(tools.map((t) => t.integration.name))];
   const request = {
-    system: systemPrompt(cfg, integrations),
-    user: userPrompt(passages, history.slice(-8), question, await connectionsFor(conversationId), file ? fileContext(file, file.text) : "", describeNow(await customerTimeZone(agent.workspace_id, conversationId))),
+    system: systemPrompt(cfg, integrations, page),
+    user: userPrompt(passages, history.slice(-8), question, await connectionsFor(conversationId), file ? fileContext(file, file.text) : "", describeNow(setting.timeZone), page),
     meta: { task: "answer", passages, question: whole },
   };
   // What the customer and earlier tool results said: an order number or phone sent to a tool must come from here.
@@ -148,7 +176,9 @@ export async function answerQuestion({ agent, question, file = null, history = [
     toolTried = true;
     const invented = inventedIds(args, said.join("\n"));
     if (invented.length) return { error: "value_not_given", message: `Nobody gave ${invented.join(", ")} in this conversation, so nothing was looked up. Ask the customer for it; never guess.` };
+    await progress(found.tool.kind === "write" ? "confirm" : "tool", found.tool.progress ? { label: found.tool.progress } : {});
     const res = await runTool({ conversationId, integration: found.integration, tool: found.tool, args, inpageOrigin });
+    await progress("writing");
     said.push(JSON.stringify(res.output ?? null));
     if (res.card && !(card?.type === "connect")) card = res.card;
     return withEmptyHint(res.output);
@@ -204,7 +234,7 @@ export async function summarize(messages) {
 }
 
 /** One or two sentences telling the customer what happened to a change they confirmed or cancelled. */
-export async function describeOutcome({ agent, history, outcome }) {
+export async function describeOutcome({ agent, history, outcome, pageLanguage = null }) {
   const facts =
     outcome.status === "done"
       ? `Done: ${outcome.summary?.title || "the change"}. Result from ${outcome.name}: ${JSON.stringify(outcome.result ?? null).slice(0, 1500)}`
@@ -216,7 +246,7 @@ export async function describeOutcome({ agent, history, outcome }) {
   const said = [...history].reverse().find((m) => m.role === "visitor" && m.body?.trim())?.body.trim().slice(0, 300);
   try {
     const out = await ai.chatJSON({
-      system: `You are ${agent.name}, a support AI agent. Tell the customer the outcome in one or two short sentences. ${said ? `Write in the same language as the customer's last message: """${said}"""` : "Write in the language the customer used."} Don't invent details beyond the facts. Reply as JSON: {"answer": "..."}`,
+      system: `You are ${agent.name}, a support AI agent. Tell the customer the outcome in one or two short sentences. ${said ? `Write in the same language as the customer's last message: """${said}"""${pageLanguage ? `; if it has no clear language of its own, in ${languageName(pageLanguage)}` : ""}.` : pageLanguage ? `Write in ${languageName(pageLanguage)}.` : "Write in the language the customer used."} Don't invent details beyond the facts. Reply as JSON: {"answer": "..."}`,
       user: `Recent messages:\n${history.map((m) => `${m.role === "visitor" ? "Customer" : "Assistant"}: ${m.body}`).join("\n")}\n\nFacts: ${facts}`,
       maxTokens: 200,
       meta: { task: "outcome", outcome },

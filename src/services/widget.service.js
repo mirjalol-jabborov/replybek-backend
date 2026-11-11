@@ -14,6 +14,7 @@ import { logActivity } from "./activity.service.js";
 import { savedQuestions } from "./suggestions.service.js";
 import { assertCanAnswer } from "./workspaces.service.js";
 import { signal } from "./events.service.js";
+import { widgetTexts } from "./translations.service.js";
 
 const hash = (t) => crypto.createHash("sha256").update(t).digest("hex");
 // Visitors see their own messages, the AI's and teammates'. Never internal notes or system events.
@@ -33,6 +34,11 @@ export async function widgetAgent(publicKey, origin) {
     throw new HttpError(403, "This chat isn't enabled for this website.");
   }
   return agent;
+}
+
+/** The widget's settings for a visitor in `language`, with the greeting and questions translated when needed. */
+export async function localizedConfig(agent, language = "en") {
+  return { ...widgetConfig(agent, language), ...(await widgetTexts(agent, language)) };
 }
 
 export const widgetConfig = (agent, language = "en") => ({
@@ -119,7 +125,7 @@ export async function visibleMessages(convId, after) {
 const statusFor = (conv) => ({ status: conv.status, waiting_for_team: conv.status === "needs_human" || conv.status === "human" });
 
 /** A visitor's message, with an optional file. The AI answers only while it's handling the conversation. */
-export async function postVisitorMessage(agent, convId, token, text, inpageOrigin = null, file = null) {
+export async function postVisitorMessage(agent, convId, token, text, inpageOrigin = null, file = null, language = null) {
   if (!text && !file) throw new HttpError(400, "Write a message or attach a file.");
   const checked = file ? checkFile(file) : null;
   let conv = await ownConversation(agent, convId, token);
@@ -132,6 +138,10 @@ export async function postVisitorMessage(agent, convId, token, text, inpageOrigi
     conv = { ...conv, status: "ai" };
   }
   const messageId = await addMessageWithFile(conv, { role: "visitor", body: text, unread: conv.status !== "ai" }, file);
+  // The page's language, kept for later answers in this chat (after a sign-in or a confirmed change).
+  if (language && language !== conv.visitor?.language) {
+    await query("UPDATE conversations SET visitor = visitor || jsonb_build_object('language', $2::text) WHERE id = $1", [conv.id, language]);
+  }
   await query("UPDATE conversations SET visitor_seen_at = now() WHERE id = $1", [conv.id]);
   const subject = text || checked?.name || "";
   if (firstMessage) await query("UPDATE conversations SET subject = $2 WHERE id = $1", [conv.id, subject.length > 70 ? subject.slice(0, 67) + "…" : subject]);
@@ -139,7 +149,7 @@ export async function postVisitorMessage(agent, convId, token, text, inpageOrigi
   if (conv.status === "ai") {
     // The AI reads the file just before answering (a photo takes one model call). With the team
     // handling the chat it isn't read; later answers then just know a file came.
-    const ask = { text, file: checked ? () => readNewFile(agent, messageId, file.buffer, checked) : null };
+    const ask = { text, language, file: checked ? () => readNewFile(agent, messageId, file.buffer, checked) : null };
     // With in-page tools the answer runs tool calls in the customer's browser, so it can't finish
     // inside this request (the browser is waiting on it). Answer in the background; the widget polls.
     if (await agentHasInPageTools(agent.id)) {
@@ -171,7 +181,7 @@ async function readNewFile(agent, messageId, buffer, checked) {
 async function runAnswer(agent, conv, ask, history, inpageOrigin) {
   try {
     const file = ask.file ? await ask.file() : null;
-    return await answerQuestion({ agent, question: ask.text, file, history, conversationId: conv.id, inpageOrigin });
+    return await answerQuestion({ agent, question: ask.text, file, history, conversationId: conv.id, inpageOrigin, pageLanguage: ask.language });
   } catch (e) {
     // 402: the free trial ended unpaid. The visitor still gets the team, just not the AI.
     if (e.status !== 402) console.error(`Widget answer failed for agent ${agent.id}:`, e.message);
@@ -284,7 +294,7 @@ async function finalizeDecide(agent, conv, actionId, confirm, inpageOrigin) {
   const seen = await visibleMessages(conv.id);
   const outcome = await decideAction(conv.id, actionId, confirm, inpageOrigin);
   await query("UPDATE messages SET card = jsonb_set(card, '{status}', to_jsonb($3::text)) WHERE conversation_id = $1 AND card->>'action_id' = $2", [conv.id, actionId, outcome.status]);
-  const text = await describeOutcome({ agent, history: await forAI(conv.id, seen.slice(-6), 600), outcome });
+  const text = await describeOutcome({ agent, history: await forAI(conv.id, seen.slice(-6), 600), outcome, pageLanguage: conv.visitor?.language });
   await addMessage({ query }, conv, { role: "ai", body: text, kind: "answer" });
   if (outcome.continuation) {
     const next = outcome.continuation;

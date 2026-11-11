@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WIDGET_LANGUAGES, languageOf } from "./lib/languages.js";
 
 export const validate = (schema, source = "body") => (req, res, next) => {
   const parsed = schema.safeParse(req[source]);
@@ -67,6 +68,10 @@ export const agentCreateSchema = z.object({
   fallback: z.string().trim().max(500).optional(),
   handoff: z.boolean().default(true),
 });
+const widgetLanguage = z.enum(WIDGET_LANGUAGES);
+// The page's language (<html lang> or data-language), for replies to messages with no clear language of their own.
+const pageLanguage = z.string().max(35).optional().transform((v) => (v ? languageOf(v, null) ?? undefined : undefined));
+
 export const agentUpdateSchema = z.object({
   name: text(80).optional(),
   purpose: z.string().trim().max(500).optional(),
@@ -76,10 +81,11 @@ export const agentUpdateSchema = z.object({
   fallback: text(500).optional(),
   handoff: z.boolean().optional(),
   suggested_questions: z.array(text(180)).max(5).optional(),
-  suggested_questions_i18n: z.object({ en: z.array(text(180)).max(5).optional(), uz: z.array(text(180)).max(5).optional(), ru: z.array(text(180)).max(5).optional() }).strict().optional(),
-  suggestion_default_language: z.enum(["en", "uz", "ru"]).optional(),
+  // Keyed by the widget's languages (WIDGET_LANGUAGES); others are refused.
+  suggested_questions_i18n: z.record(widgetLanguage, z.array(text(180)).max(5)).optional(),
+  suggestion_default_language: widgetLanguage.optional(),
   // Empty means "show the main welcome message" for that language.
-  welcome_i18n: z.object({ en: z.string().trim().max(500).optional(), uz: z.string().trim().max(500).optional(), ru: z.string().trim().max(500).optional() }).strict().optional(),
+  welcome_i18n: z.record(widgetLanguage, z.string().trim().max(500)).optional(),
   allowed_origins: z.array(z.string().trim().url().max(200)).max(20).optional(),
   widget: z
     .object({
@@ -155,10 +161,11 @@ export const widgetStartSchema = z.object({
   page: z.string().trim().max(500).optional(),
   // The browser's time zone ("Asia/Tashkent"), so answers know the customer's "today".
   timezone: z.string().trim().max(64).optional(),
+  language: pageLanguage,
   // The chat the visitor left with "Start a new chat", proven by its token.
   previous: z.object({ id: z.string().uuid(), token: z.string().min(10).max(200) }).optional(),
 });
-export const widgetMessageSchema = z.object({ text: z.string().trim().max(2000).default("") });
+export const widgetMessageSchema = z.object({ text: z.string().trim().max(2000).default(""), language: pageLanguage });
 
 export const analyticsQuerySchema = z.object({
   days: z.coerce.number().int().refine((d) => [7, 30, 90].includes(d), "Use 7, 30 or 90 days.").default(30),
@@ -181,6 +188,8 @@ export const toolSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/, "Tool names use lowercase letters, digits and underscores."),
   description: text(600),
   when: text(600).optional(),
+  // Shown to the customer while it runs ("Checking your orders…"); the widget has a default.
+  progress: text(80).optional(),
   kind: z.enum(["read", "write"]).default("read"),
   input: z.object({ type: z.literal("object"), properties: z.record(z.any()).default({}), required: z.array(z.string()).optional() }).passthrough().default({ type: "object", properties: {} }),
   bindings: z.record(z.object({ source: z.enum(["customer", "context", "fixed", "step"]), path: z.string().max(200).optional(), value: z.any().optional() })).default({}),

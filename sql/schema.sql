@@ -477,6 +477,10 @@ ALTER TABLE attachments ADD COLUMN IF NOT EXISTS ai_text TEXT;
 -- The welcome message in other languages ({"uz": …, "ru": …, "en": …}). The widget shows the one for
 -- the page's language, and `welcome` when there's none.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS welcome_i18n JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Which greeting and suggested-question translations the AI made (for visitors in other languages),
+-- as { "welcome" | "questions": { "<lang>": { "from": <fingerprint of the original>, "at": <time> } } }.
+-- Languages without a mark are the owner's own and are never overwritten.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS auto_translations JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 -- ───── Is the visitor still there? ─────
 -- The widget checks in every 30 s while its page is open (and on every message and keystroke
