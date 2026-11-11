@@ -4,6 +4,11 @@ import { after, before, test } from "node:test";
 import { owner, browser, drainJobs, query } from "./helpers/setup.js";
 import { agentTools } from "../src/services/integrations.service.js";
 import { startPolling, stopPolling } from "../src/services/telegram-polling.service.js";
+import { forgetOldUpdates } from "../src/services/channels.service.js";
+import { fakeAI } from "../src/ai.js";
+
+// A short burst window: messages sent within it get one answer (in production it is 1.2 s).
+process.env.TELEGRAM_BURST_MS ??= "80";
 
 /**
  * The Telegram channel: connecting a bot, what arrives from a customer, and what is sent back.
@@ -260,6 +265,7 @@ test("a change is proposed as Confirm and Cancel buttons, in the customer's lang
   assert.ok(calls.some((c) => c.method === "answerCallbackQuery"), "the tapped button stops spinning");
   const settled = await until(() => calls.find((c) => c.method === "editMessageText"), "the buttons to be replaced");
   assert.match(settled.body.text, /Tasdiqlandi/, "the card says what happened and can't be tapped again");
+  assert.doesNotMatch(settled.body.text, /\u2014/, "no em dash in what the customer reads");
   await until(() => sent()[0], "the outcome in words");
 });
 
@@ -292,4 +298,83 @@ test("without a public address the bot asks Telegram for its updates, and answer
   } finally {
     stopPolling(channel.id);
   }
+});
+
+test("connecting a bot sets its menu: start and talk to a person, in every language", async () => {
+  const o = await owner();
+  const w = `/w/${o.ws.id}`;
+  const agent = (await o.b.call("POST", `${w}/agents`, { name: "Menu Support" })).body;
+  reset();
+  await o.b.call("POST", `${w}/agents/${agent.id}/channels/telegram`, { bot_token: botToken() });
+  const menus = calls.filter((c) => c.method === "setMyCommands");
+  assert.ok(menus.length >= 16, "a default menu and one per language");
+  assert.deepEqual(menus.find((c) => c.body.language_code === "uz").body.commands.map((x) => x.command), ["start", "operator"]);
+  assert.equal(menus.find((c) => c.body.language_code === "ja").body.commands[1].description, "担当者と話す");
+});
+
+test("messages sent in a row get one answer that has read them all", async () => {
+  const { channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  const before = fakeAI.calls.chat;
+  for (const part of ["Hello", "I have a question", "What is your return policy?"]) await fromTelegram(channel.id, customerSaid(6101, part));
+  const answer = await until(() => sent().find((c) => /30 days/.test(c.body.text)), "the one answer");
+  await new Promise((d) => setTimeout(d, 300));
+  assert.equal(sent().filter((c) => String(c.body.chat_id) === "6101").length, 1, "one answer for the burst, not three");
+  assert.match(answer.body.text, /30 days/);
+  const { rows } = await query("SELECT m.role, m.body FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.channel_chat_id = '6101' AND m.role IN ('visitor', 'ai') ORDER BY m.seq");
+  assert.deepEqual(rows.map((r) => r.role), ["visitor", "visitor", "visitor", "ai"], "every message is kept, in order");
+  assert.ok(fakeAI.calls.chat - before <= 2, "the AI answered once");
+});
+
+test("/start shows the suggested questions and Talk to a person as buttons", async () => {
+  const { b, w, agent, channel } = await agentWithBot();
+  await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Hi! How can I help?", suggested_questions_i18n: { en: ["What is your return policy?"] }, suggestion_default_language: "en", welcome_i18n: { uz: "Salom!" }, handoff: true });
+  SECRET = await secretOf(channel.id);
+  await fromTelegram(channel.id, customerSaid(6102, "/start"));
+  const welcome = await until(() => sent()[0], "the welcome");
+  assert.equal(welcome.body.text, "Salom!");
+  const rows = welcome.body.reply_markup.keyboard.map((row) => row[0].text);
+  assert.deepEqual(rows, ["[uz] What is your return policy?", "Xodim bilan gaplashish"], "the question, translated for an Uzbek customer, then the person button");
+});
+
+test("the person button and /operator hand the chat to the team", async () => {
+  const { channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  await fromTelegram(channel.id, customerSaid(6103, "Xodim bilan gaplashish"));
+  const notice = await until(() => sent()[0], "the handoff notice");
+  assert.match(notice.body.text, /xodim/i);
+  const { rows } = await query("SELECT status FROM conversations WHERE channel_chat_id = '6103'");
+  assert.equal(rows[0].status, "needs_human");
+  reset();
+  await fromTelegram(channel.id, customerSaid(6104, "/operator"));
+  await until(() => sent()[0], "the notice after /operator");
+  assert.equal((await query("SELECT status FROM conversations WHERE channel_chat_id = '6104'")).rows[0].status, "needs_human");
+});
+
+test("an unpublished agent's bot says it isn't answering instead of going quiet", async () => {
+  const { b, w, agent, channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  await b.call("POST", `${w}/agents/${agent.id}/unpublish`);
+  await fromTelegram(channel.id, customerSaid(6105, "Hello?"));
+  const reply = await until(() => sent()[0], "the unavailable notice");
+  assert.equal(reply.body.text, "Bu chat hozir javob bermayapti. Keyinroq qayta urinib koʻring.");
+});
+
+test("the inbox knows when a chat's bot can no longer carry replies", async () => {
+  const { b, w, agent, channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  await fromTelegram(channel.id, customerSaid(6106, "What is your return policy?"));
+  await until(() => sent()[0], "the answer");
+  const { rows } = await query("SELECT id FROM conversations WHERE channel_chat_id = '6106'");
+  assert.equal((await b.call("GET", `${w}/conversations/${rows[0].id}`)).body.channel_status, "active");
+  await b.call("DELETE", `${w}/agents/${agent.id}/channels/${channel.id}`);
+  assert.equal((await b.call("GET", `${w}/conversations/${rows[0].id}`)).body.channel_status, "removed");
+});
+
+test("old update ids are forgotten; recent ones are kept", async () => {
+  const { channel } = await agentWithBot();
+  await query("INSERT INTO channel_updates (channel_id, update_id, received_at) VALUES ($1, 'old-1', now() - interval '3 days'), ($1, 'new-1', now())", [channel.id]);
+  await forgetOldUpdates();
+  const { rows } = await query("SELECT update_id FROM channel_updates WHERE channel_id = $1 ORDER BY update_id", [channel.id]);
+  assert.deepEqual(rows.map((r) => r.update_id), ["new-1"]);
 });

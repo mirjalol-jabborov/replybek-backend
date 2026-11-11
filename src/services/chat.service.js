@@ -41,9 +41,9 @@ export async function forAI(conversationId, messages, max = 1500) {
 }
 
 /** Adds a message the customer is meant to read, and hands it to the channel that will carry it. */
-export async function say(conv, message) {
+export async function say(conv, message, delivery = {}) {
   const id = await addMessage({ query }, conv, message);
-  await deliver(conv, { id, ...message });
+  await deliver(conv, { id, ...message }, delivery);
   return id;
 }
 
@@ -104,8 +104,10 @@ async function answerInBackground(agent, conv, ask, history, inpageOrigin) {
  * A customer's message, with an optional file. The AI answers only while it's handling the
  * conversation. Returns the conversation as it now stands, the messages that existed before this
  * one (so a caller can show only what is new) and whether the answer is still being written.
+ * `answer: false` keeps the message (and reads its file) without answering: one of several sent in a
+ * row, which the answer to the last of them takes in.
  */
-export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin = null, language = null } = {}) {
+export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin = null, language = null, answer = true } = {}) {
   const checked = file ? checkFile(file) : null;
   const seen = await visibleMessages(conv.id);
   const history = await forAI(conv.id, seen);
@@ -126,6 +128,10 @@ export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin
     await query("UPDATE conversations SET subject = $2 WHERE id = $1", [conv.id, subject.length > 70 ? subject.slice(0, 67) + "…" : subject]);
   }
   if (conv.status !== "ai") return { conv, seen, thinking: false };
+  if (!answer) {
+    if (checked) await readNewFile(agent, messageId, file.buffer, checked).catch((e) => console.error(`Could not read a file on conversation ${conv.id}:`, e.message));
+    return { conv, seen, thinking: false };
+  }
 
   // The AI reads the file just before answering (a photo takes one model call). With the team
   // handling the chat it isn't read; later answers then just know a file came.

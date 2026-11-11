@@ -64,8 +64,24 @@ export const setWebhook = (token, url, secret) =>
 
 export const deleteWebhook = (token) => call(token, "deleteWebhook", { drop_pending_updates: true });
 
-export const sendMessage = (token, chatId, text, { keyboard } = {}) =>
-  call(token, "sendMessage", { chat_id: chatId, text, reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined });
+/**
+ * `keyboard`: buttons under the message (Confirm, Sign in). `replies`: rows of ready answers shown in
+ * place of the keyboard (suggested questions); tapping one sends it as the customer's message.
+ */
+export const sendMessage = (token, chatId, text, { keyboard, replies } = {}) =>
+  call(token, "sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: keyboard
+      ? { inline_keyboard: keyboard }
+      : replies?.length
+        ? { keyboard: replies.map((row) => row.map((label) => ({ text: label }))), resize_keyboard: true, one_time_keyboard: true }
+        : undefined,
+  });
+
+/** The commands in the bot's menu, in one language (`languageCode`) or by default. */
+export const setMyCommands = (token, commands, languageCode) =>
+  call(token, "setMyCommands", { commands, ...(languageCode ? { language_code: languageCode } : {}) });
 
 export const editMessageText = (token, chatId, messageId, text, { keyboard } = {}) =>
   call(token, "editMessageText", { chat_id: chatId, message_id: messageId, text, reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined });

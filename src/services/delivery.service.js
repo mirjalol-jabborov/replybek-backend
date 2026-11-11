@@ -66,12 +66,12 @@ export const languageOf = (conv) => conv.visitor?.language || "en";
  * that can't be delivered is logged and the conversation carries on, so one bad send doesn't
  * lose the answer that is already in the inbox.
  */
-export async function deliver(conv, message) {
+export async function deliver(conv, message, { replies } = {}) {
   if (conv.channel === "widget") return;
   try {
     const channel = await channelFor(conv);
     if (!channel) return;
-    if (channel.type === "telegram") await toTelegram(channel, conv, message);
+    if (channel.type === "telegram") await toTelegram(channel, conv, message, replies);
   } catch (e) {
     console.error(`Delivery failed for conversation ${conv.id}:`, e.message);
   }
@@ -83,7 +83,7 @@ export async function deliver(conv, message) {
  */
 export const notify = (conv, body) => deliver(conv, { body });
 
-async function toTelegram(channel, conv, message) {
+async function toTelegram(channel, conv, message, replies) {
   const language = languageOf(conv);
   const body = [message.body, cardText(message.card, language)].filter(Boolean).join("\n\n");
   const parts = telegram.split(body);
@@ -98,7 +98,8 @@ async function toTelegram(channel, conv, message) {
     let last;
     for (const [i, part] of parts.entries()) {
       // The buttons belong under the last part, so they sit at the bottom of the whole answer.
-      last = await send(channel, () => telegram.sendMessage(channel.token, conv.channel_chat_id, part, { keyboard: i === parts.length - 1 ? keyboard : null }));
+      const isLast = i === parts.length - 1;
+      last = await send(channel, () => telegram.sendMessage(channel.token, conv.channel_chat_id, part, { keyboard: isLast ? keyboard : null, replies: isLast && !keyboard ? replies : null }));
     }
     if (message.id && last?.message_id) {
       await query("UPDATE messages SET channel_message_id = $2 WHERE id = $1", [message.id, String(last.message_id)]);
@@ -123,7 +124,7 @@ export async function settleCard(conv, actionId, status) {
     if (!message) return;
     const language = languageOf(conv);
     const label = status === "done" ? "confirmed" : status === "cancelled" ? "cancelled" : "failed";
-    const body = [message.body, cardText(message.card, language), `— ${text(language, label)}`].filter(Boolean).join("\n\n");
+    const body = [message.body, cardText(message.card, language), text(language, label)].filter(Boolean).join("\n\n");
     await inOrder(`${channel.id}:${conv.channel_chat_id}`, () =>
       send(channel, () => telegram.editMessageText(channel.token, conv.channel_chat_id, Number(message.channel_message_id), telegram.split(body)[0], {}))
     );

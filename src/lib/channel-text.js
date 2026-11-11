@@ -11,6 +11,9 @@ import { fileURLToPath } from "url";
 const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../locales/channels.json");
 const STRINGS = JSON.parse(fs.readFileSync(file, "utf-8"));
 
+/** The languages the channel texts are written in. */
+export const LANGUAGES = Object.keys(STRINGS.confirm);
+
 export function text(language, key, params = {}) {
   const entry = STRINGS[key];
   if (!entry) throw new Error(`No channel text named ${key}.`);

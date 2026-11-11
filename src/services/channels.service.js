@@ -3,6 +3,7 @@ import { query } from "../db.js";
 import { HttpError, notFound } from "../lib/http.js";
 import { encrypt, decrypt } from "../lib/secrets.js";
 import * as telegram from "../lib/telegram.js";
+import { text, LANGUAGES } from "../lib/channel-text.js";
 import { logActivity } from "./activity.service.js";
 import { pollingMode, startPolling, stopPolling } from "./telegram-polling.service.js";
 
@@ -78,6 +79,14 @@ export async function connectTelegram(workspace, agentId, user, botToken) {
       throw new HttpError(400, `Telegram refused the webhook address ${webhookUrl(row.id)}: ${e.message}`);
     }
   }
+  // The menu next to the message box, in each language the bot speaks (Telegram picks by the app's language).
+  const menu = (language) => [
+    { command: "start", description: text(language, "commandStart") },
+    { command: "operator", description: text(language, "person") },
+  ];
+  await Promise.all([telegram.setMyCommands(botToken, menu("en")), ...LANGUAGES.map((language) => telegram.setMyCommands(botToken, menu(language), language))]).catch((e) =>
+    console.error(`Couldn't set the menu of ${config.account_name}:`, e.message)
+  );
   await logActivity(workspace.id, user?.id || null, "{actor} connected a Telegram channel", { actor: user?.name || "Someone" }, config.account_name);
   return safe(row);
 }

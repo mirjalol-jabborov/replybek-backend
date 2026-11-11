@@ -30,7 +30,7 @@ export async function listConversations(workspaceId, userId, { view = "all", age
       OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.role <> 'note' AND lower(m.body) LIKE $${params.length}))`);
   }
   const { rows } = await query(
-    `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.visitor - 'avatar' - 'attributes' AS visitor, (c.visitor ? 'avatar') AS has_avatar,
+    `SELECT c.id, c.agent_id, c.status, c.assignee_id, c.channel, c.visitor - 'avatar' - 'attributes' AS visitor, (c.visitor ? 'avatar') AS has_avatar,
             c.subject, c.unread, c.created_at, c.last_message_at,
             c.visitor_seen_at, c.left_at, c.continued_in, now() AS server_now,
             (SELECT json_build_object('role', m.role, 'body', m.body, 'author_id', m.author_id,
@@ -57,8 +57,10 @@ export async function getConversation(workspaceId, id, { markRead = true } = {})
   const c = await load(workspaceId, id);
   if (markRead && c.unread) await query("UPDATE conversations SET unread = false WHERE id = $1", [id]);
   const { visitor_token_hash, ...rest } = c;
+  // A messaging channel that was disconnected (or whose token was revoked) can't carry replies anymore.
+  const channel_status = c.channel === "widget" ? "active" : (await query("SELECT status FROM agent_channels WHERE id = $1", [c.channel_id])).rows[0]?.status || "removed";
   // server_now: the clock "seen 20 s ago" is measured against, whatever the viewer's clock says.
-  return { ...rest, unread: markRead ? false : c.unread, server_now: new Date().toISOString(), messages: await messagesOf(id) };
+  return { ...rest, channel_status, unread: markRead ? false : c.unread, server_now: new Date().toISOString(), messages: await messagesOf(id) };
 }
 
 /**
