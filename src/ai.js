@@ -191,7 +191,14 @@ const fake = {
       const ambiguous = /auth data|ui level/i.test(meta.goal) && (!meta.access_mode || meta.access_mode === "auto");
       return { summary: "Prepare the documented actions for your business goal.", endpoint_ids: meta.endpoints.filter(e => e.supported).map(e => e.id), access_mode: ambiguous ? "unknown" : meta.access_mode && meta.access_mode !== "auto" ? meta.access_mode : "server", questions: ambiguous ? ["Does your app use browser cookies or supply a user token?"] : [], requirements: [] };
     }
-    if (meta?.task === "translate_questions") return { questions: meta.questions.map(q => `[${meta.language}] ${q}`.slice(0, 180)) };
+    // Tests set fake.translationDelay (ms) to make visitors overlap, and fake.failTranslations to see the fallback.
+    if (meta?.task === "translate_questions" || meta?.task === "translate_welcome") {
+      fake.calls.translate = (fake.calls.translate || 0) + 1;
+      if (fake.translationDelay) await new Promise((done) => setTimeout(done, fake.translationDelay));
+      if (fake.failTranslations) throw new Error("Fixture AI failure");
+      if (meta.task === "translate_welcome") return { text: `[${meta.language}] ${meta.text}`.slice(0, 500) };
+      return { questions: meta.questions.map(q => `[${meta.language}] ${q}`.slice(0, 180)) };
+    }
     if (meta?.task === "suggestions") {
       return { questions: meta.passages.slice(0, 3).map((p) => ({
         text: meta.language === "uz" ? `${(p.heading || p.content).slice(0, 85)} haqida ma’lumot bera olasizmi?` : meta.language === "ru" ? `Что нужно знать: ${(p.heading || p.content).slice(0, 85)}?` : `What should I know about ${(p.heading || p.content).slice(0, 85)}?`, source_id: p.id,

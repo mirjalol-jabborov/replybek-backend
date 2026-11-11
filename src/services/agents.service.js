@@ -2,6 +2,7 @@ import { query } from "../db.js";
 import { notFound } from "../lib/http.js";
 import { logActivity } from "./activity.service.js";
 import { assertRoomFor } from "./workspaces.service.js";
+import { marksAfterEdit } from "./translations.service.js";
 
 const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins", "suggested_questions", "suggested_questions_i18n", "suggestion_default_language", "welcome_i18n"];
 
@@ -50,7 +51,7 @@ export async function createAgent(workspace, user, input) {
 }
 
 export async function updateAgent(workspaceId, agentId, input) {
-  await getAgent(workspaceId, agentId);
+  const before = await getAgent(workspaceId, agentId);
   const sets = [];
   const values = [agentId, workspaceId];
   for (const f of FIELDS) {
@@ -58,6 +59,11 @@ export async function updateAgent(workspaceId, agentId, input) {
       values.push(["suggested_questions", "suggested_questions_i18n", "welcome_i18n"].includes(f) ? JSON.stringify(input[f]) : input[f]);
       sets.push(`${f} = $${values.length}`);
     }
+  }
+  // A greeting or question list the owner changed is theirs now, no longer an automatic translation.
+  if (input.welcome_i18n !== undefined || input.suggested_questions_i18n !== undefined) {
+    values.push(JSON.stringify(marksAfterEdit(before, input)));
+    sets.push(`auto_translations = $${values.length}::jsonb`);
   }
   if (input.widget) {
     values.push(input.widget);
