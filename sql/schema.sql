@@ -406,6 +406,10 @@ ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS polar_subscription_id TEXT;
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_status TEXT;      -- Polar's status: trialing, active, past_due, canceled…
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS renews_at TIMESTAMPTZ;
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS cancel_at_period_end BOOLEAN NOT NULL DEFAULT false;
+-- When the current subscription went past_due (a renewal payment failed). Cleared once it's paid again.
+-- The workspace keeps working for OVERDUE_GRACE_DAYS after this, then counts as ended.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS past_due_since TIMESTAMPTZ;
+UPDATE workspaces SET past_due_since = now() WHERE subscription_status = 'past_due' AND past_due_since IS NULL;
 -- The free trial is Polar's (card required, status "trialing"); an app-side trial column was tried and dropped.
 ALTER TABLE workspaces DROP COLUMN IF EXISTS trial_ends_at;
 CREATE INDEX IF NOT EXISTS workspaces_polar_subscription ON workspaces (polar_subscription_id) WHERE polar_subscription_id IS NOT NULL;

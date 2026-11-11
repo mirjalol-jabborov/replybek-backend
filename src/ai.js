@@ -24,6 +24,38 @@ const READ_FILE = [
   'Reply with JSON only: {"text": "..."}',
 ].join("\n");
 
+/**
+ * Reads the model's JSON reply. With tools on, the model sometimes writes the same object twice
+ * in a row ({…}\n{…}); the first complete object is the answer.
+ */
+export function parseModelJSON(content) {
+  const text = String(content || "").trim() || "{}";
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Find where the first object ends, skipping braces inside strings.
+    const start = text.indexOf("{");
+    let depth = 0;
+    let inString = false;
+    for (let i = Math.max(start, 0); start >= 0 && i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === "\\") i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch {
+          break;
+        }
+      }
+    }
+    throw new Error("The model returned text that isn't JSON.");
+  }
+}
+
 let client;
 function openai() {
   if (!process.env.OPENAI_API_KEY) throw new HttpError(503, "AI answers aren't configured on this server yet.");
@@ -56,12 +88,7 @@ const real = {
       response_format: { type: "json_object" },
       max_completion_tokens: maxTokens,
     });
-    const content = res.choices[0]?.message?.content || "{}";
-    try {
-      return JSON.parse(content);
-    } catch {
-      throw new Error("The model returned text that isn't JSON.");
-    }
+    return parseModelJSON(res.choices[0]?.message?.content);
   },
 
   /**
@@ -84,13 +111,7 @@ const real = {
         max_completion_tokens: maxTokens,
       });
       const msg = res.choices[0]?.message;
-      if (!msg?.tool_calls?.length) {
-        try {
-          return JSON.parse(msg?.content || "{}");
-        } catch {
-          throw new Error("The model returned text that isn't JSON.");
-        }
-      }
+      if (!msg?.tool_calls?.length) return parseModelJSON(msg?.content);
       messages.push({ role: "assistant", content: msg.content || null, tool_calls: msg.tool_calls });
       for (const call of msg.tool_calls) {
         let args = {};
@@ -121,11 +142,7 @@ const real = {
       response_format: { type: "json_object" },
       max_completion_tokens: 900,
     });
-    try {
-      return String(JSON.parse(res.choices[0]?.message?.content || "{}").text || "").trim();
-    } catch {
-      throw new Error("The model returned text that isn't JSON.");
-    }
+    return String(parseModelJSON(res.choices[0]?.message?.content).text || "").trim();
   },
 
   /** True when OpenAI's moderation flags the text. */
@@ -155,6 +172,9 @@ function fakeVector(text) {
   const norm = Math.hypot(...v) || 1;
   return v.map((x) => x / norm);
 }
+
+// What the fake model treats as small talk, standing in for the real model's judgment.
+const FAKE_SMALL_TALK = /^(hi|hello|thanks|thank you|salom|rahmat|привет|спасибо)[.!]?$/i;
 
 const fake = {
   minSimilarity: 0.15,
@@ -186,8 +206,9 @@ const fake = {
     if (meta?.task === "summary") {
       return { bullets: meta.messages.filter((m) => m.role === "visitor").slice(0, 3).map((m) => `Customer said: ${m.body.slice(0, 80)}`) };
     }
-    if (meta?.task === "rewrite") return { queries: [] };
+    if (meta?.task === "rewrite") return { queries: [], small_talk: FAKE_SMALL_TALK.test(meta.question.trim()) };
     if (meta?.task === "outcome") return { answer: meta.outcome.status === "done" ? "Done." : meta.outcome.status === "cancelled" ? "Cancelled." : `Failed: ${meta.outcome.error}` };
+    if (FAKE_SMALL_TALK.test(meta.question.trim())) return { status: "answered", answer: "Hello! How can I help?", citations: [] };
     const top = meta.passages[0];
     // Like the real model: passages that barely share words with the question don't answer it.
     const q = new Set(words(meta.question));

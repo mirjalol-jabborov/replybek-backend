@@ -94,7 +94,8 @@ async function applySubscription(s, { actor = null, workspaceId: known = null } 
 
   const renewsAt = (s.status === "trialing" && s.trial_end) || s.current_period_end || null;
   await query(
-    `UPDATE workspaces SET plan = $2, polar_subscription_id = $3, subscription_status = $4, renews_at = $5, cancel_at_period_end = $6 WHERE id = $1`,
+    `UPDATE workspaces SET plan = $2, polar_subscription_id = $3, subscription_status = $4, renews_at = $5, cancel_at_period_end = $6,
+       past_due_since = CASE WHEN $4 = 'past_due' THEN COALESCE(past_due_since, now()) END WHERE id = $1`,
     [workspaceId, plan, s.id, s.status, renewsAt, Boolean(s.cancel_at_period_end)]
   );
   if (!current || ws.plan !== plan) {

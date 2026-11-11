@@ -1,6 +1,6 @@
 import { query } from "../db.js";
 import { notFound, forbidden, HttpError } from "../lib/http.js";
-import { billingAccess } from "../services/workspaces.service.js";
+import { billingAccess, overdue } from "../services/workspaces.service.js";
 
 const RANK = { agent: 1, admin: 2, owner: 3 };
 
@@ -45,5 +45,8 @@ export function readOnlyUntilTrial(req, res, next) {
   if (access !== "none" && access !== "ended") return next();
   if (!req.workspace.settings?.onboarded) return next();
   if (OPEN_WHILE_LOCKED.some((re) => re.test(req.path))) return next();
+  if (overdue(req.workspace)) {
+    return next(new HttpError(402, "Your last payment didn't go through. Update your card on Polar to make changes.", { code: "subscription_ended", overdue: true, reason: "read_only" }));
+  }
   next(new HttpError(402, access === "ended" ? "Your subscription has ended. Choose a plan to make changes." : "Start your 7-day free trial to make changes.", { code: access === "ended" ? "subscription_ended" : "trial_required", reason: "read_only" }));
 }

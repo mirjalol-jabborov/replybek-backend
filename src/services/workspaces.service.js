@@ -15,13 +15,27 @@ export const PLANS = {
 const PAID = new Set(["active", "trialing", "past_due"]);
 export const isPaid = (status) => PAID.has(status);
 
+// A failed renewal (past_due) keeps the workspace working this long while Polar retries the card.
+export const OVERDUE_GRACE_DAYS = 3;
+
+/** When a past_due workspace stops working, or null if it isn't past_due. */
+export function graceEndsAt(workspace) {
+  if (workspace.subscription_status !== "past_due" || !workspace.past_due_since) return null;
+  return new Date(new Date(workspace.past_due_since).getTime() + OVERDUE_GRACE_DAYS * 86400000);
+}
+
+/** Past due for longer than the grace period: treated as ended until the card is updated. */
+export const overdue = (workspace) => Boolean(graceEndsAt(workspace) && graceEndsAt(workspace) <= new Date());
+
 /**
- * "trial" (Polar's free trial, card on file), "paid", "none" (no trial started yet) or "ended";
- * null while billing is off (no Polar token), when everything is allowed.
+ * "trial" (Polar's free trial, card on file), "paid", "none" (no trial started yet) or "ended"
+ * (cancelled, or past due beyond the grace period); null while billing is off (no Polar token),
+ * when everything is allowed.
  */
 export function billingAccess(workspace) {
   if (!polarEnabled()) return null;
   if (workspace.subscription_status === "trialing") return "trial";
+  if (overdue(workspace)) return "ended";
   if (isPaid(workspace.subscription_status)) return "paid";
   return workspace.polar_subscription_id ? "ended" : "none";
 }
@@ -40,12 +54,15 @@ export function allowanceResets(now = new Date()) {
  * allowance before that), and only up to the plan's AI messages this month.
  */
 export async function assertCanAnswer(workspaceId, { playground = false } = {}) {
-  const { rows } = await query("SELECT plan, subscription_status, polar_subscription_id FROM workspaces WHERE id = $1", [workspaceId]);
+  const { rows } = await query("SELECT plan, subscription_status, polar_subscription_id, past_due_since FROM workspaces WHERE id = $1", [workspaceId]);
   if (!rows[0]) return;
   const used = await messagesUsed(workspaceId);
   const access = billingAccess(rows[0]);
   if (access === "none" || access === "ended") {
     if (access === "none" && playground && used < PREVIEW_MESSAGES) return;
+    if (overdue(rows[0])) {
+      throw new HttpError(402, "Your last payment didn't go through. Update your card on Polar to keep your agents answering.", { code: "subscription_ended", overdue: true, reason: playground ? "preview_used" : "not_live" });
+    }
     throw new HttpError(
       402,
       access === "ended"
@@ -92,7 +109,7 @@ export async function workspaceSummary(workspace, role) {
       [workspace.id]
     ),
   ]);
-  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, ...rest } = workspace;
+  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, past_due_since, ...rest } = workspace;
   const billing = {
     provider: polarEnabled() ? "polar" : null,
     access: billingAccess(workspace),
@@ -100,6 +117,8 @@ export async function workspaceSummary(workspace, role) {
     status: subscription_status || null,
     renews_at: renews_at || null,
     cancel_at_period_end: Boolean(cancel_at_period_end),
+    // Past due: when the agents stop answering unless the card is updated.
+    grace_ends_at: graceEndsAt(workspace)?.toISOString() || null,
     // The owner opens Polar's customer portal through POST /billing/portal.
     can_manage: role === "owner" && Boolean(polar_subscription_id),
   };

@@ -153,6 +153,8 @@ export const widgetVisitorSchema = z.object(visitorFields);
 export const widgetStartSchema = z.object({
   ...visitorFields,
   page: z.string().trim().max(500).optional(),
+  // The browser's time zone ("Asia/Tashkent"), so answers know the customer's "today".
+  timezone: z.string().trim().max(64).optional(),
   // The chat the visitor left with "Start a new chat", proven by its token.
   previous: z.object({ id: z.string().uuid(), token: z.string().min(10).max(200) }).optional(),
 });

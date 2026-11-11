@@ -56,11 +56,13 @@ const hasKnowledge = async (agentId) => (await query("SELECT 1 FROM chunks WHERE
 
 /**
  * Finds the passages to answer from. If the first search is weak, or the message is a follow-up
- * ("and for Canada?"), the model writes up to two better search queries (including one in the
- * other language, for sites with Uzbek and Russian docs) and those results are merged in.
+ * ("and for Canada?"), the model rewrites it as a query in each of Uzbek, Russian and English
+ * (documents can be in any of them) and those results are merged in.
+ * That same step spots small talk ("salom", "thanks"), which needs no knowledge at all.
+ * Returns { passages, smallTalk }.
  */
 export async function retrieve(agent, question, history = []) {
-  if (!(await hasKnowledge(agent.id))) return [];
+  if (!(await hasKnowledge(agent.id))) return { passages: [], smallTalk: false };
   const [vector] = await ai.embed([question]);
   const found = new Map();
   const add = (rows) => {
@@ -77,13 +79,14 @@ export async function retrieve(agent, question, history = []) {
     const out = await ai
       .chatJSON({
         system:
-          'You write search queries for a help-center search. Rewrite the customer\'s latest message as up to 2 short, self-contained queries (resolve "it", "that", "and for…" from the conversation). If the message is in Uzbek, make one query Russian; if Russian, make one Uzbek; if English, keep English. Reply as JSON: {"queries": ["..."]}',
+          'You write search queries for a help-center search. Rewrite the customer\'s latest message as one short, self-contained query (resolve "it", "that", "and for…" from the conversation), translated into each of Uzbek (Latin script), Russian and English, because the business\'s documents can be in any of them. Always fill all three. If the message is only a greeting, thanks, goodbye or other small talk with nothing to look up, leave the queries empty and set "small_talk" to true. Reply as JSON: {"uz": "...", "ru": "...", "en": "...", "small_talk": false}',
         user: `${recent ? `Conversation:\n${recent}\n\n` : ""}Latest message: ${question}`,
-        maxTokens: 120,
+        maxTokens: 160,
         meta: { task: "rewrite", question },
       })
-      .catch(() => ({ queries: [] }));
-    const queries = (Array.isArray(out.queries) ? out.queries : []).map(String).filter((q) => q.trim() && q.trim() !== question.trim()).slice(0, 2);
+      .catch(() => ({}));
+    if (out.small_talk === true) return { passages: [], smallTalk: true };
+    const queries = [...new Set([out.uz, out.ru, out.en, ...(Array.isArray(out.queries) ? out.queries : [])].map((q) => String(q || "").trim()))].filter((q) => q && q !== question.trim()).slice(0, 3);
     if (queries.length) {
       const vectors = await ai.embed(queries);
       for (let i = 0; i < queries.length; i++) add(await searchKnowledge(agent.id, vectors[i], keywordQuery(queries[i])));
@@ -91,8 +94,9 @@ export async function retrieve(agent, question, history = []) {
   }
 
   // Keep clearly similar passages, and keyword matches that are at least somewhat similar.
-  return [...found.values()]
+  const passages = [...found.values()]
     .filter((r) => r.similarity >= ai.minSimilarity || (r.keyword != null && r.similarity >= ai.minSimilarity * 0.6))
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
+  return { passages, smallTalk: false };
 }

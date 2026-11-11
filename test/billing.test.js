@@ -252,6 +252,51 @@ test("the free trial starts only through Polar checkout (card on file); before i
   assert.equal(ended.body.code, "subscription_ended");
 });
 
+test("a failed renewal keeps working for 3 days, then the workspace stops until the card is updated", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  const agent = (await b.call("POST", `${w}/agents`, { name: "Help" })).body;
+  assert.equal((await b.call("POST", `${w}/onboarding/complete`, {})).status, 200);
+  const sub = subscription({ id: "sub_overdue", product_id: PRODUCTS.growth, metadata: { workspace_id: ws.id } });
+  await deliver("subscription.active", sub);
+
+  // Polar retries the card; meanwhile nothing changes, and the dashboard can say until when.
+  await deliver("subscription.past_due", { ...sub, status: "past_due" });
+  let s = (await b.call("GET", w)).body;
+  assert.equal(s.billing.access, "paid");
+  const graceLeft = new Date(s.billing.grace_ends_at) - Date.now();
+  assert.ok(graceLeft > 2.9 * 86400000 && graceLeft <= 3 * 86400000, "grace ends in 3 days");
+  assert.equal((await b.call("POST", `${w}/agents/${agent.id}/test`, { question: "Hi there" })).status, 200);
+  // Another retry failing doesn't restart the clock.
+  await setup.query("UPDATE workspaces SET past_due_since = now() - interval '1 day' WHERE id = $1", [ws.id]);
+  await deliver("subscription.updated", { ...sub, status: "past_due" });
+  assert.ok(new Date((await b.call("GET", w)).body.billing.grace_ends_at) - Date.now() < 2.1 * 86400000);
+
+  // After 3 days: no AI, read-only, and the message says to update the card, not that the plan ended.
+  await setup.query("UPDATE workspaces SET past_due_since = now() - interval '3 days 1 minute' WHERE id = $1", [ws.id]);
+  s = (await b.call("GET", w)).body;
+  assert.equal(s.billing.access, "ended");
+  assert.equal(s.billing.status, "past_due");
+  const answer = await b.call("POST", `${w}/agents/${agent.id}/test`, { question: "Hi there" });
+  assert.equal(answer.status, 402);
+  assert.match(answer.body.message, /last payment didn't go through/);
+  assert.equal(answer.body.code, "subscription_ended");
+  assert.equal(answer.body.overdue, true);
+  const edit = await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Changed" });
+  assert.equal(edit.status, 402);
+  assert.match(edit.body.message, /Update your card on Polar to make changes/);
+  assert.equal((await b.call("POST", `${w}/billing/portal`)).status, 200, "the owner can still reach the card form");
+
+  // The retry with the new card goes through: everything is back, and the next failure gets a fresh 3 days.
+  await deliver("subscription.updated", sub);
+  s = (await b.call("GET", w)).body;
+  assert.equal(s.billing.access, "paid");
+  assert.equal(s.billing.grace_ends_at, null);
+  assert.equal((await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Changed" })).status, 200);
+  await deliver("subscription.past_due", { ...sub, status: "past_due" });
+  assert.equal((await b.call("GET", w)).body.billing.access, "paid");
+});
+
 test("before the trial a workspace is read-only once onboarding is done; the trial unlocks it", async () => {
   const { b, ws } = await owner();
   const w = `/w/${ws.id}`;

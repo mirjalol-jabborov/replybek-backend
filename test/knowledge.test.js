@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import { after, before, test } from "node:test";
-import { owner, drainJobs, query } from "./helpers/setup.js";
+import { owner, browser, drainJobs, query } from "./helpers/setup.js";
+import { fakeAI } from "../src/ai.js";
 
 // A tiny website for the crawler: two help pages, a page robots.txt forbids, and a 404.
 let site;
@@ -65,6 +66,33 @@ test("unknown questions get the fallback and are collected as unanswered; adding
   await drainJobs();
   assert.ok((await b.call("GET", `${w}/unanswered`)).body[0].answered_at);
   assert.equal((await b.call("POST", `${a}/test`, { question: "Can you ship to Canada?" })).body.kind, "answer");
+});
+
+test("greetings get a reply without sources and aren't collected as unanswered", async () => {
+  const { b, w, a } = await setup();
+  await b.call("POST", `${a}/sources/qa`, { question: "Do you offer gift wrapping?", answer: "Yes, for $5." });
+  await drainJobs();
+  for (const question of ["salom", "Thanks!"]) {
+    const r = await b.call("POST", `${a}/test`, { question, draft: { handoff: false } });
+    assert.equal(r.body.kind, "answer", `${question} is answered, not the fallback`);
+    assert.deepEqual(r.body.sources, [], `${question} shows no sources`);
+  }
+  assert.equal((await b.call("GET", `${w}/unanswered`)).body.length, 0);
+});
+
+test("answers know the customer's local date and time, from the browser or else the business", async () => {
+  const { b, w, a, agent } = await setup();
+  await b.call("POST", `${a}/publish`);
+  const ask = async (start) => {
+    const v = browser();
+    const c = (await v.call("POST", `/widget/${agent.public_key}/conversations`, start)).body;
+    await v.call("POST", `/widget/${agent.public_key}/conversations/${c.conversation_id}/messages`, { text: "Are you open today?" }, { "X-Visitor-Token": c.visitor_token });
+    return fakeAI.lastAnswer.user;
+  };
+  assert.match(await ask({ timezone: "Asia/Tashkent" }), /Customer's local date and time now: \w+day \d{4}-\d\d-\d\d, \d\d:\d\d \(Asia\/Tashkent, GMT\+5\)/);
+  await b.call("PATCH", w, { timezone: "Europe/Moscow" });
+  assert.match(await ask({}), /\(Europe\/Moscow, GMT\+3\)/, "without one from the browser, the business's time zone");
+  assert.match(await ask({ timezone: "Mars/Base" }), /\(Europe\/Moscow, GMT\+3\)/, "a made-up time zone is ignored");
 });
 
 test("Playground draft settings apply without saving", async () => {
