@@ -1,11 +1,12 @@
 import crypto from "crypto";
-import { query } from "../db.js";
+import { query, tx } from "../db.js";
 import { text } from "../lib/channel-text.js";
 import * as telegram from "../lib/telegram.js";
 import { languageOf } from "./suggestions.service.js";
 import { receiveMessage, decide, say, handToTeam } from "./chat.service.js";
 import { notify } from "./delivery.service.js";
-import { firstTime } from "./channels.service.js";
+import { firstTime, loadChannel, linkBusinessOwner, saveBusinessConnection } from "./channels.service.js";
+import { addMessage, addMessageWithFile } from "./conversations.service.js";
 import { widgetTexts } from "./translations.service.js";
 
 /**
@@ -66,9 +67,13 @@ async function agentFor(channel) {
   return rows[0] || null;
 }
 
-/** The open conversation for this chat, or a new one. The chat itself is the customer's identity. */
-async function openConversation(agent, channel, chat, from) {
-  const chatId = String(chat.id);
+/**
+ * The open conversation for this chat, or a new one. The chat itself is the customer's identity.
+ * A Telegram Business chat (`business`) is a different chat from the bot's own one with the same
+ * person, though Telegram gives both the same id, so its key carries a "biz:" prefix.
+ */
+async function openConversation(agent, channel, chat, from, business = false) {
+  const chatId = business ? `biz:${chat.id}` : String(chat.id);
   const { rows } = await query(
     "SELECT * FROM conversations WHERE channel_id = $1 AND channel_chat_id = $2 AND status <> 'resolved' ORDER BY created_at DESC LIMIT 1",
     [channel.id, chatId]
@@ -85,15 +90,15 @@ async function openConversation(agent, channel, chat, from) {
   // so it stands in for the token the widget hands a browser.
   const { rows: created } = await query(
     `INSERT INTO conversations (workspace_id, agent_id, channel, channel_id, channel_chat_id, visitor, visitor_token_hash, unread, visitor_seen_at)
-     VALUES ($1, $2, 'telegram', $3, $4, $5, $6, false, now()) RETURNING *`,
-    [agent.workspace_id, agent.id, channel.id, chatId, visitor, hash(`${channel.id}:${chatId}`)]
+     VALUES ($1, $2, $7, $3, $4, $5, $6, false, now()) RETURNING *`,
+    [agent.workspace_id, agent.id, channel.id, chatId, visitor, hash(`${channel.id}:${chatId}`), business ? "telegram_business" : "telegram"]
   );
   return created[0];
 }
 
 /** Keeps the three dots alive while an answer is being written. */
-async function whileWorking(channel, chatId, work) {
-  const tick = () => telegram.sendChatAction(channel.token, chatId).catch(() => {});
+async function whileWorking(channel, chatId, work, business = null) {
+  const tick = () => telegram.sendChatAction(channel.token, chatId, "typing", business).catch(() => {});
   await tick();
   const timer = setInterval(tick, 4000);
   try {
@@ -115,10 +120,16 @@ async function attachmentOf(channel, message) {
   return { file: { buffer, originalname: name, mimetype: message.document?.mime_type }, refused: null };
 }
 
-/** The greeting, with the suggested questions and "Talk to a person" as buttons to tap. */
-async function greet(agent, conv, language) {
+/**
+ * The greeting, with the suggested questions and "Talk to a person" as buttons to tap, as far as the
+ * channel's settings allow. With neither, any buttons from an earlier greeting are taken away.
+ */
+async function greet(agent, conv, language, channel) {
   const { welcome, suggestions } = await widgetTexts(agent, language);
-  const replies = [...(suggestions || []).map((q) => [q]), ...(agent.handoff ? [[text(language, "person")]] : [])];
+  const replies = [
+    ...(channel.config.suggestions !== false ? (suggestions || []).map((q) => [q]) : []),
+    ...(agent.handoff && channel.config.person_button !== false ? [[text(language, "person")]] : []),
+  ];
   if (welcome) await say(conv, { role: "ai", body: welcome, kind: "answer" }, { replies });
 }
 
@@ -129,10 +140,13 @@ async function askForPerson(agent, conv, body, language) {
   await notify(conv, text(language, "handoff"));
 }
 
-/** A burst of messages from one chat: all are kept, and the last readable one is answered. */
-async function answerBatch(channel, agent, messages) {
+/**
+ * A burst of messages from one chat: all are kept, and the last readable one is answered.
+ * `business`: the connection it came through, for a Telegram Business chat.
+ */
+async function answerBatch(channel, agent, messages, business = null) {
   const first = messages[0];
-  let conv = await openConversation(agent, channel, first.chat, first.from || {});
+  let conv = await openConversation(agent, channel, first.chat, first.from || {}, Boolean(business));
   const language = conv.visitor?.language || "en";
   const readable = [];
   for (const message of messages) {
@@ -159,7 +173,7 @@ async function answerBatch(channel, agent, messages) {
         if (!e.status) console.error(`Telegram message failed for conversation ${conv.id}:`, e.message);
       }
     }
-  });
+  }, business);
 }
 
 function handleMessage(channel, agent, message) {
@@ -172,7 +186,7 @@ function handleMessage(channel, agent, message) {
     return inChat(key, async () => {
       const conv = await openConversation(agent, channel, message.chat, message.from || {});
       const language = conv.visitor?.language || "en";
-      if (command === "/start") await greet(agent, conv, language);
+      if (command === "/start") await greet(agent, conv, language, channel);
       else if (agent.handoff) await askForPerson(agent, conv, text(language, "person"), language);
       else await answerBatch(channel, agent, [message]);
     });
@@ -191,9 +205,16 @@ function handleCallback(channel, agent, callback) {
   // Stops the spinner on the tapped button straight away; the answer follows as a message.
   telegram.answerCallbackQuery(channel.token, callback.id).catch(() => {});
   const [action, actionId] = String(callback.data || "").split(":");
-  if (!["confirm", "cancel"].includes(action) || !actionId || chatId == null) return;
-  return inChat(`${channel.id}:${chatId}`, async () => {
-    const { rows } = await query("SELECT * FROM conversations WHERE channel_id = $1 AND channel_chat_id = $2 ORDER BY created_at DESC LIMIT 1", [channel.id, String(chatId)]);
+  if (!["confirm", "cancel"].includes(action) || !/^[0-9a-f-]{36}$/i.test(actionId || "") || chatId == null) return;
+  // A button in a Telegram Business chat comes with the connection it was sent through.
+  const business = callback.message?.business_connection_id || null;
+  const key = business ? `${channel.id}:biz:${chatId}` : `${channel.id}:${chatId}`;
+  return inChat(key, async () => {
+    // The card's own conversation, on this channel, so a tap can only decide what it was sent with.
+    const { rows } = await query(
+      "SELECT c.* FROM pending_actions p JOIN conversations c ON c.id = p.conversation_id WHERE p.id = $1 AND c.channel_id = $2 AND c.channel_chat_id = $3",
+      [actionId, channel.id, business ? `biz:${chatId}` : String(chatId)]
+    );
     const conv = rows[0];
     if (!conv) return;
     await whileWorking(channel, chatId, async () => {
@@ -203,8 +224,94 @@ function handleCallback(channel, agent, callback) {
         // 409: the same card was already confirmed or cancelled. The buttons are about to go.
         if (e.status !== 409) console.error(`Telegram decision failed for conversation ${conv.id}:`, e.message);
       }
-    });
+    }, business);
   });
+}
+
+/** The owner's own reply to the bot's private chat with them: a note about the business setup. */
+const tellOwner = (channel, chatId, language, key, params) => telegram.sendMessage(channel.token, chatId, text(languageOf(language), key, params)).catch(() => {});
+
+/** "/start biz_<code>": the owner opened the dashboard's link, so this Telegram account is theirs. */
+async function linkOwner(channel, message, code) {
+  const from = message.from || {};
+  const outcome = await linkBusinessOwner(channel, code, from);
+  if (!outcome) return;
+  if (outcome === "expired") return tellOwner(channel, message.chat.id, from.language_code, "businessLinkExpired");
+  // The bot may already have been added in Telegram Business before the link was opened.
+  const fresh = await loadChannel(channel.id);
+  const added = Object.values(fresh?.config.business?.connections || {}).some((c) => c.user_id === from.id && c.enabled);
+  await tellOwner(channel, message.chat.id, from.language_code, added ? "businessConnected" : "businessLinked", { bot: channel.config.account_name || "" });
+}
+
+/** Telegram Business added, changed or removed the bot. The owner hears whether it is answering now. */
+async function onBusinessConnection(channel, connection) {
+  const { isOwner, answering } = await saveBusinessConnection(channel, connection);
+  if (!isOwner || !connection.is_enabled || connection.user_chat_id == null) return;
+  await tellOwner(channel, connection.user_chat_id, connection.user?.language_code, answering ? "businessConnected" : "businessNoReply");
+}
+
+/** The workspace member who linked the business account, if they are still in the workspace. */
+async function memberOf(channel, memberId) {
+  if (!memberId) return null;
+  const { rows } = await query("SELECT user_id FROM memberships WHERE workspace_id = $1 AND user_id = $2", [channel.workspace_id, memberId]);
+  return rows[0]?.user_id || null;
+}
+
+/**
+ * The owner wrote in a business chat from their own Telegram. It goes in the transcript as a team
+ * reply, and the chat is theirs from then on: the AI stays out of it until it is handed back.
+ */
+async function ownerWrote(channel, agent, message, owner) {
+  const chat = message.chat;
+  const conv = await openConversation(agent, channel, chat, { id: chat.id, first_name: chat.first_name, last_name: chat.last_name, username: chat.username }, true);
+  let file = null;
+  try {
+    file = (await attachmentOf(channel, message)).file;
+  } catch (e) {
+    console.error(`Could not read the owner's file in chat ${chat.id}:`, e.message);
+  }
+  const body = message.text || message.caption || "";
+  if (!body && !file) return; // a sticker or a voice note: nothing the transcript can show
+  const member = await memberOf(channel, owner.member_id);
+  if (conv.status !== "human") {
+    await tx(async (c) => {
+      await c.query("UPDATE conversations SET status = 'human', assignee_id = $2, escalated_at = COALESCE(escalated_at, now()) WHERE id = $1", [conv.id, member]);
+      await addMessage(c, conv, { role: "system", body: "Replied in Telegram · AI paused" });
+    });
+  }
+  try {
+    await addMessageWithFile(conv, { role: "human", body, author_id: member }, file);
+  } catch {
+    // A file the inbox can't keep (its type or size): the words still go in.
+    await addMessage({ query }, conv, { role: "human", body: body || file.originalname, author_id: member });
+  }
+}
+
+/**
+ * A message in one of the owner's business chats. Only the linked owner's connection counts, and
+ * only while Telegram lets the bot reply there. The bot's own messages come back as updates too.
+ */
+async function handleBusinessMessage(channel, agent, message) {
+  if (message.chat?.type !== "private" || message.sender_business_bot) return;
+  // Read now: a link or a connection may have changed since this channel was loaded.
+  let business = (await loadChannel(channel.id))?.config.business || {};
+  // A connection we never heard about (its report came while we weren't listening, or was
+  // forgotten): Telegram can tell us about it, so the chat isn't ignored.
+  if (business.owner && message.business_connection_id && !business.connections?.[message.business_connection_id]) {
+    try {
+      await saveBusinessConnection(channel, await telegram.getBusinessConnection(channel.token, message.business_connection_id));
+      business = (await loadChannel(channel.id))?.config.business || {};
+    } catch (e) {
+      console.error(`Couldn't look up business connection on channel ${channel.id}:`, e.message);
+    }
+  }
+  const owner = business.owner;
+  const connection = business.connections?.[message.business_connection_id];
+  if (!owner || !connection || connection.user_id !== owner.id || !connection.enabled) return;
+  const key = `${channel.id}:biz:${message.chat.id}`;
+  if (message.from?.id === owner.id) return inChat(key, () => ownerWrote(channel, agent, message, owner));
+  if (!connection.can_reply) return;
+  return inChat(key, async () => collect(key, message, (batch) => answerBatch(channel, agent, batch, message.business_connection_id)));
 }
 
 /**
@@ -213,7 +320,13 @@ function handleCallback(channel, agent, callback) {
  */
 export async function handleUpdate(channel, update) {
   if (!(await firstTime(channel.id, update.update_id))) return;
+  // The business setup works whether or not the agent is published yet.
+  if (update.business_connection) return onBusinessConnection(channel, update.business_connection);
+  const link = update.message?.chat?.type === "private" && /^\/start\s+biz_([\w-]{10,64})$/.exec((update.message.text || "").trim());
+  if (link) return linkOwner(channel, update.message, link[1]);
   const agent = await agentFor(channel);
+  // In a business chat the customer is writing to a person, so a draft agent just stays out of it.
+  if (update.business_message) return agent ? handleBusinessMessage(channel, agent, update.business_message) : undefined;
   if (!agent) {
     // Nothing to answer with: the agent is a draft, paused or gone. The customer hears that much
     // rather than silence, and the owner gets a trail for why a connected bot went quiet.

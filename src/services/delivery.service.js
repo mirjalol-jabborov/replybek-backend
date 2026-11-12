@@ -1,7 +1,7 @@
 import { query } from "../db.js";
 import { text } from "../lib/channel-text.js";
 import * as telegram from "../lib/telegram.js";
-import { channelFor, disableChannel } from "./channels.service.js";
+import { channelFor, disableChannel, businessConnection } from "./channels.service.js";
 import { connectUrl } from "./integrations.service.js";
 
 /**
@@ -62,6 +62,17 @@ function cardText(card, language) {
 export const languageOf = (conv) => conv.visitor?.language || "en";
 
 /**
+ * The Telegram chat a conversation goes to, and for a Telegram Business chat the connection to send
+ * as. Null when a business chat can't be answered now (the owner removed the bot, or took away its
+ * permission to reply).
+ */
+function targetOf(channel, conv) {
+  if (conv.channel !== "telegram_business") return { chatId: conv.channel_chat_id, business: null };
+  const business = businessConnection(channel);
+  return business ? { chatId: conv.channel_chat_id.replace(/^biz:/, ""), business } : null;
+}
+
+/**
  * Hands a saved message to the channel that carries this conversation. Never throws: a message
  * that can't be delivered is logged and the conversation carries on, so one bad send doesn't
  * lose the answer that is already in the inbox.
@@ -84,13 +95,16 @@ export async function deliver(conv, message, { replies } = {}) {
 export const notify = (conv, body) => deliver(conv, { body });
 
 async function toTelegram(channel, conv, message, replies) {
+  const target = targetOf(channel, conv);
+  if (!target) throw new Error("Telegram Business is not connected, so the message stays in the inbox only.");
+  const { chatId, business } = target;
   const language = languageOf(conv);
   const body = [message.body, cardText(message.card, language)].filter(Boolean).join("\n\n");
   const parts = telegram.split(body);
   if (message.file) {
     // A teammate's attachment goes with its own text as the caption, so it arrives as one thing.
     const caption = parts.length === 1 ? parts.shift() : "";
-    await inOrder(`${channel.id}:${conv.channel_chat_id}`, () => send(channel, () => telegram.sendFile(channel.token, conv.channel_chat_id, message.file, caption)));
+    await inOrder(`${channel.id}:${conv.channel_chat_id}`, () => send(channel, () => telegram.sendFile(channel.token, chatId, message.file, caption, business)));
   }
   if (!parts.length) return;
   const keyboard = await keyboardFor(conv, message.card, language);
@@ -99,7 +113,7 @@ async function toTelegram(channel, conv, message, replies) {
     for (const [i, part] of parts.entries()) {
       // The buttons belong under the last part, so they sit at the bottom of the whole answer.
       const isLast = i === parts.length - 1;
-      last = await send(channel, () => telegram.sendMessage(channel.token, conv.channel_chat_id, part, { keyboard: isLast ? keyboard : null, replies: isLast && !keyboard ? replies : null }));
+      last = await send(channel, () => telegram.sendMessage(channel.token, chatId, part, { keyboard: isLast ? keyboard : null, replies: isLast && !keyboard ? replies : null, business }));
     }
     if (message.id && last?.message_id) {
       await query("UPDATE messages SET channel_message_id = $2 WHERE id = $1", [message.id, String(last.message_id)]);
@@ -122,11 +136,13 @@ export async function settleCard(conv, actionId, status) {
     );
     const message = rows[0];
     if (!message) return;
+    const target = targetOf(channel, conv);
+    if (!target) return;
     const language = languageOf(conv);
     const label = status === "done" ? "confirmed" : status === "cancelled" ? "cancelled" : "failed";
     const body = [message.body, cardText(message.card, language), text(language, label)].filter(Boolean).join("\n\n");
     await inOrder(`${channel.id}:${conv.channel_chat_id}`, () =>
-      send(channel, () => telegram.editMessageText(channel.token, conv.channel_chat_id, Number(message.channel_message_id), telegram.split(body)[0], {}))
+      send(channel, () => telegram.editMessageText(channel.token, target.chatId, Number(message.channel_message_id), telegram.split(body)[0], { business: target.business }))
     );
   } catch (e) {
     console.error(`Could not settle the card on conversation ${conv.id}:`, e.message);

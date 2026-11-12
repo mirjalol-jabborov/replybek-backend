@@ -6,7 +6,7 @@ import { requireWorkspace, requireRole, readOnlyUntilTrial } from "../middleware
 import { rateLimit } from "../middlewares/rateLimit.js";
 import { workspaceSummary, updateWorkspace, listMembers } from "../services/workspaces.service.js";
 import { listAgents, getAgent, createAgent, updateAgent, setAgentStatus, deleteAgent } from "../services/agents.service.js";
-import { listChannels, connectTelegram, disconnectChannel } from "../services/channels.service.js";
+import { listChannels, connectTelegram, disconnectChannel, botProfile, updateBot, businessStatus, startBusinessLink, unlinkBusiness } from "../services/channels.service.js";
 import { listSources, listWorkspaceSources, getSource, addWebsite, previewWebsite, addQA, addFile, retrySource, resyncSource, updateSource, listPages, removeSource, listUnanswered, dismissUnanswered } from "../services/sources.service.js";
 import { answerQuestion } from "../services/answer.service.js";
 import * as convs from "../services/conversations.service.js";
@@ -17,7 +17,7 @@ import { listInvites, createInvite, resendInvite, revokeInvite, updateMemberRole
 import { analytics } from "../services/analytics.service.js";
 import { changePlan } from "../services/workspaces.service.js";
 import { startCheckout, billingPortal, syncSubscription } from "../services/billing.service.js";
-import { analyzeSite, completeOnboarding } from "../services/onboarding.service.js";
+import { analyzeSite, analyzeDocs, completeOnboarding } from "../services/onboarding.service.js";
 import { listIntegrations, createIntegration, updateIntegration, deleteIntegration, redirectUri, previewTool, loadIntegration, simulateProcedure } from "../services/integrations.service.js";
 
 import { importDefinition, exportPackage } from "../lib/integration-config.js";
@@ -76,6 +76,9 @@ router.post("/billing/portal", requireRole("owner"), wrap(async (req, res) => re
 // Onboarding: read the business's website, then (in the dashboard) create the first agent from it.
 const analyzeLimit = rateLimit({ windowMs: 60 * 1000, max: 10, key: (req) => req.user.id, message: "Too many website checks. Wait a minute." });
 router.post("/onboarding/analyze", admin, analyzeLimit, v.validate(v.websitePreviewSchema), wrap(async (req, res) => res.json(await analyzeSite(req.workspace, req.valid.url))));
+// No website: the same proposal, read from the documents the owner picked (up to 10, 20 MB each).
+const docsAnalyzeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 10 } });
+router.post("/onboarding/analyze-docs", admin, analyzeLimit, docsAnalyzeUpload.array("file", 10), wrap(async (req, res) => res.json(await analyzeDocs(req.workspace, req.files))));
 router.post("/onboarding/complete", admin, v.validate(v.onboardingCompleteSchema), wrap(async (req, res) => res.json(await completeOnboarding(req.workspace, req.valid.website))));
 
 // Agents
@@ -96,6 +99,12 @@ router.get("/agents/:aid/channels", wrap(async (req, res) => res.json(await list
 router.post("/agents/:aid/channels/telegram", admin, v.validate(v.telegramChannelSchema), wrap(async (req, res) => {
   res.status(201).json(await connectTelegram(req.workspace, req.params.aid, req.user, req.valid.bot_token));
 }));
+router.get("/agents/:aid/channels/:cid/bot", wrap(async (req, res) => res.json(await botProfile(req.workspace.id, req.params.aid, req.params.cid))));
+router.patch("/agents/:aid/channels/:cid/bot", admin, v.validate(v.telegramBotSchema), wrap(async (req, res) => res.json(await updateBot(req.workspace.id, req.params.aid, req.params.cid, req.user, req.valid))));
+// Telegram Business on the same bot: where the setup stands, the owner's one-time link, and turning it off.
+router.get("/agents/:aid/channels/:cid/business", wrap(async (req, res) => res.json(await businessStatus(req.workspace.id, req.params.aid, req.params.cid))));
+router.post("/agents/:aid/channels/:cid/business/link", admin, wrap(async (req, res) => res.json(await startBusinessLink(req.workspace.id, req.params.aid, req.params.cid, req.user))));
+router.delete("/agents/:aid/channels/:cid/business", admin, wrap(async (req, res) => res.json(await unlinkBusiness(req.workspace.id, req.params.aid, req.params.cid, req.user))));
 router.delete("/agents/:aid/channels/:cid", admin, wrap(async (req, res) => res.json(await disconnectChannel(req.workspace.id, req.params.aid, req.params.cid, req.user))));
 
 router.post("/agents/:aid/suggestions/generate", admin, setupAILimit, v.validate(v.suggestionDraftSchema), wrap(async (req, res) => {

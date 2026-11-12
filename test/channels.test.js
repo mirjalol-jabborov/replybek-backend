@@ -34,7 +34,11 @@ before(async () => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       const method = req.url.split("/").pop();
-      calls.push({ method, body: body ? JSON.parse(body) : {} });
+      // A photo arrives as multipart; everything else as JSON.
+      const multipart = /multipart/.test(req.headers["content-type"] || "");
+      calls.push({ method, body: multipart ? { raw: body } : body ? JSON.parse(body) : {} });
+      if (method === "setMyName" && JSON.parse(body).name === "Too fast")
+        return res.writeHead(429, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests: retry after 540", parameters: { retry_after: 540 } }));
       if (method === "getUpdates") {
         // Each update is handed out once, so the loop doesn't answer the same message forever.
         const batch = waiting.splice(0, waiting.length);
@@ -43,10 +47,18 @@ before(async () => {
       const id = (req.url.match(/\/bot(\d+):/) || [])[1];
       const result =
         method === "getMe"
-          ? { id: Number(id), username: `support_bot_${id}`, first_name: "Northstar Support" }
+          ? { id: Number(id), username: `support_bot_${id}`, first_name: "Northstar Support", can_connect_to_business: true }
           : method === "sendMessage" || method === "editMessageText"
             ? { message_id: ++messageSeq }
-            : true;
+            : method === "getBusinessConnection"
+              ? { id: JSON.parse(body).business_connection_id, user: { id: 4242, first_name: "Adam" }, user_chat_id: 4242, date: Math.floor(Date.now() / 1000) + 60, is_enabled: true, rights: { can_reply: true } }
+            : method === "getMyDescription"
+              ? { description: "Ask about orders and returns." }
+              : method === "getMyShortDescription"
+                ? { short_description: "Northstar's support" }
+                : method === "getUserProfilePhotos"
+                  ? { total_count: 0, photos: [] }
+                  : true;
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
     });
   });
@@ -377,4 +389,277 @@ test("old update ids are forgotten; recent ones are kept", async () => {
   await forgetOldUpdates();
   const { rows } = await query("SELECT update_id FROM channel_updates WHERE channel_id = $1 ORDER BY update_id", [channel.id]);
   assert.deepEqual(rows.map((r) => r.update_id), ["new-1"]);
+});
+
+test("the greeting's buttons follow the channel's settings", async () => {
+  const { b, w, agent, channel } = await agentWithBot();
+  await b.call("PATCH", `${w}/agents/${agent.id}`, { welcome: "Hi!", suggested_questions_i18n: { en: ["What is your return policy?"] }, suggestion_default_language: "en", handoff: true });
+  SECRET = await secretOf(channel.id);
+  const bot = `${w}/agents/${agent.id}/channels/${channel.id}/bot`;
+
+  const off = await b.call("PATCH", bot, { suggestions: false });
+  assert.equal(off.status, 200, JSON.stringify(off.body));
+  assert.deepEqual(off.body.settings, { suggestions: false, person_button: true });
+  await fromTelegram(channel.id, customerSaid(6201, "/start"));
+  const first = await until(() => sent()[0], "the welcome without questions");
+  assert.deepEqual(first.body.reply_markup.keyboard.map((row) => row[0].text), ["Xodim bilan gaplashish"], "only the person button");
+
+  await b.call("PATCH", bot, { person_button: false });
+  reset();
+  await fromTelegram(channel.id, customerSaid(6201, "/start"));
+  const second = await until(() => sent()[0], "the welcome without buttons");
+  assert.deepEqual(second.body.reply_markup, { remove_keyboard: true }, "buttons from the earlier greeting are taken away");
+  assert.deepEqual((await b.call("GET", `${w}/agents/${agent.id}/channels`)).body[0].settings, { suggestions: false, person_button: false });
+});
+
+test("the bot's profile is read from Telegram and changed there", async () => {
+  const { b, w, agent, channel, ws } = await agentWithBot();
+  const bot = `${w}/agents/${agent.id}/channels/${channel.id}/bot`;
+  const read = await b.call("GET", bot);
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.deepEqual(read.body.profile, { name: "Northstar Support", username: channel.account_name.slice(1), description: "Ask about orders and returns.", short_description: "Northstar's support", photo: null });
+
+  reset();
+  const jpeg = "data:image/jpeg;base64," + Buffer.from("not really a jpeg").toString("base64");
+  const changed = await b.call("PATCH", bot, { name: "Northstar Help", description: "We answer in a minute.", short_description: "Orders, delivery, returns", photo: jpeg });
+  assert.equal(changed.status, 200, JSON.stringify(changed.body));
+  const call = (m) => calls.find((c) => c.method === m)?.body;
+  assert.deepEqual(call("setMyName"), { name: "Northstar Help" });
+  assert.deepEqual(call("setMyDescription"), { description: "We answer in a minute." });
+  assert.deepEqual(call("setMyShortDescription"), { short_description: "Orders, delivery, returns" });
+  const photo = call("setMyProfilePhoto").raw;
+  assert.match(photo, /attach:\/\/upload/);
+  assert.match(photo, /not really a jpeg/, "the photo itself is uploaded");
+  assert.ok(!calls.some((c) => c.method === "removeMyProfilePhoto"));
+
+  reset();
+  await b.call("PATCH", bot, { remove_photo: true });
+  assert.ok(calls.some((c) => c.method === "removeMyProfilePhoto"));
+
+  // Telegram's rate limit, explained; and only JPEG photos are taken.
+  const limited = await b.call("PATCH", bot, { name: "Too fast" });
+  assert.equal(limited.status, 429);
+  assert.match(limited.body.message, /Try again in 9 minutes/);
+  assert.equal((await b.call("PATCH", bot, { photo: "data:image/png;base64,AAAA" })).status, 400);
+
+  const { rows } = await query("SELECT count(*)::int AS n FROM activity WHERE workspace_id = $1 AND text LIKE '%changed the Telegram bot%'", [ws.id]);
+  assert.ok(rows[0].n >= 1, "the change is in the activity log");
+});
+
+// ───── Telegram Business ─────
+
+const OWNER_TG = 4242;
+/** `until`, for a check that has to ask the database. */
+async function eventually(check, what) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return true;
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  throw new Error(`Timed out waiting for ${what}.`);
+}
+const businessSaid = (connection, chatId, text, from = { id: chatId, first_name: "Aziz", language_code: "uz" }, extra = {}) => ({
+  business_message: { business_connection_id: connection, message_id: ++messageSeq, chat: { id: chatId, type: "private", first_name: "Aziz" }, from, text, ...extra },
+});
+const connectionUpdate = (id, userId, { enabled = true, canReply = true } = {}) => ({
+  business_connection: { id, user: { id: userId, first_name: userId === OWNER_TG ? "Adam" : "Stranger", language_code: "en" }, user_chat_id: userId, date: Math.floor(Date.now() / 1000), is_enabled: enabled, rights: canReply ? { can_reply: true } : {} },
+});
+
+/** The owner opens the dashboard's link in their own Telegram, then adds the bot in Telegram Business. */
+async function businessOwner(o) {
+  const link = await o.b.call("POST", `${o.w}/agents/${o.agent.id}/channels/${o.channel.id}/business/link`);
+  assert.equal(link.status, 200, JSON.stringify(link.body));
+  const code = link.body.url.split("start=")[1];
+  await fromTelegram(o.channel.id, { message: { chat: { id: OWNER_TG, type: "private" }, from: { id: OWNER_TG, first_name: "Adam", username: "adam_store", language_code: "en" }, text: `/start ${code}` } });
+  await until(() => sent().find((c) => String(c.body.chat_id) === String(OWNER_TG)), "the owner to hear the link worked");
+  await fromTelegram(o.channel.id, connectionUpdate("bc-owner", OWNER_TG));
+  await until(() => sent().filter((c) => String(c.body.chat_id) === String(OWNER_TG)).length >= 2, "the owner to hear the bot is connected");
+  reset();
+  return code;
+}
+
+test("Telegram Business answers only for the linked owner's account, as that account", async () => {
+  const o = await agentWithBot();
+  const { b, w, agent, channel, ws } = o;
+  SECRET = await secretOf(channel.id);
+  const status = (await b.call("GET", `${w}/agents/${agent.id}/channels/${channel.id}/business`)).body;
+  assert.equal(status.state, "not_linked");
+  assert.equal(status.business_mode, true, "Secretary Mode in BotFather, as getMe reports it");
+
+  // A stranger adds the bot to their own account: nothing of theirs is answered.
+  await fromTelegram(channel.id, connectionUpdate("bc-stranger", 111));
+  await fromTelegram(channel.id, businessSaid("bc-stranger", 9100, "What is your return policy?"));
+  await new Promise((done) => setTimeout(done, 300));
+  assert.equal(sent().length, 0, "a stranger's customers are not answered with this workspace's agent");
+
+  // The owner's link: the webhook is asked for business updates, and the owner hears what to do next.
+  const link = await b.call("POST", `${w}/agents/${agent.id}/channels/${channel.id}/business/link`);
+  assert.match(link.body.url, /^https:\/\/t\.me\/support_bot_\d+\?start=biz_[\w-]+$/);
+  const hook = calls.filter((c) => c.method === "setWebhook").pop();
+  assert.ok(hook.body.allowed_updates.includes("business_message") && hook.body.allowed_updates.includes("business_connection"));
+  assert.equal(hook.body.drop_pending_updates, false, "re-registering doesn't throw away waiting messages");
+  const code = link.body.url.split("start=")[1];
+  await fromTelegram(channel.id, { message: { chat: { id: OWNER_TG, type: "private" }, from: { id: OWNER_TG, first_name: "Adam", username: "adam_store", language_code: "en" }, text: `/start ${code}` } });
+  const linked = await until(() => sent().find((c) => String(c.body.chat_id) === String(OWNER_TG)), "the owner to hear the link worked");
+  assert.match(linked.body.text, /Chat Automation/, "where Telegram now keeps it");
+  const afterLink = (await b.call("GET", `${w}/agents/${agent.id}/channels/${channel.id}/business`)).body;
+  assert.equal(afterLink.state, "linked");
+  assert.deepEqual(afterLink.owner, { name: "Adam", username: "adam_store" });
+
+  // The same link can't be used twice, by anyone.
+  reset();
+  await fromTelegram(channel.id, { message: { chat: { id: 5555, type: "private" }, from: { id: 5555, first_name: "Someone", language_code: "en" }, text: `/start ${code}` } });
+  const expired = await until(() => sent()[0], "the second opener to hear the link is spent");
+  assert.match(expired.body.text, /expired or was already used/);
+
+  // The owner adds the bot in Telegram Business.
+  reset();
+  await fromTelegram(channel.id, connectionUpdate("bc-owner", OWNER_TG));
+  const connected = await until(() => sent()[0], "the owner to hear it is answering");
+  assert.equal(String(connected.body.chat_id), String(OWNER_TG));
+  assert.equal((await b.call("GET", `${w}/agents/${agent.id}/channels`)).body[0].business.state, "connected");
+
+  // A customer writes to the owner's account: the answer goes out as the business, without a reply keyboard.
+  reset();
+  await fromTelegram(channel.id, businessSaid("bc-owner", 6101, "What is your return policy?"));
+  const answer = await until(() => sent()[0], "the agent's answer in the business chat");
+  assert.equal(answer.body.business_connection_id, "bc-owner");
+  assert.equal(String(answer.body.chat_id), "6101");
+  assert.ok(!answer.body.reply_markup, "no reply keyboard in a business chat");
+  assert.ok(calls.some((c) => c.method === "sendChatAction" && c.body.business_connection_id === "bc-owner"), "the dots show as the business");
+  const conv = (await query("SELECT * FROM conversations WHERE workspace_id = $1 AND channel = 'telegram_business'", [ws.id])).rows[0];
+  assert.equal(conv.channel_chat_id, "biz:6101");
+  assert.equal(conv.visitor.name, "Aziz");
+
+  // The same person writing to the bot itself is a different chat.
+  reset();
+  await fromTelegram(channel.id, customerSaid(6101, "Hello"));
+  await until(() => sent()[0], "the bot's own answer");
+  assert.equal((await query("SELECT count(*)::int AS n FROM conversations WHERE workspace_id = $1", [ws.id])).rows[0].n, 2);
+
+  // What the bot sent comes back as an update; it is already in the inbox.
+  const before = (await query("SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1", [conv.id])).rows[0].n;
+  await fromTelegram(channel.id, businessSaid("bc-owner", 6101, answer.body.text, { id: OWNER_TG, first_name: "Adam" }, { sender_business_bot: { id: 1, is_bot: true } }));
+  await new Promise((done) => setTimeout(done, 200));
+  assert.equal((await query("SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1", [conv.id])).rows[0].n, before);
+
+  // The owner writes from their phone: it goes in the transcript, and the AI steps back in that chat.
+  await fromTelegram(channel.id, businessSaid("bc-owner", 6101, "Hi Aziz, Adam here. Which size?", { id: OWNER_TG, first_name: "Adam" }));
+  await eventually(async () => (await query("SELECT status FROM conversations WHERE id = $1", [conv.id])).rows[0].status === "human", "the chat to be the owner's");
+  await new Promise((done) => setTimeout(done, 100));
+  const { rows: said } = await query("SELECT role, body, author_id FROM messages WHERE conversation_id = $1 AND role = 'human'", [conv.id]);
+  assert.equal(said[0].body, "Hi Aziz, Adam here. Which size?");
+  assert.equal(said[0].author_id, o.user.id, "the reply is the member who linked the account");
+  reset();
+  await fromTelegram(channel.id, businessSaid("bc-owner", 6101, "Size M please"));
+  await new Promise((done) => setTimeout(done, 400));
+  assert.equal(sent().length, 0, "the AI doesn't answer over the owner");
+});
+
+test("Telegram Business: Confirm works in a business chat, and replies stop once the owner removes the bot", async () => {
+  const o = await agentWithBot();
+  const { b, w, agent, channel } = o;
+  SECRET = await secretOf(channel.id);
+  await businessOwner(o);
+  const made = await b.call("POST", `${w}/integrations`, shopIntegration(agent.id, "server"));
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  const before = placed.length;
+
+  await fromTelegram(channel.id, businessSaid("bc-owner", 7101, '[tool:place_order {"items":[{"product":"Boots","quantity":1}]}]'));
+  const card = await until(() => sent().find((c) => c.body.reply_markup), "the confirmation buttons");
+  assert.equal(card.body.business_connection_id, "bc-owner");
+  const [confirm] = card.body.reply_markup.inline_keyboard[0];
+  reset();
+  await fromTelegram(channel.id, { callback_query: { id: "cb-b1", data: confirm.callback_data, message: { message_id: 1, business_connection_id: "bc-owner", chat: { id: 7101, type: "private" } }, from: { id: 7101 } } });
+  await until(() => placed.length > before, "the order to be placed");
+  const settled = await until(() => calls.find((c) => c.method === "editMessageText"), "the buttons to be replaced");
+  assert.equal(settled.body.business_connection_id, "bc-owner");
+
+  // A tap can only decide a card from its own chat.
+  const conv = (await query("SELECT * FROM conversations WHERE channel_id = $1 AND channel_chat_id = 'biz:7101'", [channel.id])).rows[0];
+  const { rows: cards } = await query("SELECT id FROM pending_actions WHERE conversation_id = $1", [conv.id]);
+  assert.equal(cards.length, 1);
+
+  // The owner removes the bot in Telegram: the inbox says replies can't reach the customer, and none are sent.
+  await fromTelegram(channel.id, connectionUpdate("bc-owner", OWNER_TG, { enabled: false }));
+  await eventually(async () => (await b.call("GET", `${w}/agents/${agent.id}/channels`)).body[0].business.state === "linked", "the connection to be gone");
+  const shown = (await b.call("GET", `${w}/conversations/${conv.id}`)).body;
+  assert.equal(shown.channel_status, "disabled");
+  assert.ok(new Date(shown.reply_until) > new Date(), "Telegram's 24-hour window, from the customer's last message");
+  await b.call("POST", `${w}/conversations/${conv.id}/takeover`);
+  reset();
+  await b.call("POST", `${w}/conversations/${conv.id}/reply`, { text: "Your boots are on the way." });
+  await new Promise((done) => setTimeout(done, 200));
+  assert.equal(sent().length, 0);
+
+  // Turning it off in Replybek forgets the account.
+  const off = await b.call("DELETE", `${w}/agents/${agent.id}/channels/${channel.id}/business`);
+  assert.equal(off.body.state, "not_linked");
+});
+
+test("Telegram Business: a draft agent stays out of the owner's chats", async () => {
+  const o = await agentWithBot();
+  SECRET = await secretOf(o.channel.id);
+  await businessOwner(o);
+  await o.b.call("POST", `${o.w}/agents/${o.agent.id}/unpublish`);
+  await fromTelegram(o.channel.id, businessSaid("bc-owner", 7201, "Hello?"));
+  await new Promise((done) => setTimeout(done, 300));
+  assert.equal(sent().length, 0, "no 'not answering' note on the owner's behalf: the customer is writing to a person");
+});
+
+test("reconnecting the same bot keeps its button settings and its Telegram Business link", async () => {
+  const o = await agentWithBot();
+  SECRET = await secretOf(o.channel.id);
+  await businessOwner(o);
+  await o.b.call("PATCH", `${o.w}/agents/${o.agent.id}/channels/${o.channel.id}/bot`, { suggestions: false });
+  const again = await o.b.call("POST", `${o.w}/agents/${o.agent.id}/channels/telegram`, { bot_token: o.token });
+  assert.equal(again.status, 201);
+  assert.equal(again.body.business.state, "connected");
+  assert.equal(again.body.settings.suggestions, false);
+  assert.notEqual(await secretOf(o.channel.id), SECRET, "the webhook secret is new");
+});
+
+test("a resolved chat the customer wrote to again points to the newer one, and can't be reopened beside it", async () => {
+  const { b, w, ws, channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  await fromTelegram(channel.id, customerSaid(8101, "What is your return policy?"));
+  await until(() => sent()[0], "the first answer");
+  const first = (await query("SELECT id FROM conversations WHERE workspace_id = $1", [ws.id])).rows[0];
+  // Taking over twice notes it once.
+  await b.call("POST", `${w}/conversations/${first.id}/takeover`);
+  await b.call("POST", `${w}/conversations/${first.id}/takeover`);
+  const { rows: notes } = await query("SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND role = 'system' AND body LIKE '%took over%'", [first.id]);
+  assert.equal(notes[0].n, 1);
+  await b.call("POST", `${w}/conversations/${first.id}/resolve`);
+
+  reset();
+  await fromTelegram(channel.id, customerSaid(8101, "And one more question"));
+  await until(() => sent()[0], "the answer in a new conversation");
+  const newer = (await query("SELECT id FROM conversations WHERE workspace_id = $1 AND id <> $2", [ws.id, first.id])).rows[0];
+  const old = (await b.call("GET", `${w}/conversations/${first.id}`)).body;
+  assert.equal(old.open_conversation_id, newer.id);
+  const reopened = await b.call("POST", `${w}/conversations/${first.id}/reopen`);
+  assert.equal(reopened.status, 409, "not a server error");
+  assert.equal(reopened.body.open_conversation_id, newer.id);
+});
+
+test("Telegram Business: turning it off and linking again finds the bot still connected; an unknown connection is looked up", async () => {
+  const o = await agentWithBot();
+  SECRET = await secretOf(o.channel.id);
+  await businessOwner(o);
+  const status = () => o.b.call("GET", `${o.w}/agents/${o.agent.id}/channels/${o.channel.id}/business`).then((r) => r.body.state);
+  await o.b.call("DELETE", `${o.w}/agents/${o.agent.id}/channels/${o.channel.id}/business`);
+  assert.equal(await status(), "not_linked");
+  // The same account links again; Telegram doesn't report the connection again, and needn't.
+  const link = await o.b.call("POST", `${o.w}/agents/${o.agent.id}/channels/${o.channel.id}/business/link`);
+  await fromTelegram(o.channel.id, { message: { chat: { id: OWNER_TG, type: "private" }, from: { id: OWNER_TG, first_name: "Adam", language_code: "en" }, text: `/start ${link.body.url.split("start=")[1]}` } });
+  const told = await until(() => sent().find((c) => String(c.body.chat_id) === String(OWNER_TG)), "the owner to hear it");
+  assert.match(told.body.text, /answers your customers/, "connected straight away");
+  assert.equal(await status(), "connected");
+
+  // A message through a connection Replybek never heard of: it asks Telegram, and answers.
+  reset();
+  await fromTelegram(o.channel.id, businessSaid("bc-unheard", 7301, "What is your return policy?"));
+  const answer = await until(() => sent().find((c) => c.body.business_connection_id === "bc-unheard"), "an answer through the looked-up connection");
+  assert.equal(String(answer.body.chat_id), "7301");
+  assert.ok(calls.some((c) => c.method === "getBusinessConnection"));
 });

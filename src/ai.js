@@ -210,6 +210,17 @@ const fake = {
       if (!matches.length) return { integration: null, missing: ["Add API endpoint paths and examples."] };
       return { integration: { name: "Documentation API", mode: "server", base_url: meta.selected_endpoints?.[0]?.base || meta.documentation.match(/https?:\/\/[^\s"<>]+/)?.[0] || "", auth: { type: "api_key" }, tools: matches.map((m, i) => ({ name: `action_${i}`, description: `${m[1]} ${m[2]}`, kind: "read", input: { type: "object", properties: {} }, request: { method: m[1].toUpperCase(), path: m[2] } })) }, evidence: matches.map((m, i) => ({ name: `action_${i}`, quote: m[0] })), warnings: [], missing: [] };
     }
+    if (meta?.task === "brand_from_docs") {
+      // The first line that looks like a heading names the business, as a real model would find it.
+      // A sentence or a question isn't a name; then, like the real model, it leaves the name out.
+      const line = meta.text.split("\n").map((l) => l.replace(/^#.*$/, "").trim()).find((l) => l.length > 1) || "";
+      const name = /^[^.?!:]{2,40}$/.test(line) && line.split(/\s+/).length <= 5 ? line : "";
+      if (!name) return { name: "", language: "en", description: "", agent_name: "", welcome: "" };
+      const uz = /\b(va|uchun|bilan|qanday)\b/i.test(meta.text);
+      return uz
+        ? { name, language: "uz", description: `${name} haqida`, agent_name: `${name} AI agenti`, welcome: `Assalomu alaykum! Men ${name} AI agentiman. Sizga qanday yordam bera olaman?` }
+        : { name, language: "en", description: `About ${name}`, agent_name: `${name} AI agent`, welcome: `Hi! I'm the ${name} AI agent. How can I help?` };
+    }
     if (meta?.task === "summary") {
       return { bullets: meta.messages.filter((m) => m.role === "visitor").slice(0, 3).map((m) => `Customer said: ${m.body.slice(0, 80)}`) };
     }

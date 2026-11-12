@@ -161,6 +161,19 @@ export const widgetVisitorSchema = z.object(visitorFields);
 export const telegramChannelSchema = z.object({
   bot_token: z.string().trim().regex(/^\d{5,}:[A-Za-z0-9_-]{30,}$/, "That doesn't look like a bot token. Copy the whole line BotFather sent."),
 });
+// The bot's buttons and its Telegram profile; only what is sent changes. Telegram's own limits.
+export const telegramBotSchema = z
+  .object({
+    suggestions: z.boolean().optional(),
+    person_button: z.boolean().optional(),
+    name: z.string().trim().min(1, "Give the bot a name.").max(64, "Up to 64 characters.").optional(),
+    description: z.string().trim().max(512, "Up to 512 characters.").optional(),
+    short_description: z.string().trim().max(120, "Up to 120 characters.").optional(),
+    // A JPEG made in the browser (Telegram takes only JPEG profile photos).
+    photo: z.string().max(700000, "The photo is too large.").regex(/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/, "Use a JPEG photo.").optional(),
+    remove_photo: z.boolean().optional(),
+  })
+  .strict();
 export const widgetStartSchema = z.object({
   ...visitorFields,
   page: z.string().trim().max(500).optional(),
