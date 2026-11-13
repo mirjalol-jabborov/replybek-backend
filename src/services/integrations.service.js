@@ -496,6 +496,35 @@ export async function callTool(integration, tool, args, conn, conversationId = n
  * pending action and run only when the customer presses Confirm.
  * Returns { output (for the model), card? (for the customer) }.
  */
+/**
+ * A tool's result as cards for the chat, when the tool says how (its `display`): a photo, a name,
+ * a price and a link for each item, at most `max`. Only web addresses are kept, so a result can't
+ * put anything else in front of the customer. Null when there is nothing to show.
+ */
+export function displayCard(display, output) {
+  if (!display || output == null || output.error) return null;
+  let list = pick(output, display.items || "");
+  if (list && !Array.isArray(list)) list = [list];
+  if (!Array.isArray(list)) return null;
+  const web = (v) => (typeof v === "string" && /^https?:\/\//i.test(v) ? v.slice(0, 600) : null);
+  const str = (v, n) => (v == null || typeof v === "object" ? null : String(v).trim().slice(0, n) || null);
+  const items = list
+    .slice(0, display.max || 6)
+    .map((item) => {
+      const price = pick(item, display.price);
+      return {
+        title: str(pick(item, display.title), 120),
+        image: web(pick(item, display.image)),
+        subtitle: str(pick(item, display.subtitle), 140),
+        price: typeof price === "number" ? Math.round(price) : str(price, 40),
+        currency: display.currency || null,
+        url: web(pick(item, display.url)),
+      };
+    })
+    .filter((i) => i.title);
+  return items.length ? { type: "products", items } : null;
+}
+
 export async function runTool({ conversationId, integration, tool, args, inpageOrigin = null, steps = {} }) {
   if (tool.procedure) return startProcedure({ conversationId, integration, procedure: tool, args, inpageOrigin });
   if (!conversationId) return { output: { error: "test_context_required", message: "Use the integration test panel for actions. The Playground has no signed-in customer session." } };

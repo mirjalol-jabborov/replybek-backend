@@ -5,7 +5,7 @@ import { retrieve } from "./retrieval.service.js";
 import { countMessage } from "./activity.service.js";
 import { assertCanAnswer } from "./workspaces.service.js";
 import { notifyAllowanceUsed } from "./notify.service.js";
-import { agentTools, connectionsFor, runTool } from "./integrations.service.js";
+import { agentTools, connectionsFor, runTool, displayCard } from "./integrations.service.js";
 import { fileContext } from "./attachments.service.js";
 import { inventedIds, withEmptyHint } from "../lib/tool-guard.js";
 import { describeNow, validTimeZone } from "../lib/clock.js";
@@ -181,6 +181,9 @@ export async function answerQuestion({ agent, question, file = null, history = [
     await progress("writing");
     said.push(JSON.stringify(res.output ?? null));
     if (res.card && !(card?.type === "connect")) card = res.card;
+    // A result the tool shows as cards (bouquets with their photos), unless a sign-in or a
+    // confirmation is waiting: that one matters more.
+    else if (!res.card && found.tool.display && (!card || card.type === "products")) card = displayCard(found.tool.display, res.output) || card;
     return withEmptyHint(res.output);
   };
   const out = tools.length ? await ai.chatTools({ ...request, ...toolInterface(tools, execute) }) : await ai.chatJSON(request);

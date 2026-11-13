@@ -214,6 +214,21 @@ export const toolSchema = z.object({
   request: requestBlock,
   response: z.object({ type: z.enum(["rows", "json"]).default("json"), columns: template.optional(), rows: z.string().optional(), count: z.string().optional(), pick: z.string().optional(), limit: z.number().int().min(1).max(100).optional(), fields: z.record(z.string().max(200)).optional(), filter: z.array(z.object({ field: z.string(), equals: template.optional(), contains: template.optional() })).optional() }).default({ type: "json" }),
   confirm: z.object({ title: template, lines: template.optional(), total: template.optional() }).optional(),
+  // Show the result as cards in the chat (photo, name, price, link): where the list is in the
+  // result, and where each field is inside one item. Paths like "products" and "image".
+  display: z
+    .object({
+      type: z.literal("cards").default("cards"),
+      items: z.string().max(200).default(""),
+      title: z.string().max(200),
+      image: z.string().max(200).optional(),
+      subtitle: z.string().max(200).optional(),
+      price: z.string().max(200).optional(),
+      currency: z.string().max(12).optional(),
+      url: z.string().max(200).optional(),
+      max: z.number().int().min(1).max(10).default(6),
+    })
+    .optional(),
 });
 export const procedureSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/), description: text(600), when: z.string().max(600).optional(),

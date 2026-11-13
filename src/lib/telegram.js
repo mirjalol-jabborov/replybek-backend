@@ -172,6 +172,21 @@ export async function sendFile(token, chatId, { buffer, name, type }, caption, b
   return upload(token, photo ? "sendPhoto" : "sendDocument", form);
 }
 
+/** One photo by its address, with a caption. */
+export const sendFileByUrl = (token, chatId, photo, business = null) =>
+  call(token, "sendPhoto", { chat_id: chatId, photo: photo.url, caption: (photo.caption || "").slice(0, 1024), ...(business ? { business_connection_id: business } : {}) });
+
+/**
+ * Several photos as one album, each with its caption. Telegram fetches the photos from their
+ * addresses itself, so they must be public. At most 10.
+ */
+export const sendMediaGroup = (token, chatId, photos, business = null) =>
+  call(token, "sendMediaGroup", {
+    chat_id: chatId,
+    ...(business ? { business_connection_id: business } : {}),
+    media: photos.slice(0, 10).map((p) => ({ type: "photo", media: p.url, caption: (p.caption || "").slice(0, 1024) })),
+  });
+
 /** Files arrive as an id; this resolves it to a path, which `download` then fetches. */
 export const getFile = (token, fileId) => call(token, "getFile", { file_id: fileId });
 

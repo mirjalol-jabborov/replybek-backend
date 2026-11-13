@@ -70,6 +70,13 @@ before(async () => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       if (req.url === "/orders:create") placed.push(JSON.parse(body));
+      if (req.url.startsWith("/flowers")) {
+        return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ products: [
+          { title: "Peony cloud", price: 850000, image: "https://shop.example/media/peony.jpg", url: "https://shop.example/product/peony-cloud" },
+          { title: "White roses", price: 640000, image: "https://shop.example/media/roses.jpg", url: "https://shop.example/product/white-roses" },
+          { title: "No photo", price: 100000, image: "javascript:alert(1)", url: "ftp://nope" },
+        ] }));
+      }
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ order_id: 4127, orders: [] }));
     });
   });
@@ -662,4 +669,25 @@ test("Telegram Business: turning it off and linking again finds the bot still co
   const answer = await until(() => sent().find((c) => c.body.business_connection_id === "bc-unheard"), "an answer through the looked-up connection");
   assert.equal(String(answer.body.chat_id), "7301");
   assert.ok(calls.some((c) => c.method === "getBusinessConnection"));
+});
+
+test("a tool that shows its results as cards puts bouquets with photos in the answer, and in Telegram as an album", async () => {
+  const { b, w, agent, channel, ws } = await agentWithBot();
+  const made = await b.call("POST", `${w}/integrations`, {
+    agent_id: agent.id, name: "Shop", mode: "server", base_url: shopUrl, auth: { type: "none" },
+    tools: [{ name: "find_flowers", kind: "read", description: "Finds bouquets.", input: { type: "object", properties: {} }, request: { method: "GET", path: "/flowers" },
+      display: { items: "products", title: "title", image: "image", price: "price", currency: "сум", url: "url" } }],
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  SECRET = await secretOf(channel.id);
+  await fromTelegram(channel.id, customerSaid(7401, "[tool:find_flowers {}]"));
+  const album = await until(() => calls.find((c) => c.method === "sendMediaGroup"), "the photos as an album");
+  assert.equal(album.body.media.length, 2, "only items with a real photo");
+  assert.equal(album.body.media[0].media, "https://shop.example/media/peony.jpg");
+  assert.match(album.body.media[0].caption, /Peony cloud\n850 000 сум\nhttps:\/\/shop\.example\/product\/peony-cloud/);
+  const { rows } = await query("SELECT card FROM messages WHERE workspace_id = $1 AND role = 'ai' ORDER BY seq DESC LIMIT 1", [ws.id]);
+  assert.equal(rows[0].card.type, "products");
+  assert.equal(rows[0].card.items.length, 3);
+  assert.equal(rows[0].card.items[2].image, null, "anything that isn't a web address is dropped");
+  assert.equal(rows[0].card.items[2].url, null);
 });

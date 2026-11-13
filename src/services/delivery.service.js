@@ -118,7 +118,25 @@ async function toTelegram(channel, conv, message, replies) {
     if (message.id && last?.message_id) {
       await query("UPDATE messages SET channel_message_id = $2 WHERE id = $1", [message.id, String(last.message_id)]);
     }
+    // Cards with photos (bouquets, products): an album after the words, each photo captioned.
+    const photos = productPhotos(message.card);
+    if (photos.length) {
+      try {
+        await send(channel, () => (photos.length === 1 ? telegram.sendFileByUrl(channel.token, chatId, photos[0], business) : telegram.sendMediaGroup(channel.token, chatId, photos, business)));
+      } catch (e) {
+        console.error(`Couldn't send the photos on conversation ${conv.id}:`, e.message);
+      }
+    }
   });
+}
+
+/** A products card's items as captioned photos: name, price and link. Items without a photo are left out. */
+export function productPhotos(card) {
+  if (card?.type !== "products") return [];
+  const price = (i) => (i.price == null ? "" : typeof i.price === "number" ? `${i.price.toLocaleString("ru-RU").replace(/\u00a0/g, " ")}${i.currency ? ` ${i.currency}` : ""}` : String(i.price));
+  return (card.items || [])
+    .filter((i) => i.image)
+    .map((i) => ({ url: i.image, caption: [i.title, [price(i), i.subtitle].filter(Boolean).join(" · "), i.url].filter(Boolean).join("\n") }));
 }
 
 /**

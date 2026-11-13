@@ -52,7 +52,7 @@ async function load(workspaceId, id) {
 }
 
 const messagesOf = async (id) =>
-  (await query(`SELECT m.id, m.role, m.author_id, m.body, m.kind, m.sources, m.created_at, ${ATTACHMENTS_SQL} FROM messages m WHERE m.conversation_id = $1 ORDER BY m.seq`, [id])).rows;
+  (await query(`SELECT m.id, m.role, m.author_id, m.body, m.kind, m.sources, m.card, m.created_at, ${ATTACHMENTS_SQL} FROM messages m WHERE m.conversation_id = $1 ORDER BY m.seq`, [id])).rows;
 
 export async function getConversation(workspaceId, id, { markRead = true } = {}) {
   const c = await load(workspaceId, id);
