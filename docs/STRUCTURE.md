@@ -25,8 +25,3 @@ else are named for what calls them (`widget-routes.js`, `telegram-routes.js`, `p
 | `src/agent/onboarding/` | reading the business's site or documents into a first agent |
 | `src/crm/` | the CRM product: host, core, booking, store, shared rules |
 | `src/locales/` | wording a customer reads on messaging channels |
-
-Until `src/crm` imports `src/core` directly, a few old paths stay as one-line re-exports for it:
-`src/db.js`, `src/validators.js`, `src/lib/http.js`, `src/lib/storage.js`,
-`src/middlewares/workspace.js`, `src/services/jobs.service.js`, `src/services/events.service.js`.
-Comments in `src/crm` and `sql/` that name old paths are updated in that same change.

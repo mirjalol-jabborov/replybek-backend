@@ -5,9 +5,9 @@
 // the services, and deleting a booking, is for admins and the owner. A team member linked to a
 // specialist with ownOnly sees and changes only their own bookings (checked in the entity files).
 import { Router } from "express";
-import { wrap } from "../../lib/http.js";
-import { validate } from "../../validators.js";
-import { requireRole } from "../../middlewares/workspace.js";
+import { wrap } from "../../core/http.js";
+import { validate } from "../../core/validate.js";
+import { requireRole } from "../../core/workspaces/access.js";
 import * as staff from "./staff.js";
 import * as services from "./services.js";
 import * as off from "./time-off.js";

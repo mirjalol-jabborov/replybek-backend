@@ -5,7 +5,7 @@
 //    transaction (a free time, stock on hand, a phone number nobody has) still holds when it commits.
 // 3. Every query filters by workspace_id.
 // Readers take q(text, params), so the same reader works in read()'s picture and inside a write.
-import { tx, getClient } from "../db.js";
+import { tx, getClient } from "../core/db.js";
 import { defaults, withDefaults } from "./defaults.js";
 
 /**

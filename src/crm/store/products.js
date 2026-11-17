@@ -3,7 +3,7 @@
 // The app may write a plain product the demo's way (sku, price, cost, lowAt on the product itself)
 // or send `variants`.
 import { z } from "zod";
-import { notFound } from "../../lib/http.js";
+import { notFound } from "../../core/http.js";
 import { write, isUuid, updateRow } from "../db.js";
 import { bad, conflict } from "../errors.js";
 import { uuid, listId as id, money, text, someKey } from "../shapes.js";

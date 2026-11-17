@@ -73,7 +73,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS crm_customers_phone ON crm_customers (workspac
 
 -- ───── Live updates ─────
 -- Every CRM table says when it changed: {"w": workspace, "t": "crm", "k": snapshot key} on the
--- same channel the inbox uses (replybek_notify in schema.sql). src/services/events.service.js
+-- same channel the inbox uses (replybek_notify in schema.sql). src/core/events.js
 -- passes it on to open CRM screens, which then fetch snapshot?only=<key>. An UPDATE that changes
 -- nothing stays quiet. The same payload sent twice in one transaction arrives once.
 CREATE OR REPLACE FUNCTION crm_notify() RETURNS trigger AS $$

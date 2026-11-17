@@ -1,6 +1,6 @@
 // The CRM's refusals. Every one carries a `code`: the app speaks from the codes, `message` is for
 // logs and API callers.
-import { HttpError } from "../lib/http.js";
+import { HttpError } from "../core/http.js";
 
 /** 400: what was sent doesn't fit. */
 export const bad = (message, code, extra) => new HttpError(400, message, { code, ...extra });

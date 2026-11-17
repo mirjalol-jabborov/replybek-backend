@@ -3,7 +3,7 @@
 // refuses a line that would sell or hold what isn't there (sql/crm/20-store.sql).
 // Before stock is read for a rule, the variants are locked: two writes can't both take the last one.
 import { z } from "zod";
-import { HttpError } from "../../lib/http.js";
+import { HttpError } from "../../core/http.js";
 import { write } from "../db.js";
 import { conflict, refusal } from "../errors.js";
 import { uuid, money, label } from "../shapes.js";

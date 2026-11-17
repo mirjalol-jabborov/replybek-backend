@@ -1,7 +1,7 @@
 // Customers: one list for the whole business. Bookings and orders point at them, and make new
 // ones through here, so a customer is checked the same way wherever they come from.
 import { z } from "zod";
-import { notFound } from "../../lib/http.js";
+import { notFound } from "../../core/http.js";
 import { read, write, wall, isUuid, insertRow, updateRow } from "../db.js";
 import { bad, conflict } from "../errors.js";
 import { someKey } from "../shapes.js";

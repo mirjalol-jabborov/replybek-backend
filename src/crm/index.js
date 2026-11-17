@@ -7,8 +7,8 @@
 // Writes answer with { changes: { set, del, top }, rev } (see changes.js), and every table says
 // when it changed (crm_notify in sql/crm/00-core.sql), so other open screens fetch what moved.
 import { Router } from "express";
-import { HttpError, wrap } from "../lib/http.js";
-import { stream } from "../services/events.service.js";
+import { HttpError, wrap } from "../core/http.js";
+import { stream } from "../core/events.js";
 import { read } from "./db.js";
 import { TOP_KEYS } from "./defaults.js";
 import { modules } from "./modules.js";
@@ -80,7 +80,7 @@ router.get("/snapshot", wrap(async (req, res) => {
 }));
 
 // Live updates for the CRM's screens: `event: crm` with data {"k": [snapshot keys]} (see
-// events.service.js). GET /w/:wid/stream carries the same events; this stream carries only them,
+// src/core/events.js). GET /w/:wid/stream carries the same events; this stream carries only them,
 // and an open CRM doesn't count as "someone is watching the inbox".
 router.get("/stream", wrap((req, res) => stream(req, res, [`crm:${req.workspace.id}`])));
 

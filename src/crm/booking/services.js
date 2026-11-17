@@ -1,7 +1,7 @@
 // What customers can book: a name, how long it takes, the price, and the free time kept after it.
 // Setting them up is for admins.
 import { z } from "zod";
-import { HttpError } from "../../lib/http.js";
+import { HttpError } from "../../core/http.js";
 import { write, insertRow, updateRow } from "../db.js";
 import { label, money, someKey } from "../shapes.js";
 import { hasId } from "../shared/index.js";

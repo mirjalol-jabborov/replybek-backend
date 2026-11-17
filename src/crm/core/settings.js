@@ -2,7 +2,7 @@
 // The app's editors already refuse the dangerous edits; the same rules are checked here, because
 // two people can edit at once and the app's copy can be old.
 import { z } from "zod";
-import { HttpError } from "../../lib/http.js";
+import { HttpError } from "../../core/http.js";
 import { write } from "../db.js";
 import { TOP_KEYS } from "../defaults.js";
 import { mergeChanges } from "../changes.js";

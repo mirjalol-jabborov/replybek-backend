@@ -1,7 +1,7 @@
 // The daily job of repeat bookings: every day, the days that came into view (rules.maxDays ahead)
 // are booked for every running series, each day checked like any booking (see extend() in series.js).
-import { query } from "../../db.js";
-import { registerJob } from "../../services/jobs.service.js";
+import { query } from "../../core/db.js";
+import { registerJob } from "../../core/jobs.js";
 import { write } from "../db.js";
 import { seriesEnded } from "../shared/booking.js";
 import { SERIES, loadRules } from "./rows.js";

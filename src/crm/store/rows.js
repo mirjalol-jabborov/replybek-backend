@@ -2,7 +2,7 @@
 // pieces every write of an order shares: locking it, adding a payment, answering with changes.
 // Every reader takes `q(text, params)`: the snapshot's read transaction or a write's client, so
 // what a write answers with is read inside the same transaction that made the change.
-import { notFound } from "../../lib/http.js";
+import { notFound } from "../../core/http.js";
 import { wall, isUuid } from "../db.js";
 import { totals, isPaid } from "../shared/store.js";
 

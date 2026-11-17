@@ -457,7 +457,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 
 -- ───── Files and photos in conversations ─────
 -- One row per file on a message; the bytes live in UPLOAD_DIR/attachments/<id>
--- (src/services/attachments.service.js). Deleting a conversation removes the rows; the files stay
+-- (src/agent/inbox/attachments.js). Deleting a conversation removes the rows; the files stay
 -- on disk until a cleanup job exists.
 CREATE TABLE IF NOT EXISTS attachments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -495,7 +495,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS previous_id UUID REFERENCES c
 -- ───── Live updates ─────
 -- Every change to a conversation, its messages or its tool calls is announced on the channel
 -- replybek_events as {"w": workspace, "c": conversation, "t": table, "r": message role}.
--- src/services/events.service.js passes it on to open dashboards and widgets, which then fetch
+-- src/core/events.js passes it on to open dashboards and widgets, which then fetch
 -- the details the usual way. Updates that change nothing (marking an already-read chat read) stay quiet.
 CREATE OR REPLACE FUNCTION replybek_notify() RETURNS trigger AS $$
 DECLARE

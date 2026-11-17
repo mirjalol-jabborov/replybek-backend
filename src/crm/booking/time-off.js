@@ -2,7 +2,7 @@
 // the whole business. Blocking time is part of working with the calendar, so the team may do it.
 // Bookings already inside new blocked time are reported, never cancelled.
 import { z } from "zod";
-import { HttpError, forbidden } from "../../lib/http.js";
+import { HttpError, forbidden } from "../../core/http.js";
 import { write, insertRow, updateRow } from "../db.js";
 import { uuid, moment, label, someKey } from "../shapes.js";
 import { bookingsInside } from "../shared/booking.js";

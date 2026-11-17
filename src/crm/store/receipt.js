@@ -1,5 +1,5 @@
 // The printed receipt of an order: everything a slip needs, read on one unchanging picture.
-import { notFound } from "../../lib/http.js";
+import { notFound } from "../../core/http.js";
 import { read, isUuid } from "../db.js";
 import { findCustomer } from "../core/customers.js";
 import { branchOf } from "../core/branches.js";

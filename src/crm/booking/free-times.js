@@ -1,7 +1,7 @@
 // Questions about time, answered without saving anything: may this visit happen, and which start
 // times would a customer be offered on a day. They run the same shared functions the writes run.
 import { z } from "zod";
-import { forbidden } from "../../lib/http.js";
+import { forbidden } from "../../core/http.js";
 import { read } from "../db.js";
 import { uuid, serviceList, day, moment, minutes } from "../shapes.js";
 import { check, verdict, assign, freeStarts, whyNone, totals, rulesOf, isClean } from "../shared/booking.js";

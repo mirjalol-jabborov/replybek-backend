@@ -1,9 +1,9 @@
 // Core routes of the CRM: settings and customers. Mounted at /w/:wid/crm by ../index.js.
 // Team members work with customers; settings and deleting are for admins and the owner.
 import { Router } from "express";
-import { wrap } from "../../lib/http.js";
-import { validate } from "../../validators.js";
-import { requireRole } from "../../middlewares/workspace.js";
+import { wrap } from "../../core/http.js";
+import { validate } from "../../core/validate.js";
+import { requireRole } from "../../core/workspaces/access.js";
 import { settingsSchema, saveSettings } from "./settings.js";
 import { customerCreateSchema, customerUpdateSchema, createCustomer, updateCustomer, deleteCustomer, customerHistory } from "./customers.js";
 

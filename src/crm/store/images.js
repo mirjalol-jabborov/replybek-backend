@@ -1,14 +1,14 @@
 // Product pictures. A product's `image` is a path: a static one the app serves ("/products/x.jpg",
 // as in the demo) or one uploaded here, stored with the same storage the inbox's attachments use
-// (src/lib/storage.js) and served back only to the workspace's own people.
+// (src/core/storage.js) and served back only to the workspace's own people.
 // Each upload has a row in crm_product_images. A product may show an uploaded picture only while
 // that row is there, and the row goes before the file does, under the workspace's write lock: so
 // no product can end up showing a file that was removed.
 import crypto from "node:crypto";
 import multer from "multer";
-import { HttpError, notFound } from "../../lib/http.js";
-import { putFile, getFile, removeFile } from "../../lib/storage.js";
-import { query } from "../../db.js";
+import { HttpError, notFound } from "../../core/http.js";
+import { putFile, getFile, removeFile } from "../../core/storage.js";
+import { query } from "../../core/db.js";
 import { write, isUuid } from "../db.js";
 import { storeChanges } from "./rows.js";
 

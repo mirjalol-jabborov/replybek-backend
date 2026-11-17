@@ -1,7 +1,7 @@
 // Moving a booking between the workspace's own steps. What a step allows comes from its kind
 // (pending, booked, here, done, noshow, cancelled), never from its id or name.
 import { z } from "zod";
-import { HttpError } from "../../lib/http.js";
+import { HttpError } from "../../core/http.js";
 import { write } from "../db.js";
 import { hasId, stageOf, kindOf } from "../shared/index.js";
 import { check, verdict, stepBlock, kindHolds, CLOSED_KINDS } from "../shared/booking.js";

@@ -4,7 +4,7 @@
 // listed with its reasons, so someone can decide what to do with it. A daily job books the days
 // that come into view (series-job.js).
 import { z } from "zod";
-import { HttpError, forbidden, notFound } from "../../lib/http.js";
+import { HttpError, forbidden, notFound } from "../../core/http.js";
 import { write, isUuid, asQ } from "../db.js";
 import { uuid, serviceList, day, hm, minutes, money, label } from "../shapes.js";
 import { kindOf, firstOf } from "../shared/index.js";

@@ -3,7 +3,7 @@
 // calendar changed in between. The database has the last word on double bookings (the exclusion
 // constraint in sql/crm/10-booking.sql); its refusal reads the same as check()'s.
 import { z } from "zod";
-import { HttpError, forbidden, notFound } from "../../lib/http.js";
+import { HttpError, forbidden, notFound } from "../../core/http.js";
 import { write, isUuid, updateRow } from "../db.js";
 import { refusal } from "../errors.js";
 import { uuid, serviceList, moment, minutes, money, label } from "../shapes.js";

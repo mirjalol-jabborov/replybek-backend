@@ -7,9 +7,9 @@
 // soft: [reason] } (reasons are codes with their numbers, see ../shared/store.js); `force: true`
 // passes soft reasons when the workspace lets the team plan outside its delivery rules.
 import { Router } from "express";
-import { wrap } from "../../lib/http.js";
-import { validate } from "../../validators.js";
-import { requireRole } from "../../middlewares/workspace.js";
+import { wrap } from "../../core/http.js";
+import { validate } from "../../core/validate.js";
+import { requireRole } from "../../core/workspaces/access.js";
 import { productCreateSchema, productUpdateSchema, createProduct, updateProduct, deleteProduct } from "./products.js";
 import { acceptImage, uploadImage, setProductImage, sendImage } from "./images.js";
 import { receiveSchema, writeOffSchema, countSchema, receive, writeOff, count } from "./stock.js";

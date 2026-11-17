@@ -1,7 +1,7 @@
 // The team: who can be booked, when they work, what they do, and which login (if any) they are.
 // Setting it up is for admins.
 import { z } from "zod";
-import { HttpError } from "../../lib/http.js";
+import { HttpError } from "../../core/http.js";
 import { write, insertRow, updateRow } from "../db.js";
 import { uuid, uuids, hm, hmEnd, label, someKey } from "../shapes.js";
 import { check } from "../shared/booking.js";

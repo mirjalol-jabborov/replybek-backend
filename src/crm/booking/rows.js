@@ -1,6 +1,6 @@
 // How the Booking module's rows read: the columns as the app gets them (the demo's field names,
 // moments as "2026-11-17T09:30"), and the loaders every route shares.
-import { notFound } from "../../lib/http.js";
+import { notFound } from "../../core/http.js";
 import { wall, isUuid } from "../db.js";
 import { stageIds } from "../shared/index.js";
 import { OPEN_KINDS } from "../shared/booking.js";
