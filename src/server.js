@@ -1,6 +1,6 @@
 import "dotenv/config";
 import app from "./app.js";
-import { startWorker } from "./services/jobs.service.js";
+import { startWorker } from "./core/jobs.js";
 import { startPollingChannels } from "./services/telegram-polling.service.js";
 import { forgetOldUpdates } from "./services/channels.service.js";
 

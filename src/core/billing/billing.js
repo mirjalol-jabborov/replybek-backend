@@ -1,8 +1,8 @@
 import { query } from "../db.js";
-import { HttpError } from "../lib/http.js";
-import { polarEnabled, polarProductId, planForPolarProduct, createCheckout, changeProduct, cancelAtPeriodEnd, portalUrl, customerSubscriptions } from "../lib/polar.js";
-import { logActivity } from "./activity.service.js";
-import { assertPlanFits, isPaid } from "./workspaces.service.js";
+import { HttpError } from "../http.js";
+import { polarEnabled, polarProductId, planForPolarProduct, createCheckout, changeProduct, cancelAtPeriodEnd, portalUrl, customerSubscriptions } from "./polar.js";
+import { logActivity } from "../activity/activity.js";
+import { assertPlanFits, isPaid } from "../workspaces/workspaces.js";
 
 const TRIAL_DAYS = 7;
 const appOrigin = () => process.env.APP_ORIGIN || "http://localhost:5173";

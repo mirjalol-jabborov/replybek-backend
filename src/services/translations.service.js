@@ -5,9 +5,9 @@
 // "auto-translated", lets a translation be redone when the original changes, and keeps an owner's
 // own text safe: entries without a mark are the owner's and are never written here.
 import crypto from "node:crypto";
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 import { ai } from "../ai.js";
-import { isWidgetLanguage, languageName } from "../lib/languages.js";
+import { isWidgetLanguage, languageName } from "../core/languages.js";
 import { savedQuestions, translateQuestions } from "./suggestions.service.js";
 
 // The agent column each kind of text lives in (fixed names, never from input).

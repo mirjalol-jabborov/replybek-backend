@@ -1,7 +1,7 @@
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 import { ai } from "../ai.js";
 import { toVector } from "../lib/chunk.js";
-import { languageName } from "../lib/languages.js";
+import { languageName } from "../core/languages.js";
 
 // Words too common to help a keyword search (English, Uzbek, Russian).
 const STOP = new Set(

@@ -1,4 +1,4 @@
-import { safeFetch, normalizeUrl, assertPublicHost } from "../lib/safeFetch.js";
+import { safeFetch, normalizeUrl, assertPublicHost } from "../core/safe-fetch.js";
 import { robotsFor } from "../lib/robots.js";
 import { readSitemap, sectionsOf, inPaths } from "../lib/sitemap.js";
 import { htmlToText } from "../lib/extract.js";

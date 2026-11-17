@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { wrap } from "../lib/http.js";
+import { wrap } from "../core/http.js";
 import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema, widgetVisitorSchema } from "../validators.js";
-import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
+import { rateLimit, clientIP } from "../core/rate-limit.js";
 import { languageOf } from "../services/suggestions.service.js";
 import { widgetAgent, localizedConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, cardAction, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "../services/widget.service.js";
-import { stream } from "../services/events.service.js";
+import { stream } from "../core/events.js";
 import { acceptFile, visitorAttachment, sendAttachment } from "../services/attachments.service.js";
 
 /**

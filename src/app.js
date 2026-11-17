@@ -7,16 +7,16 @@ import { fileURLToPath } from "url";
 
 import { finishBrowserTest } from "./services/integration-testing.service.js";
 import { widgetToolResultSchema, validate } from "./validators.js";
-import { wrap } from "./lib/http.js";
-import notFound from "./middlewares/notFound.js";
-import error from "./middlewares/error.js";
-import { requireUser, requireJsonForWrites, appOrigins } from "./middlewares/session.js";
-import authRoutes from "./routes/auth.routes.js";
-import * as teamRoutes from "./routes/team.routes.js";
+import { wrap } from "./core/http.js";
+import notFound from "./core/not-found.js";
+import error from "./core/error.js";
+import { requireUser, requireJsonForWrites, appOrigins } from "./core/auth/session.js";
+import authRoutes from "./core/auth/routes.js";
+import * as teamRoutes from "./core/team/invite-routes.js";
 import workspaceRoutes from "./routes/workspace.routes.js";
 import widgetRoutes from "./routes/widget.routes.js";
 import oauthRoutes from "./routes/oauth.routes.js";
-import billingRoutes from "./routes/billing.routes.js";
+import billingRoutes from "./core/billing/polar-routes.js";
 import channelsRoutes from "./routes/channels.routes.js";
 import "./services/ingest.service.js"; // registers the ingest job
 

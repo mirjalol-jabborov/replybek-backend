@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { wrap } from "../lib/http.js";
-import { validate, registerSchema, loginSchema, profileSchema } from "../validators.js";
-import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
-import { startSession, endSession, requireUser, appOrigins, cookieOptions } from "../middlewares/session.js";
-import { register, login, workspacesOf, googleSignIn, updateProfile } from "../services/auth.service.js";
-import { googleEnabled, authorizationUrl, exchangeCode } from "../lib/google.js";
+import { wrap } from "../http.js";
+import { validate, registerSchema, loginSchema, profileSchema } from "../../validators.js";
+import { rateLimit, clientIP } from "../rate-limit.js";
+import { startSession, endSession, requireUser, appOrigins, cookieOptions } from "./session.js";
+import { register, login, workspacesOf, googleSignIn, updateProfile } from "./auth.js";
+import { googleEnabled, authorizationUrl, exchangeCode } from "./google.js";
 import { parse, serialize } from "cookie";
 
 const router = Router();

@@ -1,5 +1,5 @@
 // The emails Replybek sends, in English, Uzbek and Russian. Links point at the dashboard (APP_ORIGIN).
-import { layout, fill, sendMail } from "../lib/mail.js";
+import { layout, fill, sendMail } from "./mail.js";
 
 const appUrl = (hash) => `${(process.env.APP_ORIGIN || "http://localhost:5173").replace(/\/$/, "")}/#/${hash}`;
 const pick = (lang) => (["en", "uz", "ru"].includes(lang) ? lang : "en");

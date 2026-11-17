@@ -48,7 +48,7 @@ process.env.POLAR_PRODUCT_BUSINESS = PRODUCTS.business;
 // Imported after the env is set; `setup.base` is read live because the server starts in before().
 const setup = await import("./helpers/setup.js");
 const { owner } = setup;
-const { signWebhook, verifyWebhook } = await import("../src/lib/polar.js");
+const { signWebhook, verifyWebhook } = await import("../src/core/billing/polar.js");
 
 after(() => new Promise((done) => fakePolar.close(done)));
 

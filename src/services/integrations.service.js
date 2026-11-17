@@ -1,10 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
-import { query } from "../db.js";
-import { HttpError, notFound } from "../lib/http.js";
-import { encrypt, decrypt, sign, verify } from "../lib/secrets.js";
+import { query } from "../core/db.js";
+import { HttpError, notFound } from "../core/http.js";
+import { encrypt, decrypt, sign, verify } from "../core/secrets.js";
 import { render, pick } from "../lib/template.js";
-import { assertPublicHost } from "../lib/safeFetch.js";
-import { logActivity } from "./activity.service.js";
+import { assertPublicHost } from "../core/safe-fetch.js";
+import { logActivity } from "../core/activity/activity.js";
 import { integrationSchema } from "../validators.js";
 import { validateDefinitions, resolveInputs, modelInput } from "../lib/integration-config.js";
 import * as bridge from "../lib/bridge.js";

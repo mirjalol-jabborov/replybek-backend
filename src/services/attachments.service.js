@@ -8,12 +8,12 @@
 import path from "node:path";
 import { isUtf8 } from "node:buffer";
 import multer from "multer";
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 import { ai } from "../ai.js";
-import { HttpError, notFound } from "../lib/http.js";
+import { HttpError, notFound } from "../core/http.js";
 import { fileToSections } from "../lib/extract.js";
 import { xlsxToText } from "../lib/xlsx.js";
-import { putFile, getFile } from "../lib/storage.js";
+import { putFile, getFile } from "../core/storage.js";
 
 export const MAX_BYTES = 10 * 1024 * 1024;
 const UUID = /^[0-9a-f-]{36}$/i;

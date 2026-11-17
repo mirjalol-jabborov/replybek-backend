@@ -1,16 +1,16 @@
 import { toolInterface } from "../lib/tool-catalog.js";
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 import { ai } from "../ai.js";
 import { retrieve } from "./retrieval.service.js";
-import { countMessage } from "./activity.service.js";
-import { assertCanAnswer } from "./workspaces.service.js";
+import { countMessage } from "../core/activity/activity.js";
+import { assertCanAnswer } from "../core/workspaces/workspaces.js";
 import { notifyAllowanceUsed } from "./notify.service.js";
 import { agentTools, connectionsFor, runTool, displayCard } from "./integrations.service.js";
 import { fileContext } from "./attachments.service.js";
 import { inventedIds, withEmptyHint } from "../lib/tool-guard.js";
-import { describeNow, validTimeZone } from "../lib/clock.js";
-import { languageName } from "../lib/languages.js";
-import { signal } from "./events.service.js";
+import { describeNow, validTimeZone } from "../core/clock.js";
+import { languageName } from "../core/languages.js";
+import { signal } from "../core/events.js";
 
 const HUMAN_RE = /\b(human|person|someone|representative|real person|talk to|speak (to|with)|teammate|staff|operator|live agent)\b/i;
 const TONES = {

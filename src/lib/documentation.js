@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import * as cheerio from "cheerio";
-import { safeFetch } from "./safeFetch.js";
+import { safeFetch } from "../core/safe-fetch.js";
 import { htmlToText } from "./extract.js";
-import { HttpError } from "./http.js";
+import { HttpError } from "../core/http.js";
 
 const methods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const description = (value) => {

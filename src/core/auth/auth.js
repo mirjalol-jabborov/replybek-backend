@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
 import { query, tx } from "../db.js";
-import { HttpError } from "../lib/http.js";
+import { HttpError } from "../http.js";
 
 export async function register({ name, email, password, workspace_name, website, product = "agent" }) {
   const exists = await query("SELECT 1 FROM users WHERE email = $1", [email]);

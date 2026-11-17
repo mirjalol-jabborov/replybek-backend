@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { Router } from "express";
-import { wrap } from "../lib/http.js";
+import { wrap } from "../core/http.js";
 import { loadChannel } from "../services/channels.service.js";
 import { handleUpdate } from "../services/telegram.service.js";
 

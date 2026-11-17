@@ -1,6 +1,6 @@
-import { query } from "../db.js";
-import { HttpError, notFound } from "../lib/http.js";
-import { sign, verify, decrypt } from "../lib/secrets.js";
+import { query } from "../core/db.js";
+import { HttpError, notFound } from "../core/http.js";
+import { sign, verify, decrypt } from "../core/secrets.js";
 import { resolveInputs } from "../lib/integration-config.js";
 import {
   loadIntegration,

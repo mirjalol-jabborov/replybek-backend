@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { serialize } from "cookie";
 import { query } from "../db.js";
-import { HttpError } from "../lib/http.js";
+import { HttpError } from "../http.js";
 
 export const COOKIE = "nx_session";
 const DAYS = 30;

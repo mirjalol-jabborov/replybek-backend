@@ -1,11 +1,11 @@
-import { query, tx } from "../db.js";
+import { query, tx } from "../core/db.js";
 import { answerQuestion, describeOutcome } from "./answer.service.js";
 import { decideAction, disconnect, actionIntegrationMode, agentHasInPageTools } from "./integrations.service.js";
 import { addMessage, addMessageWithFile } from "./conversations.service.js";
 import { ATTACHMENTS_SQL, checkFile, readForAI, saveReading, fileContext, filesForAI } from "./attachments.service.js";
-import { assertCanAnswer } from "./workspaces.service.js";
+import { assertCanAnswer } from "../core/workspaces/workspaces.js";
 import { notifyWaiting } from "./notify.service.js";
-import { logActivity } from "./activity.service.js";
+import { logActivity } from "../core/activity/activity.js";
 import { deliver, settleCard } from "./delivery.service.js";
 
 /**

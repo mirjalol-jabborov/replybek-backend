@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WIDGET_LANGUAGES, languageOf } from "./lib/languages.js";
+import { WIDGET_LANGUAGES, languageOf } from "./core/languages.js";
 
 export const validate = (schema, source = "body") => (req, res, next) => {
   const parsed = schema.safeParse(req[source]);

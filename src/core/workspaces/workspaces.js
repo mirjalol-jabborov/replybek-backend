@@ -1,7 +1,7 @@
 import { query } from "../db.js";
-import { messagesUsed, logActivity } from "./activity.service.js";
-import { HttpError } from "../lib/http.js";
-import { polarEnabled } from "../lib/polar.js";
+import { messagesUsed, logActivity } from "../activity/activity.js";
+import { HttpError } from "../http.js";
+import { polarEnabled } from "../billing/polar.js";
 
 // `pages`: the most pages one website source imports.
 export const PLANS = {

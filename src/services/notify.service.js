@@ -1,9 +1,9 @@
 // Tells the team by email that a customer is waiting for a person, when nobody has the dashboard
 // open to see it (the live-update streams say whether anyone does). At most once an hour per conversation.
-import { query } from "../db.js";
-import { watching } from "./events.service.js";
-import { sendWaiting, sendAllowanceUsed } from "./emails.service.js";
-import { PLANS, allowanceResets } from "./workspaces.service.js";
+import { query } from "../core/db.js";
+import { watching } from "../core/events.js";
+import { sendWaiting, sendAllowanceUsed } from "../core/emails.js";
+import { PLANS, allowanceResets } from "../core/workspaces/workspaces.js";
 
 export async function notifyWaiting(conv) {
   if (watching(conv.workspace_id)) return { sent: 0 };

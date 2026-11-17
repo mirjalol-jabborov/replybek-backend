@@ -4,11 +4,11 @@
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import { query, tx } from "../db.js";
-import { HttpError, notFound } from "../lib/http.js";
-import { PLANS } from "./workspaces.service.js";
-import { workspacesOf } from "./auth.service.js";
-import { logActivity } from "./activity.service.js";
-import { sendInvite, sendReset } from "./emails.service.js";
+import { HttpError, notFound } from "../http.js";
+import { PLANS } from "../workspaces/workspaces.js";
+import { workspacesOf } from "../auth/auth.js";
+import { logActivity } from "../activity/activity.js";
+import { sendInvite, sendReset } from "../emails.js";
 
 const hash = (t) => crypto.createHash("sha256").update(t).digest("hex");
 const newToken = () => crypto.randomBytes(32).toString("base64url");

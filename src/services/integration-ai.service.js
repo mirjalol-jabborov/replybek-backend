@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ai } from "../ai.js";
-import { HttpError } from "../lib/http.js";
-import { safeFetch } from "../lib/safeFetch.js";
+import { HttpError } from "../core/http.js";
+import { safeFetch } from "../core/safe-fetch.js";
 import { htmlToText, fileToSections, checkFileSignature } from "../lib/extract.js";
 import { integrationSchema } from "../validators.js";
 import { validateDefinitions } from "../lib/integration-config.js";

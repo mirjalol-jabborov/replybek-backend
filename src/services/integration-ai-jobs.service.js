@@ -1,6 +1,6 @@
-import { query, tx } from "../db.js";
-import { HttpError, notFound } from "../lib/http.js";
-import { enqueue, registerJob } from "./jobs.service.js";
+import { query, tx } from "../core/db.js";
+import { HttpError, notFound } from "../core/http.js";
+import { enqueue, registerJob } from "../core/jobs.js";
 import { readDocumentation, generateFromDocumentation, redactDocumentation } from "./integration-ai.service.js";
 import { selectedDocumentation } from "../lib/documentation.js";
 

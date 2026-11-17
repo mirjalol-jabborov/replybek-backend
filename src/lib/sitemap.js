@@ -1,5 +1,5 @@
 import zlib from "zlib";
-import { safeFetch } from "./safeFetch.js";
+import { safeFetch } from "../core/safe-fetch.js";
 
 const decode = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").trim();
 const locs = (xml, tag) => [...xml.matchAll(new RegExp(`<${tag}[^>]*>[\\s\\S]*?<loc>([\\s\\S]*?)</loc>[\\s\\S]*?</${tag}>`, "gi"))].map((m) => decode(m[1].replace(/<!\[CDATA\[|\]\]>/g, "")));

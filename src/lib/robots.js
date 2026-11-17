@@ -1,4 +1,4 @@
-import { safeFetch } from "./safeFetch.js";
+import { safeFetch } from "../core/safe-fetch.js";
 
 /** Reads robots.txt rules for "*" and ReplybekBot. Returns allowed(url) → boolean, with `.sitemaps` (listed sitemap URLs). */
 export async function robotsFor(origin) {

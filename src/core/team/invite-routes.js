@@ -1,11 +1,11 @@
 import { Router } from "express";
-import { wrap } from "../lib/http.js";
-import { validate, joinSchema, forgotSchema, resetSchema } from "../validators.js";
-import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
-import { startSession, requireUser } from "../middlewares/session.js";
-import { languageOf } from "../services/suggestions.service.js";
-import { workspacesOf } from "../services/auth.service.js";
-import { inviteInfo, acceptInvite, joinWithInvite, forgotPassword, resetPassword } from "../services/team.service.js";
+import { wrap } from "../http.js";
+import { validate, joinSchema, forgotSchema, resetSchema } from "../../validators.js";
+import { rateLimit, clientIP } from "../rate-limit.js";
+import { startSession, requireUser } from "../auth/session.js";
+import { languageOf } from "../languages.js";
+import { workspacesOf } from "../auth/auth.js";
+import { inviteInfo, acceptInvite, joinWithInvite, forgotPassword, resetPassword } from "./team.js";
 
 // Joining a workspace from an emailed invitation, and "forgot password". Mounted at /invites and
 // /auth/password; the person may not be signed in yet.

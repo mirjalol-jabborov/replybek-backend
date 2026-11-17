@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import mammoth from "mammoth";
 // The package root runs a self-test when imported as ESM; the library file doesn't.
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
-import { HttpError } from "./http.js";
+import { HttpError } from "../core/http.js";
 
 const clean = (s) =>
   s

@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { HttpError } from "../lib/http.js";
+import { HttpError } from "./http.js";
 
 export default function error(err, req, res, next) {
   if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "That file is larger than 20 MB." });

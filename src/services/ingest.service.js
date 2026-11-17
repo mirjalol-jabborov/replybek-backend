@@ -1,15 +1,15 @@
 import crypto from "crypto";
-import { query, tx } from "../db.js";
+import { query, tx } from "../core/db.js";
 import { ai } from "../ai.js";
-import { HttpError } from "../lib/http.js";
+import { HttpError } from "../core/http.js";
 import { fileToSections } from "../lib/extract.js";
-import { getFile } from "../lib/storage.js";
+import { getFile } from "../core/storage.js";
 import { chunkSections, toVector } from "../lib/chunk.js";
 import { stripBoilerplate } from "../lib/boilerplate.js";
 import { inPaths } from "../lib/sitemap.js";
-import { registerJob } from "./jobs.service.js";
+import { registerJob } from "../core/jobs.js";
 import { discoverSite, fetchPages, crawlPages } from "./site.service.js";
-import { PLANS } from "./workspaces.service.js";
+import { PLANS } from "../core/workspaces/workspaces.js";
 
 /** An error whose message is shown on the source as-is and isn't retried. */
 const userError = (message) => Object.assign(new Error(message), { user: true });

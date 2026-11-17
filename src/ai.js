@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { HttpError } from "./lib/http.js";
+import { HttpError } from "./core/http.js";
 
 /**
  * Everything Replybek asks of a model goes through `ai`: embeddings for knowledge search,

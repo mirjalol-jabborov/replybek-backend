@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import * as cheerio from "cheerio";
 import YAML from "yaml";
-import { safeFetch } from "./safeFetch.js";
+import { safeFetch } from "../core/safe-fetch.js";
 import { htmlToText } from "./extract.js";
-import { HttpError } from "./http.js";
+import { HttpError } from "../core/http.js";
 import { postmanDocumentation, discoverPostman } from "./documentation.js";
 
 const verbs = ["get", "post", "put", "patch", "delete", "head", "options"];

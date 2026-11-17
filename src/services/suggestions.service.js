@@ -1,9 +1,9 @@
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 import { ai } from "../ai.js";
-import { HttpError } from "../lib/http.js";
-import { languageName } from "../lib/languages.js";
+import { HttpError } from "../core/http.js";
+import { languageName } from "../core/languages.js";
 
-export { languageOf } from "../lib/languages.js";
+export { languageOf } from "../core/languages.js";
 
 export function savedQuestions(agent, language = "en") {
   const fallback = agent.suggestion_default_language || "en";

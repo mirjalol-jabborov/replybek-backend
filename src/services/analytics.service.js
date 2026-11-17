@@ -1,4 +1,4 @@
-import { query } from "../db.js";
+import { query } from "../core/db.js";
 
 /**
  * Conversation volume for the last `days` days in the workspace's time zone. A conversation

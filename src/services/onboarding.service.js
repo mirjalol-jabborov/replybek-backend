@@ -1,12 +1,12 @@
-import { query } from "../db.js";
-import { HttpError } from "../lib/http.js";
-import { normalizeUrl } from "../lib/safeFetch.js";
+import { query } from "../core/db.js";
+import { HttpError } from "../core/http.js";
+import { normalizeUrl } from "../core/safe-fetch.js";
 import { readBrand } from "../lib/brand.js";
 import { previewSite } from "./site.service.js";
-import { PLANS } from "./workspaces.service.js";
+import { PLANS } from "../core/workspaces/workspaces.js";
 import { ai } from "../ai.js";
 import { fileToSections } from "../lib/extract.js";
-import { WIDGET_LANGUAGES, languageName } from "../lib/languages.js";
+import { WIDGET_LANGUAGES, languageName } from "../core/languages.js";
 
 const WELCOME = {
   en: (name) => `Hi! I'm the ${name} AI agent. How can I help you today?`,

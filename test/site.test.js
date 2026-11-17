@@ -166,7 +166,7 @@ test("due websites re-sync automatically; the interval can be changed or turned 
   const { b, w, a } = await setup();
   const add = (await b.call("POST", `${a}/sources/website`, { url: `${siteUrl}/uz/`, mode: "site" })).body;
   await drainJobs();
-  const { enqueueDueSyncs } = await import("../src/services/jobs.service.js");
+  const { enqueueDueSyncs } = await import("../src/core/jobs.js");
   await query("UPDATE sources SET next_sync_at = now() - interval '1 minute', last_synced_at = now() - interval '8 days' WHERE id = $1", [add.id]);
   assert.equal(await enqueueDueSyncs(), 1);
   assert.equal(await enqueueDueSyncs(), 0, "not queued twice");
@@ -180,7 +180,7 @@ test("due websites re-sync automatically; the interval can be changed or turned 
 
 test("imports stop at the plan's page limit and say so", async () => {
   const { b, w, a } = await setup();
-  const { PLANS } = await import("../src/services/workspaces.service.js");
+  const { PLANS } = await import("../src/core/workspaces/workspaces.js");
   const limit = PLANS.starter.pages;
   PLANS.starter.pages = 5;
   try {

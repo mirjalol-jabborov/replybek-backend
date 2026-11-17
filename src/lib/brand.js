@@ -1,5 +1,5 @@
 import * as cheerio from "cheerio";
-import { safeFetch } from "./safeFetch.js";
+import { safeFetch } from "../core/safe-fetch.js";
 
 /**
  * Reads a business's brand from its home page for onboarding: name, description, language,

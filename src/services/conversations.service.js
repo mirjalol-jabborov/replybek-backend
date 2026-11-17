@@ -1,9 +1,9 @@
-import { query, tx } from "../db.js";
-import { notFound, HttpError } from "../lib/http.js";
+import { query, tx } from "../core/db.js";
+import { notFound, HttpError } from "../core/http.js";
 import { summarize } from "./answer.service.js";
-import { logActivity } from "./activity.service.js";
+import { logActivity } from "../core/activity/activity.js";
 import { ATTACHMENTS_SQL, checkFile, storeAttachment } from "./attachments.service.js";
-import { signal } from "./events.service.js";
+import { signal } from "../core/events.js";
 import { deliver } from "./delivery.service.js";
 import { businessConnection } from "./channels.service.js";
 

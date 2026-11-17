@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import YAML from "yaml";
-import { HttpError } from "./http.js";
+import { HttpError } from "../core/http.js";
 import { pick } from "./template.js";
 import { integrationSchema } from "../validators.js";
 

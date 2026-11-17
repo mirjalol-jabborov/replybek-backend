@@ -1,10 +1,10 @@
 import crypto from "crypto";
-import { query, tx } from "../db.js";
-import { HttpError, notFound } from "../lib/http.js";
-import { encrypt, decrypt } from "../lib/secrets.js";
-import * as telegram from "../lib/telegram.js";
+import { query, tx } from "../core/db.js";
+import { HttpError, notFound } from "../core/http.js";
+import { encrypt, decrypt } from "../core/secrets.js";
+import * as telegram from "../core/telegram.js";
 import { text, LANGUAGES } from "../lib/channel-text.js";
-import { logActivity } from "./activity.service.js";
+import { logActivity } from "../core/activity/activity.js";
 import { pollingMode, startPolling, stopPolling } from "./telegram-polling.service.js";
 
 /**

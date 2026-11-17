@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { startWorker } from "./services/jobs.service.js";
+import { startWorker } from "./core/jobs.js";
 import "./services/ingest.service.js";
 import "./services/integration-ai-jobs.service.js";
 

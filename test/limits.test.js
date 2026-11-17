@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { owner, browser, query } from "./helpers/setup.js";
 
-const { outbox } = await import("../src/lib/mail.js");
+const { outbox } = await import("../src/core/mail.js");
 const period = () => new Date().toISOString().slice(0, 7);
 const setUsage = (ws, messages) =>
   query("INSERT INTO usage (workspace_id, period, messages) VALUES ($1, $2, $3) ON CONFLICT (workspace_id, period) DO UPDATE SET messages = $3, limit_emailed_at = NULL", [ws.id, period(), messages]);

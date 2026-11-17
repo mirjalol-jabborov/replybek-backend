@@ -1,7 +1,7 @@
-import { query } from "../db.js";
-import { notFound } from "../lib/http.js";
-import { logActivity } from "./activity.service.js";
-import { assertRoomFor } from "./workspaces.service.js";
+import { query } from "../core/db.js";
+import { notFound } from "../core/http.js";
+import { logActivity } from "../core/activity/activity.js";
+import { assertRoomFor } from "../core/workspaces/workspaces.js";
 import { marksAfterEdit } from "./translations.service.js";
 
 const FIELDS = ["name", "purpose", "instructions", "tone", "welcome", "fallback", "handoff", "allowed_origins", "suggested_questions", "suggested_questions_i18n", "suggestion_default_language", "welcome_i18n"];

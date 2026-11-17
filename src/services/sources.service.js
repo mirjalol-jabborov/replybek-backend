@@ -1,13 +1,13 @@
 import path from "path";
-import { query, tx } from "../db.js";
-import { notFound, HttpError } from "../lib/http.js";
-import { normalizeUrl, assertPublicHost } from "../lib/safeFetch.js";
+import { query, tx } from "../core/db.js";
+import { notFound, HttpError } from "../core/http.js";
+import { normalizeUrl, assertPublicHost } from "../core/safe-fetch.js";
 import { checkFileSignature } from "../lib/extract.js";
-import { putFile, removeFile } from "../lib/storage.js";
-import { enqueue } from "./jobs.service.js";
+import { putFile, removeFile } from "../core/storage.js";
+import { enqueue } from "../core/jobs.js";
 import { previewSite, defaultPaths } from "./site.service.js";
-import { PLANS, assertRoomFor } from "./workspaces.service.js";
-import { logActivity } from "./activity.service.js";
+import { PLANS, assertRoomFor } from "../core/workspaces/workspaces.js";
+import { logActivity } from "../core/activity/activity.js";
 
 const PUBLIC = "id, agent_id, type, name, url, include_linked, mode, include_paths, discovery, mime, bytes, qa, status, error, pages, pages_failed, pages_over_limit, progress, syncing, sync_interval_days, last_synced_at, next_sync_at, chunk_count, created_at, updated_at";
 

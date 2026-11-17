@@ -6,7 +6,7 @@ import { fakeAI } from "../src/ai.js";
 import { savedQuestions } from "../src/services/suggestions.service.js";
 import { structuredDocumentation, readDocumentationSite } from "../src/lib/documentation-site.js";
 import { postmanDocumentation, selectedDocumentation } from "../src/lib/documentation.js";
-import { runOne } from "../src/services/jobs.service.js";
+import { runOne } from "../src/core/jobs.js";
 import { toolInterface } from "../src/lib/tool-catalog.js";
 
 const collection = count => ({info:{name:"Records API",description:"API base URL https://api.example.com\nPublic API; no authentication required."},item:Array.from({length:count},(_,i)=>({name:`Record ${i}`,request:{method:"GET",url:`https://api.example.com/records/${i}`,description:`Read record ${i}. Inputs and response are documented here.`,body:{mode:"raw",raw:"{}"}}}))});

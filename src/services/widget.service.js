@@ -1,12 +1,12 @@
 import crypto from "crypto";
-import { query, tx } from "../db.js";
-import { notFound, HttpError } from "../lib/http.js";
+import { query, tx } from "../core/db.js";
+import { notFound, HttpError } from "../core/http.js";
 import { answerQuestion } from "./answer.service.js";
 import { connectUrl, pendingToolCalls, deliverToolResult, queueCardAction } from "./integrations.service.js";
 import { addMessage } from "./conversations.service.js";
 import { filesForAI } from "./attachments.service.js";
 import { savedQuestions } from "./suggestions.service.js";
-import { signal } from "./events.service.js";
+import { signal } from "../core/events.js";
 import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say, noteTyping } from "./chat.service.js";
 import { widgetTexts } from "./translations.service.js";
 
