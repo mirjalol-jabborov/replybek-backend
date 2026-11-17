@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { wrap } from "../../core/http.js";
-import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema, widgetVisitorSchema } from "../../validators.js";
+import { validate } from "../../core/validate.js";
+import { widgetStartSchema, widgetMessageSchema, widgetVisitorSchema } from "./checks.js";
+import { widgetToolResultSchema } from "../integrations/checks.js";
 import { rateLimit, clientIP } from "../../core/rate-limit.js";
 import { languageOf } from "../answers/suggestions.js";
 import { widgetAgent, localizedConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, cardAction, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "./widget.js";

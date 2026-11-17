@@ -5,7 +5,7 @@ import { encrypt, decrypt, sign, verify } from "../../core/secrets.js";
 import { render, pick } from "./template.js";
 import { assertPublicHost } from "../../core/safe-fetch.js";
 import { logActivity } from "../../core/activity/activity.js";
-import { integrationSchema } from "../../validators.js";
+import { integrationSchema } from "./checks.js";
 import { validateDefinitions, resolveInputs, modelInput } from "./config.js";
 import * as bridge from "./bridge.js";
 

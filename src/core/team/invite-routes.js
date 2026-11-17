@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { wrap } from "../http.js";
-import { validate, joinSchema, forgotSchema, resetSchema } from "../../validators.js";
+import { validate } from "../validate.js";
+import { joinSchema, forgotSchema, resetSchema } from "./checks.js";
 import { rateLimit, clientIP } from "../rate-limit.js";
 import { startSession, requireUser } from "../auth/session.js";
 import { languageOf } from "../languages.js";

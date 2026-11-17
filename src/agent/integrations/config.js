@@ -2,7 +2,7 @@ import Ajv from "ajv";
 import YAML from "yaml";
 import { HttpError } from "../../core/http.js";
 import { pick } from "./template.js";
-import { integrationSchema } from "../../validators.js";
+import { integrationSchema } from "./checks.js";
 
 const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
 const fail = (message) => {

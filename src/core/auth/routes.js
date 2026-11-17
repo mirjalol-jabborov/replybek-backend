@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { wrap } from "../http.js";
-import { validate, registerSchema, loginSchema, profileSchema } from "../../validators.js";
+import { validate } from "../validate.js";
+import { registerSchema, loginSchema, profileSchema } from "./checks.js";
 import { rateLimit, clientIP } from "../rate-limit.js";
 import { startSession, endSession, requireUser, appOrigins, cookieOptions } from "./session.js";
 import { register, login, workspacesOf, googleSignIn, updateProfile } from "./auth.js";

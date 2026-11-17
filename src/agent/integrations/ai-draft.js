@@ -3,7 +3,7 @@ import { ai } from "../answers/ai.js";
 import { HttpError } from "../../core/http.js";
 import { safeFetch } from "../../core/safe-fetch.js";
 import { htmlToText, fileToSections, checkFileSignature } from "../knowledge/extract.js";
-import { integrationSchema } from "../../validators.js";
+import { integrationSchema } from "./checks.js";
 import { validateDefinitions } from "./config.js";
 import { collectionCatalog, selectedDocumentation, groundCollectionActions } from "./documentation.js";
 
