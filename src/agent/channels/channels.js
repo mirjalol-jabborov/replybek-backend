@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { query, tx } from "../../core/db.js";
 import { HttpError, notFound } from "../../core/http.js";
 import { encrypt, decrypt } from "../../core/secrets.js";
-import * as telegram from "../../core/telegram.js";
+import * as telegram from "./telegram-api.js";
 import { text, LANGUAGES } from "./text.js";
 import { logActivity } from "../../core/activity/activity.js";
 import { pollingMode, startPolling, stopPolling } from "./polling.js";

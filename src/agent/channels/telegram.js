@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { query, tx } from "../../core/db.js";
 import { text } from "./text.js";
-import * as telegram from "../../core/telegram.js";
+import * as telegram from "./telegram-api.js";
 import { languageOf } from "../answers/suggestions.js";
 import { receiveMessage, decide, say, handToTeam } from "../inbox/chat.js";
 import { notify } from "../inbox/delivery.js";

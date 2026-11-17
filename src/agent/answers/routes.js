@@ -2,7 +2,7 @@ import { Router } from "express";
 import { wrap } from "../../core/http.js";
 import { validate } from "../../core/validate.js";
 import { requireRole } from "../../core/workspaces/access.js";
-import { testLimit, setupAILimit } from "../limits.js";
+import { testLimit, setupAILimit } from "../shared/limits.js";
 import { suggestionDraftSchema, testQuestionSchema } from "./checks.js";
 import { getAgent } from "../agents/agents.js";
 import { answerQuestion } from "./answer.js";

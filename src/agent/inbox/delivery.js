@@ -1,6 +1,6 @@
 import { query } from "../../core/db.js";
 import { text } from "../channels/text.js";
-import * as telegram from "../../core/telegram.js";
+import * as telegram from "../channels/telegram-api.js";
 import { channelFor, disableChannel, businessConnection } from "../channels/channels.js";
 import { connectUrl } from "../integrations/integrations.js";
 

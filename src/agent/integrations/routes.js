@@ -3,7 +3,7 @@ import multer from "multer";
 import { wrap } from "../../core/http.js";
 import { validate } from "../../core/validate.js";
 import { requireRole } from "../../core/workspaces/access.js";
-import { testLimit, setupAILimit } from "../limits.js";
+import { testLimit, setupAILimit } from "../shared/limits.js";
 import { integrationImportSchema, procedureTestSchema, integrationTestSchema, integrationSchema, integrationUpdateSchema, toolPreviewSchema } from "./checks.js";
 import { languageOf } from "../answers/suggestions.js";
 import { listIntegrations, createIntegration, updateIntegration, deleteIntegration, redirectUri, previewTool, loadIntegration, simulateProcedure } from "./integrations.js";

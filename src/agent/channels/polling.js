@@ -1,5 +1,5 @@
 import { query } from "../../core/db.js";
-import * as telegram from "../../core/telegram.js";
+import * as telegram from "./telegram-api.js";
 import { loadChannel, disableChannel } from "./channels.js";
 import { handleUpdate } from "./telegram.js";
 
