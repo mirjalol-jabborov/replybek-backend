@@ -73,6 +73,12 @@ export function validateDefinitions(config) {
       }
     }
   }
+  for (const tool of tools) {
+    const action = tool.display?.action;
+    // The action may live in another of the agent's integrations; one here must be a write action.
+    const here = action && tools.find((t) => t.name === action.tool);
+    if (here && here.kind !== "write") fail(`The card button on ${tool.name} must run a write action.`);
+  }
   for (const procedure of config.procedures || []) {
     const ids = new Set();
     for (const step of procedure.steps) {

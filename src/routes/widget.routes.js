@@ -3,7 +3,7 @@ import { wrap } from "../lib/http.js";
 import { validate, widgetStartSchema, widgetMessageSchema, widgetToolResultSchema, widgetVisitorSchema } from "../validators.js";
 import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
 import { languageOf } from "../services/suggestions.service.js";
-import { widgetAgent, localizedConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "../services/widget.service.js";
+import { widgetAgent, localizedConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, cardAction, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "../services/widget.service.js";
 import { stream } from "../services/events.service.js";
 import { acceptFile, visitorAttachment, sendAttachment } from "../services/attachments.service.js";
 
@@ -78,6 +78,9 @@ router.post("/conversations/:cid/handoff", perIP, wrap(async (req, res) => {
 // Integrations: where to sign in, and the customer's answer to a proposed change.
 router.post("/conversations/:cid/integrations/:iid/connect", perIP, wrap(async (req, res) => {
   res.json(await startConnect(req.agent, req.params.cid, token(req), req.params.iid));
+}));
+router.post("/conversations/:cid/messages/:mid/cards/:index/action", perIP, wrap(async (req, res) => {
+  res.json(await cardAction(req.agent, req.params.cid, token(req), req.params.mid, Number(req.params.index), inpage(req), req.body?.qty));
 }));
 router.post("/conversations/:cid/actions/:aid/:decision(confirm|cancel)", perIP, wrap(async (req, res) => {
   res.json(await decide(req.agent, req.params.cid, token(req), req.params.aid, req.params.decision === "confirm", inpage(req)));

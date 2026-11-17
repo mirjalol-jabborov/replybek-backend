@@ -340,5 +340,23 @@
     "hi": "बॉट जोड़ दिया गया है, लेकिन वह अभी जवाब नहीं दे सकता। जहाँ आपने उसे जोड़ा है, वहाँ Manage Messages चालू करें।",
     "id": "Bot sudah ditambahkan, tetapi belum bisa membalas. Di tempat Anda menambahkannya, aktifkan Kelola pesan.",
     "pl": "Bot został dodany, ale nie może jeszcze odpowiadać. Tam, gdzie go dodałeś, włącz Zarządzaj wiadomościami."
+  },
+  "open": {
+    "en": "View",
+    "uz": "Batafsil",
+    "ru": "Подробнее",
+    "es": "Ver",
+    "pt": "Ver",
+    "fr": "Voir",
+    "it": "Vedi",
+    "de": "Ansehen",
+    "ja": "詳しく見る",
+    "ko": "자세히 보기",
+    "zh": "查看",
+    "ar": "عرض",
+    "tr": "İncele",
+    "hi": "देखें",
+    "id": "Lihat",
+    "pl": "Zobacz"
   }
 }

@@ -118,25 +118,29 @@ async function toTelegram(channel, conv, message, replies) {
     if (message.id && last?.message_id) {
       await query("UPDATE messages SET channel_message_id = $2 WHERE id = $1", [message.id, String(last.message_id)]);
     }
-    // Cards with photos (bouquets, products): an album after the words, each photo captioned.
-    const photos = productPhotos(message.card);
-    if (photos.length) {
+    // Cards with photos (products, listings, rooms…): one photo each after the words, its name and
+    // price underneath and a button to its page. Not an album: Telegram shows a single caption for
+    // a whole album, so nobody could tell which photo is which, or reply to one of them.
+    for (const photo of productPhotos(message.card).slice(0, TELEGRAM_CARDS)) {
       try {
-        await send(channel, () => (photos.length === 1 ? telegram.sendFileByUrl(channel.token, chatId, photos[0], business) : telegram.sendMediaGroup(channel.token, chatId, photos, business)));
+        await send(channel, () => telegram.sendFileByUrl(channel.token, chatId, photo, business, photo.link ? [[{ text: text(language, "open"), url: photo.link }]] : null));
       } catch (e) {
-        console.error(`Couldn't send the photos on conversation ${conv.id}:`, e.message);
+        console.error(`Couldn't send a photo on conversation ${conv.id}:`, e.message);
       }
     }
   });
 }
 
-/** A products card's items as captioned photos: name, price and link. Items without a photo are left out. */
+// A chat isn't a catalog: the first few cards, as the AI names two or three of them anyway.
+const TELEGRAM_CARDS = 4;
+
+/** A products card's items as captioned photos: name, then price; the link goes on a button. Items without a photo are left out. */
 export function productPhotos(card) {
   if (card?.type !== "products") return [];
   const price = (i) => (i.price == null ? "" : typeof i.price === "number" ? `${i.price.toLocaleString("ru-RU").replace(/\u00a0/g, " ")}${i.currency ? ` ${i.currency}` : ""}` : String(i.price));
   return (card.items || [])
     .filter((i) => i.image)
-    .map((i) => ({ url: i.image, caption: [i.title, [price(i), i.subtitle].filter(Boolean).join(" · "), i.url].filter(Boolean).join("\n") }));
+    .map((i) => ({ url: i.image, link: i.url || null, caption: [i.title, [price(i), i.subtitle].filter(Boolean).join(" · ")].filter(Boolean).join("\n") }));
 }
 
 /**

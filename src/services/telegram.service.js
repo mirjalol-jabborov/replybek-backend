@@ -24,7 +24,10 @@ const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
  * album arrives as one message per photo. A chat's messages are handled one after another, and
  * the ones that arrive within BURST_MS of each other get a single answer that has read them all.
  */
-const burstMs = () => Number(process.env.TELEGRAM_BURST_MS ?? 1200);
+// People often finish a thought in two or three messages ("I want flowers", "around 500k"). One
+// answer waits until they pause for a moment, but never longer than the cap after the first.
+const burstMs = () => Number(process.env.TELEGRAM_BURST_MS ?? 2000);
+const burstCapMs = () => Number(process.env.TELEGRAM_BURST_CAP_MS ?? 4000);
 const chats = new Map(); // "<channel>:<chat>" → { waiting, timer, chain, busy }
 
 function chatQueue(key) {
@@ -47,16 +50,34 @@ function inChat(key, work) {
 }
 
 /** Holds a message briefly, so one answer covers the burst it belongs to. */
+/** A message has come in for this chat; until it reaches `collect`, it waits behind the work queued there. */
+function arrived(key) {
+  const q = chatQueue(key);
+  q.incoming = (q.incoming || 0) + 1;
+  return () => (q.incoming = Math.max(0, q.incoming - 1));
+}
+
 function collect(key, message, handle) {
   const q = chatQueue(key);
+  if (!q.waiting.length) q.firstAt = Date.now();
   q.waiting.push(message);
   clearTimeout(q.timer);
   q.timer = setTimeout(() => {
     q.timer = null;
     const batch = q.waiting.splice(0);
-    inChat(key, () => handle(batch));
-  }, burstMs());
+    q.queued = (q.queued || 0) + 1;
+    inChat(key, () => {
+      q.queued -= 1;
+      return handle(batch);
+    });
+  }, Math.max(0, Math.min(burstMs(), q.firstAt + burstCapMs() - Date.now())));
 }
+
+/** True while newer messages from this chat wait their turn: an answer written before them is stale. */
+const moreWaiting = (key) => {
+  const q = chats.get(key);
+  return Boolean(q && (q.waiting.length || q.queued || q.incoming));
+};
 
 /** The published agent behind a channel, with the workspace name the AI introduces itself with. */
 async function agentFor(channel) {
@@ -144,7 +165,7 @@ async function askForPerson(agent, conv, body, language) {
  * A burst of messages from one chat: all are kept, and the last readable one is answered.
  * `business`: the connection it came through, for a Telegram Business chat.
  */
-async function answerBatch(channel, agent, messages, business = null) {
+async function answerBatch(channel, agent, messages, business = null, key = null) {
   const first = messages[0];
   let conv = await openConversation(agent, channel, first.chat, first.from || {}, Boolean(business));
   const language = conv.visitor?.language || "en";
@@ -157,7 +178,10 @@ async function answerBatch(channel, agent, messages, business = null) {
       console.error(`Could not read a file from chat ${message.chat.id}:`, e.message);
       attachment = { file: null, refused: "wrong" };
     }
-    const body = message.text || message.caption || "";
+    // A reply to one of our messages (say, a product's photo) says which one it means.
+    const quoted = message.reply_to_message && (message.reply_to_message.caption || message.reply_to_message.text || "").trim();
+    const said = message.text || message.caption || "";
+    const body = said && quoted ? `${said}\n\n(Replying to: "${quoted.slice(0, 300)}")` : said;
     // A sticker, a location, a voice note, a file too big: say why, and carry on with the rest.
     if (attachment.refused || (!body && !attachment.file)) await notify(conv, text(language, attachment.refused || "fileType"));
     if (body || attachment.file) readable.push({ body, file: attachment.file });
@@ -166,7 +190,7 @@ async function answerBatch(channel, agent, messages, business = null) {
   await whileWorking(channel, first.chat.id, async () => {
     for (const [i, item] of readable.entries()) {
       try {
-        ({ conv } = await receiveMessage(agent, conv, { text: item.body, file: item.file }, { answer: i === readable.length - 1 }));
+        ({ conv } = await receiveMessage(agent, conv, { text: item.body, file: item.file }, { answer: i === readable.length - 1, stale: key ? () => moreWaiting(key) : null }));
       } catch (e) {
         // A file the agent can't read, or a message it can't take: say so instead of going quiet.
         await notify(conv, e.status === 415 ? text(language, "fileType") : text(language, "wrong"));
@@ -192,11 +216,17 @@ function handleMessage(channel, agent, message) {
     });
   }
   // The "Talk to a person" button sends its own label, in the customer's language.
+  const done = arrived(key);
   return inChat(key, async () => {
-    const conv = await openConversation(agent, channel, message.chat, message.from || {});
-    const language = conv.visitor?.language || "en";
-    if (agent.handoff && said && said === text(language, "person")) return askForPerson(agent, conv, said, language);
-    collect(key, message, (batch) => answerBatch(channel, agent, batch));
+    try {
+      const conv = await openConversation(agent, channel, message.chat, message.from || {});
+      const language = conv.visitor?.language || "en";
+      if (agent.handoff && said && said === text(language, "person")) return askForPerson(agent, conv, said, language);
+      if (!chatQueue(key).waiting.length) telegram.sendChatAction(channel.token, message.chat.id, "typing").catch(() => {});
+      collect(key, message, (batch) => answerBatch(channel, agent, batch, null, key));
+    } finally {
+      done();
+    }
   });
 }
 
@@ -311,7 +341,16 @@ async function handleBusinessMessage(channel, agent, message) {
   const key = `${channel.id}:biz:${message.chat.id}`;
   if (message.from?.id === owner.id) return inChat(key, () => ownerWrote(channel, agent, message, owner));
   if (!connection.can_reply) return;
-  return inChat(key, async () => collect(key, message, (batch) => answerBatch(channel, agent, batch, message.business_connection_id)));
+  const done = arrived(key);
+  return inChat(key, async () => {
+    try {
+      // The dots right away, so the short wait for more messages doesn't look like silence.
+      if (!chatQueue(key).waiting.length) telegram.sendChatAction(channel.token, message.chat.id, "typing", message.business_connection_id).catch(() => {});
+      collect(key, message, (batch) => answerBatch(channel, agent, batch, message.business_connection_id, key));
+    } finally {
+      done();
+    }
+  });
 }
 
 /**

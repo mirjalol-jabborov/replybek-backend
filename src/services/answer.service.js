@@ -55,6 +55,13 @@ function languageRule(pageLanguage) {
   return `- Reply in the language of the customer's new message, even when the passages, tool results or your earlier replies are in another language. When the new message has no clear language of its own (only an emoji, a number, a product name or code, or a short word several languages share), reply in ${unclear}.`;
 }
 
+// Where a card's button action lives: any write action the agent can use in this chat. None on a
+// channel without it (Telegram has no page for an in-page action), so the cards come without buttons.
+function buttonIntegration(tools, found) {
+  const name = found.tool.display?.action?.tool;
+  return name ? tools.find((t) => t.tool.name === name && t.tool.kind === "write")?.integration.id || null : null;
+}
+
 function systemPrompt(cfg, integrations = [], pageLanguage = null) {
   return [
     `You are ${cfg.name}, the customer support assistant for ${cfg.workspace_name}.`,
@@ -80,6 +87,16 @@ function systemPrompt(cfg, integrations = [], pageLanguage = null) {
     .join("\n");
 }
 
+// Which alphabet the customer wrote in. Uzbek is written in both, and with Russian passages or tool
+// results the model otherwise answers "Qizimga gul kerak" in Russian or in Uzbek Cyrillic.
+function scriptRule(question) {
+  const latin = /[A-Za-z]/.test(question || "");
+  const cyrillic = /[\u0400-\u04FF]/.test(question || "");
+  if (latin && !cyrillic) return " The message is written in Latin letters: reply in Latin letters too, even when the passages and tool results are in Cyrillic. Uzbek written in Latin letters is Uzbek: reply in Uzbek (Latin script, with oʻ and gʻ), not Russian. Keep product names as they are.";
+  if (cyrillic && !latin) return " The message is written in Cyrillic: reply in Cyrillic too. Work out the language first, as people write casually, with typos and shortened words: Uzbek written in Cyrillic (кизим, пулим бор, керак, корсатинг, рахмат, канча) is Uzbek, so reply in Uzbek in Cyrillic, not Russian.";
+  return "";
+}
+
 function userPrompt(passages, history, question, accounts = [], file = "", now = describeNow("UTC"), pageLanguage = null) {
   const kb = passages.length
     ? passages.map((p, i) => `[${i + 1}] ${p.source_name}${p.heading ? ` · ${p.heading}` : ""}${p.url ? ` (${p.url})` : ""}\n${p.content}`).join("\n\n")
@@ -91,7 +108,7 @@ function userPrompt(passages, history, question, accounts = [], file = "", now =
   const wordless = !/\p{L}/u.test(question || "") && !file;
   const replyIn = wordless
     ? `Write "answer" in ${pageLanguage ? languageName(pageLanguage) : "the language of the customer's earlier messages"}: the new message has no words of its own${pageLanguage ? ", and that's the language of the page they're on" : ""}.`
-    : `Write "answer" in the language of the customer's new message${pageLanguage ? ` (if it has no clear language of its own: ${languageName(pageLanguage)})` : ""}.`;
+    : `Write "answer" in the language of the customer's new message${pageLanguage ? ` (if it has no clear language of its own: ${languageName(pageLanguage)})` : ""}.${scriptRule(question)}`;
   // The language rule is repeated last: otherwise, after passages and tool results in another
   // language (often English), the model drifts into theirs.
   // Labelled, so a delivery date in a tool result isn't mistaken for today (or the other way round).
@@ -167,6 +184,7 @@ export async function answerQuestion({ agent, question, file = null, history = [
     system: systemPrompt(cfg, integrations, page),
     user: userPrompt(passages, history.slice(-8), question, await connectionsFor(conversationId), file ? fileContext(file, file.text) : "", describeNow(setting.timeZone), page),
     meta: { task: "answer", passages, question: whole },
+    effort: "answer", // the customer's answer is the one call that thinks (OPENAI_REASONING_EFFORT)
   };
   // What the customer and earlier tool results said: an order number or phone sent to a tool must come from here.
   const said = [question, file?.text, ...history.map((m) => m.body)];
@@ -181,9 +199,9 @@ export async function answerQuestion({ agent, question, file = null, history = [
     await progress("writing");
     said.push(JSON.stringify(res.output ?? null));
     if (res.card && !(card?.type === "connect")) card = res.card;
-    // A result the tool shows as cards (bouquets with their photos), unless a sign-in or a
+    // A result the tool shows as cards (items with their photos), unless a sign-in or a
     // confirmation is waiting: that one matters more.
-    else if (!res.card && found.tool.display && (!card || card.type === "products")) card = displayCard(found.tool.display, res.output) || card;
+    else if (!res.card && found.tool.display && (!card || card.type === "products")) card = displayCard(found.tool.display, res.output, { integration_id: buttonIntegration(tools, found) }) || card;
     return withEmptyHint(res.output);
   };
   const out = tools.length ? await ai.chatTools({ ...request, ...toolInterface(tools, execute) }) : await ai.chatJSON(request);

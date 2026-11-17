@@ -7,7 +7,7 @@ import { startPolling, stopPolling } from "../src/services/telegram-polling.serv
 import { forgetOldUpdates } from "../src/services/channels.service.js";
 import { fakeAI } from "../src/ai.js";
 
-// A short burst window: messages sent within it get one answer (in production it is 1.2 s).
+// A short burst window: messages sent within it get one answer (in production it is 2 s, at most 4 s).
 process.env.TELEGRAM_BURST_MS ??= "80";
 
 /**
@@ -70,6 +70,10 @@ before(async () => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       if (req.url === "/orders:create") placed.push(JSON.parse(body));
+      if (req.url.startsWith("/tg/")) {
+        placed.push({ url: req.url, key: req.headers["x-shop-key"], body: body ? JSON.parse(body) : null });
+        return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+      }
       if (req.url.startsWith("/flowers")) {
         return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ products: [
           { title: "Peony cloud", price: 850000, image: "https://shop.example/media/peony.jpg", url: "https://shop.example/product/peony-cloud" },
@@ -671,7 +675,7 @@ test("Telegram Business: turning it off and linking again finds the bot still co
   assert.ok(calls.some((c) => c.method === "getBusinessConnection"));
 });
 
-test("a tool that shows its results as cards puts bouquets with photos in the answer, and in Telegram as an album", async () => {
+test("a tool that shows its results as cards puts them in the answer, and in Telegram as a photo each with a button", async () => {
   const { b, w, agent, channel, ws } = await agentWithBot();
   const made = await b.call("POST", `${w}/integrations`, {
     agent_id: agent.id, name: "Shop", mode: "server", base_url: shopUrl, auth: { type: "none" },
@@ -681,13 +685,67 @@ test("a tool that shows its results as cards puts bouquets with photos in the an
   assert.equal(made.status, 201, JSON.stringify(made.body));
   SECRET = await secretOf(channel.id);
   await fromTelegram(channel.id, customerSaid(7401, "[tool:find_flowers {}]"));
-  const album = await until(() => calls.find((c) => c.method === "sendMediaGroup"), "the photos as an album");
-  assert.equal(album.body.media.length, 2, "only items with a real photo");
-  assert.equal(album.body.media[0].media, "https://shop.example/media/peony.jpg");
-  assert.match(album.body.media[0].caption, /Peony cloud\n850 000 сум\nhttps:\/\/shop\.example\/product\/peony-cloud/);
+  await until(() => calls.filter((c) => c.method === "sendPhoto").length >= 2, "a photo per card");
+  const photos = calls.filter((c) => c.method === "sendPhoto");
+  assert.equal(photos.length, 2, "only items with a real photo, each on its own (an album shows one caption)");
+  assert.equal(photos[0].body.photo, "https://shop.example/media/peony.jpg");
+  assert.equal(photos[0].body.caption, "Peony cloud\n850 000 сум", "its name and price under it");
+  assert.deepEqual(photos[0].body.reply_markup.inline_keyboard, [[{ text: "Batafsil", url: "https://shop.example/product/peony-cloud" }]], "its page on a button, in the customer's language");
+  assert.ok(!calls.some((c) => c.method === "sendMediaGroup"));
   const { rows } = await query("SELECT card FROM messages WHERE workspace_id = $1 AND role = 'ai' ORDER BY seq DESC LIMIT 1", [ws.id]);
   assert.equal(rows[0].card.type, "products");
   assert.equal(rows[0].card.items.length, 3);
   assert.equal(rows[0].card.items[2].image, null, "anything that isn't a web address is dropped");
   assert.equal(rows[0].card.items[2].url, null);
+});
+
+test("in a Telegram chat a tool gets the customer's Telegram id from Replybek, and a Telegram-only tool stays off the website", async () => {
+  const { b, w, agent, channel } = await agentWithBot();
+  const made = await b.call("POST", `${w}/integrations`, {
+    agent_id: agent.id, name: "Shop", mode: "server", base_url: shopUrl, auth: { type: "api_key", header: "X-Shop-Key", prefix: "" }, client_secret: "shop-key-1",
+    tools: [{ name: "my_basket", kind: "read", description: "The customer's basket.", channels: ["telegram"], input: { type: "object", properties: { telegram_user_id: { type: "string" } } },
+      request: { method: "POST", path: "/tg/cart", body: { telegram_user_id: "{{customer.telegram_user_id}}", name: "{{customer.name}}", asked: "{{args.telegram_user_id}}" } } }],
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  assert.deepEqual((await agentTools(agent.id, "widget")).map((t) => t.tool.name), [], "not offered in the website chat");
+  assert.deepEqual((await agentTools(agent.id, "telegram_business")).map((t) => t.tool.name), ["my_basket"]);
+  SECRET = await secretOf(channel.id);
+  const before = placed.length;
+  await fromTelegram(channel.id, customerSaid(7501, '[tool:my_basket {"telegram_user_id":"999"}]'));
+  await until(() => placed.length > before, "the shop called");
+  const call = placed.at(-1);
+  assert.equal(call.key, "shop-key-1");
+  assert.equal(call.body.telegram_user_id, "7501", "the id Telegram vouched for");
+  assert.equal(call.body.asked, "999", "what the AI asked for is only an argument");
+  assert.equal(call.body.name, "Dilnoza");
+});
+
+test("a message sent while the answer is being written: that answer is dropped and one answer covers both", async () => {
+  const { channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  fakeAI.answerDelay = 400;
+  try {
+    await fromTelegram(channel.id, customerSaid(6202, "What is your return policy?"));
+    await new Promise((d) => setTimeout(d, 250)); // the burst closed; the first answer is being written
+    await fromTelegram(channel.id, customerSaid(6202, "For unworn items, the return policy?"));
+    await until(() => sent().some((c) => String(c.body.chat_id) === "6202"), "the answer to both");
+    await new Promise((d) => setTimeout(d, 600));
+  } finally {
+    fakeAI.answerDelay = 0;
+  }
+  const replies = sent().filter((c) => String(c.body.chat_id) === "6202");
+  assert.equal(replies.length, 1, `one answer, not a stale one first: ${replies.map((c) => c.body.text).join(" | ")}`);
+  const { rows } = await query("SELECT m.role FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.channel_chat_id = '6202' AND m.role IN ('visitor', 'ai') ORDER BY m.seq");
+  assert.deepEqual(rows.map((r) => r.role), ["visitor", "visitor", "ai"]);
+});
+
+test("a reply to one of our messages tells the AI which one it means", async () => {
+  const { channel } = await agentWithBot();
+  SECRET = await secretOf(channel.id);
+  const update = customerSaid(6303, "this one please");
+  update.message.reply_to_message = { message_id: 9, caption: "White roses\n640 000 сум" };
+  await fromTelegram(channel.id, update);
+  await until(() => sent().some((c) => String(c.body.chat_id) === "6303"), "an answer");
+  const { rows } = await query("SELECT m.body FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.channel_chat_id = '6303' AND m.role = 'visitor'");
+  assert.match(rows[0].body, /this one please\n\n\(Replying to: "White roses\n640 000 сум"\)/);
 });

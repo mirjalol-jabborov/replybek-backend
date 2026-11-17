@@ -14,6 +14,58 @@ export const models = () => ({
   moderation: process.env.OPENAI_MODERATION_MODEL || "omni-moderation-latest",
 });
 
+/**
+ * How hard the model thinks. Customer answers think at OPENAI_REASONING_EFFORT (e.g. medium); the
+ * small jobs around them (search queries, translations, summaries) at OPENAI_LIGHT_EFFORT, so they
+ * don't slow the answer down. Both unset for a model that doesn't think (gpt-4.1-mini): then
+ * nothing is sent. Thinking counts toward the token limit, so the limit grows to leave it room.
+ */
+const ROOM = { none: 0, minimal: 500, low: 2000, medium: 4000, high: 8000, xhigh: 12000 };
+function thinking(kind, maxTokens) {
+  const effort = (kind === "answer" ? process.env.OPENAI_REASONING_EFFORT : process.env.OPENAI_LIGHT_EFFORT) || null;
+  return effort ? { reasoning_effort: effort, max_completion_tokens: maxTokens + (ROOM[effort] ?? 4000) } : { max_completion_tokens: maxTokens };
+}
+
+/**
+ * chatTools for a thinking model, on the Responses API. Nothing is stored at OpenAI; the model's
+ * reasoning comes back encrypted and is handed back with each round, so it keeps its train of
+ * thought between tool calls.
+ */
+async function chatToolsThinking({ system, user, tools, run, maxSteps, effort, maxTokens }) {
+  // The instructions go in as a developer message: JSON output needs "JSON" said in the messages.
+  const input = [
+    { role: "developer", content: system },
+    { role: "user", content: user },
+  ];
+  const defs = tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: false }));
+  for (let step = 0; ; step++) {
+    const res = await openai().responses.create({
+      model: models().chat,
+      input,
+      tools: defs,
+      tool_choice: step < maxSteps ? "auto" : "none",
+      text: { format: { type: "json_object" } },
+      reasoning: { effort },
+      max_output_tokens: maxTokens,
+      store: false,
+      include: ["reasoning.encrypted_content"],
+    });
+    const calls = (res.output || []).filter((o) => o.type === "function_call");
+    if (!calls.length) return parseModelJSON(res.output_text);
+    input.push(...res.output);
+    for (const call of calls) {
+      let args = {};
+      try {
+        args = JSON.parse(call.arguments || "{}");
+      } catch {
+        // A malformed call gets an error back instead of crashing the answer.
+      }
+      const output = await run(call.name, args);
+      input.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(output).slice(0, 12000) });
+    }
+  }
+}
+
 const READ_FILE = [
   "A customer sent this file to a business's support chat. Write what it contains for a support agent who can't see it.",
   "- For a photo: what it shows (the item, screen or document), and any damage, fault or problem you can see.",
@@ -78,7 +130,7 @@ const real = {
     return out;
   },
 
-  async chatJSON({ system, user, maxTokens = 700 }) {
+  async chatJSON({ system, user, maxTokens = 700, effort = "light" }) {
     const res = await openai().chat.completions.create({
       model: models().chat,
       messages: [
@@ -86,7 +138,7 @@ const real = {
         { role: "user", content: user },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: maxTokens,
+      ...thinking(effort, maxTokens),
     });
     return parseModelJSON(res.choices[0]?.message?.content);
   },
@@ -95,7 +147,10 @@ const real = {
    * JSON chat where the model may call tools first. `run(name, args)` executes one call and
    * returns what the model sees. After `maxSteps` rounds the model must answer.
    */
-  async chatTools({ system, user, tools, run, maxTokens = 700, maxSteps = 4 }) {
+  async chatTools({ system, user, tools, run, maxTokens = 700, maxSteps = 4, effort = "light" }) {
+    // A thinking model takes tools only through the Responses API.
+    const think = thinking(effort, maxTokens);
+    if (think.reasoning_effort && think.reasoning_effort !== "none") return chatToolsThinking({ system, user, tools, run, maxSteps, effort: think.reasoning_effort, maxTokens: think.max_completion_tokens });
     const messages = [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -108,7 +163,7 @@ const real = {
         tools: defs,
         tool_choice: step < maxSteps ? "auto" : "none",
         response_format: { type: "json_object" },
-        max_completion_tokens: maxTokens,
+        ...think,
       });
       const msg = res.choices[0]?.message;
       if (!msg?.tool_calls?.length) return parseModelJSON(msg?.content);
@@ -140,7 +195,7 @@ const real = {
         { role: "user", content: [{ type: "text", text: `File name: ${name}` }, part] },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 900,
+      ...thinking("light", 900),
     });
     return String(parseModelJSON(res.choices[0]?.message?.content).text || "").trim();
   },
@@ -226,6 +281,8 @@ const fake = {
     }
     if (meta?.task === "rewrite") return { queries: [], small_talk: FAKE_SMALL_TALK.test(meta.question.trim()) };
     if (meta?.task === "outcome") return { answer: meta.outcome.status === "done" ? "Done." : meta.outcome.status === "cancelled" ? "Cancelled." : `Failed: ${meta.outcome.error}` };
+    // Tests set fake.answerDelay (ms) to write while an answer is still being written.
+    if (fake.answerDelay) await new Promise((done) => setTimeout(done, fake.answerDelay));
     if (FAKE_SMALL_TALK.test(meta.question.trim())) return { status: "answered", answer: "Hello! How can I help?", citations: [] };
     const top = meta.passages[0];
     // Like the real model: passages that barely share words with the question don't answer it.

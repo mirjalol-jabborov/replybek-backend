@@ -173,8 +173,8 @@ export async function sendFile(token, chatId, { buffer, name, type }, caption, b
 }
 
 /** One photo by its address, with a caption. */
-export const sendFileByUrl = (token, chatId, photo, business = null) =>
-  call(token, "sendPhoto", { chat_id: chatId, photo: photo.url, caption: (photo.caption || "").slice(0, 1024), ...(business ? { business_connection_id: business } : {}) });
+export const sendFileByUrl = (token, chatId, photo, business = null, keyboard = null) =>
+  call(token, "sendPhoto", { chat_id: chatId, photo: photo.url, caption: (photo.caption || "").slice(0, 1024), ...(business ? { business_connection_id: business } : {}), ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}) });
 
 /**
  * Several photos as one album, each with its caption. Telegram fetches the photos from their
