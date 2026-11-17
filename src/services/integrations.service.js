@@ -417,8 +417,9 @@ export async function agentTools(agentId, channel = "widget") {
     "SELECT * FROM integrations WHERE agent_id = $1 AND enabled AND ($2 = 'widget' OR mode <> 'in_page') ORDER BY created_at",
     [agentId, channel]
   );
+  const where = String(channel).startsWith("telegram") ? "telegram" : "widget";
   return rows.flatMap((integration) => [
-    ...(integration.tools || []).filter(tool => !Object.values(tool.bindings || {}).some(b => b.source === "step")).map((tool) => ({ integration, tool: { ...tool, modelInput: modelInput(tool) } })),
+    ...(integration.tools || []).filter(tool => !Object.values(tool.bindings || {}).some(b => b.source === "step") && (!tool.channels || tool.channels.includes(where))).map((tool) => ({ integration, tool: { ...tool, modelInput: modelInput(tool) } })),
     ...(integration.procedures || []).map((p) => ({ integration, tool: { ...p, procedure: true } })),
   ]);
 }
@@ -452,8 +453,21 @@ async function connection(integrationId, conversationId) {
 }
 
 /** Calls one tool for the signed-in customer. Retries once with a refreshed token after a 401. */
+/**
+ * Who the customer is, as Replybek knows it (never as the AI says): {{customer.name}}, and in a
+ * Telegram chat {{customer.telegram_user_id}} and {{customer.telegram_username}}, which Telegram
+ * itself vouches for. A website visitor never has a Telegram id here, whatever the page sends.
+ */
+async function customerOf(conversationId) {
+  if (!conversationId) return {};
+  const row = (await query("SELECT channel, visitor FROM conversations WHERE id = $1", [conversationId])).rows[0];
+  if (!row) return {};
+  const telegram = String(row.channel || "").startsWith("telegram") && row.visitor?.telegram_user_id ? String(row.visitor.telegram_user_id) : null;
+  return { name: row.visitor?.name || null, channel: row.channel, telegram_user_id: telegram, telegram_username: telegram ? row.visitor?.telegram_username || null : null };
+}
+
 export async function callTool(integration, tool, args, conn, conversationId = null) {
-  const scope = { args, context: conn?.context || {}, now: new Date() };
+  const scope = { args, context: conn?.context || {}, customer: await customerOf(conversationId), now: new Date() };
   const req = request(integration, tool.request, scope);
   // A generic tool restricts which endpoints the model may reach (e.g. read-only ones).
   if (tool.request.allow) {
@@ -496,6 +510,67 @@ export async function callTool(integration, tool, args, conn, conversationId = n
  * pending action and run only when the customer presses Confirm.
  * Returns { output (for the model), card? (for the customer) }.
  */
+/**
+ * A tool's result as cards for the chat, when the tool says how (its `display`): a photo, a name,
+ * a price and a link for each item, at most `max`. Only web addresses are kept, so a result can't
+ * put anything else in front of the customer. Null when there is nothing to show.
+ */
+export function displayCard(display, output, source = {}) {
+  if (!display || output == null || output.error) return null;
+  let list = pick(output, display.items || "");
+  if (list && !Array.isArray(list)) list = [list];
+  if (!Array.isArray(list)) return null;
+  const web = (v) => (typeof v === "string" && /^https?:\/\//i.test(v) ? v.slice(0, 600) : null);
+  const str = (v, n) => (v == null || typeof v === "object" ? null : String(v).trim().slice(0, n) || null);
+  const items = list
+    .slice(0, display.max || 6)
+    .map((item) => {
+      const price = pick(item, display.price);
+      return {
+        title: str(pick(item, display.title), 120),
+        image: web(pick(item, display.image)),
+        subtitle: str(pick(item, display.subtitle), 140),
+        price: typeof price === "number" ? Math.round(price) : str(price, 40),
+        currency: display.currency || null,
+        url: web(pick(item, display.url)),
+        ...(display.id ? { id: str(pick(item, display.id), 80) } : {}),
+        ...(display.action ? { args: actionArgs(display.action.args, item) } : {}),
+      };
+    })
+    .filter((i) => i.title);
+  if (!items.length) return null;
+  const action = display.action && source.integration_id ? { integration_id: source.integration_id, tool: display.action.tool, label: display.action.label, done: display.action.done || null, ...(display.action.quantity ? { quantity: display.action.quantity } : {}) } : null;
+  return { type: "products", items, ...(display.layout === "list" ? { layout: "list" } : {}), ...(action ? { action } : {}) };
+}
+
+// A card button's inputs: a string is a field of the item ("id"), anything else a fixed value.
+function actionArgs(map = {}, item) {
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    const val = typeof v === "string" ? pick(item, v) : v;
+    if (val != null && typeof val !== "object") out[k] = typeof val === "string" ? val.slice(0, 300) : val;
+  }
+  return out;
+}
+
+/**
+ * The customer tapped a card's button: runs the card's write action for that item. The inputs come
+ * from the business's own result, not from the AI, and the button names the item, so the tap
+ * stands in for Confirm. Returns the pending action's id (already claimed by the caller's decide).
+ */
+export async function queueCardAction(agentId, conversationId, card, index, inpageOrigin = null, qty = null) {
+  const item = card?.type === "products" ? card.items?.[index] : null;
+  if (!item || !card.action || !item.args) throw notFound("This button is no longer available.");
+  const integration = (await query("SELECT * FROM integrations WHERE id = $1 AND agent_id = $2 AND enabled", [card.action.integration_id, agentId])).rows[0];
+  const tool = (integration?.tools || []).find((t) => t.name === card.action.tool && t.kind === "write");
+  if (!tool) throw notFound("This button is no longer available.");
+  // How many, when the card lets the customer choose: a whole number from 1 to 99, nothing else.
+  const args = card.action.quantity ? { ...item.args, [card.action.quantity]: Math.min(99, Math.max(1, Math.round(Number(qty) || 1))) } : item.args;
+  const res = await runTool({ conversationId, integration, tool, args, inpageOrigin });
+  if (!res.card?.action_id) throw new HttpError(400, res.output?.message || "This button can't be used here.");
+  return res.card.action_id;
+}
+
 export async function runTool({ conversationId, integration, tool, args, inpageOrigin = null, steps = {} }) {
   if (tool.procedure) return startProcedure({ conversationId, integration, procedure: tool, args, inpageOrigin });
   if (!conversationId) return { output: { error: "test_context_required", message: "Use the integration test panel for actions. The Playground has no signed-in customer session." } };
@@ -509,7 +584,7 @@ export async function runTool({ conversationId, integration, tool, args, inpageO
   }
   try { args = resolveInputs(tool, args, conn.context || {}, steps); } catch (e) { return { output: { error: "invalid_inputs", message: e.message } }; }
   if (tool.kind === "write") {
-    const scope = { args, context: conn.context || {}, now: new Date() };
+    const scope = { args, context: conn.context || {}, customer: await customerOf(conversationId), now: new Date() };
     const summary = {
       title: render(tool.confirm?.title || tool.description, scope),
       lines: render(tool.confirm?.lines || [], scope).filter((l) => Array.isArray(l) && l[0]),
@@ -524,7 +599,7 @@ export async function runTool({ conversationId, integration, tool, args, inpageO
       card: { type: "confirm", action_id: rows[0].id, integration_id: integration.id, name: integration.name, ...summary, status: "pending" },
     };
   }
-  const out = await callTool(integration, tool, args, conn);
+  const out = await callTool(integration, tool, args, conn, conversationId);
   return { output: out.ok ? out.result : out };
 }
 

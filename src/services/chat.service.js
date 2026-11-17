@@ -37,7 +37,14 @@ export async function visibleMessages(convId, after) {
 export async function forAI(conversationId, messages, max = 1500) {
   const files = messages.some((m) => m.attachments?.length) ? await filesForAI(conversationId) : new Map();
   const note = (f) => f && fileContext(f, f.text, max);
-  return messages.filter((m) => m.role !== "human").map((m) => ({ role: m.role, body: [m.body, note(files.get(m.id))].filter(Boolean).join("\n") }));
+  return messages.filter((m) => m.role !== "human").map((m) => ({ role: m.role, body: [m.body, note(files.get(m.id)), shown(m.card)].filter(Boolean).join("\n") }));
+}
+
+// What the customer saw under a reply, so "the first one" or "the cheaper one" means a card.
+function shown(card) {
+  if (card?.type !== "products" || !card.items?.length) return "";
+  const price = (i) => (i.price == null ? "" : `, ${i.price}${i.currency ? ` ${i.currency}` : ""}`);
+  return `[Cards shown under this reply, in this order: ${card.items.map((i, n) => `${n + 1}) ${i.title}${price(i)}${i.id ? ` (id ${i.id})` : ""}`).join("; ")}]`;
 }
 
 /** Adds a message the customer is meant to read, and hands it to the channel that will carry it. */
@@ -90,10 +97,39 @@ async function persistAnswer(agent, conv, res, text) {
   return next;
 }
 
+// When a website visitor last typed (the widget says so every few seconds while they do). Telegram
+// doesn't tell bots about typing; there an answer only gives way to a message that has come in.
+const typingAt = new Map();
+const TYPING_FRESH_MS = Number(process.env.TYPING_FRESH_MS ?? 3500);
+const TYPING_WAIT_MS = Number(process.env.TYPING_WAIT_MS ?? 6000);
+export function noteTyping(conversationId) {
+  if (typingAt.size > 20000) typingAt.clear();
+  typingAt.set(conversationId, Date.now());
+}
+
+/**
+ * An answer is ready: is it still the right one to send? While the customer is typing it waits
+ * (a while, not forever); if they've written again by then, it's out of date and the answer to
+ * their newer message takes in everything they said.
+ */
+async function outdated(conversationId, messageId, stale = null, { waitForTyping = false } = {}) {
+  // Only where the customer can keep writing meanwhile: with an answer written in the background.
+  // (A website answer written inside the send request blocks the next message until it's done.)
+  const until = Date.now() + TYPING_WAIT_MS;
+  while (waitForTyping && Date.now() < until && Date.now() - (typingAt.get(conversationId) || 0) < TYPING_FRESH_MS) await new Promise((d) => setTimeout(d, 300));
+  if (stale?.()) return true;
+  const { rowCount } = await query(
+    "SELECT 1 FROM messages WHERE conversation_id = $1 AND role = 'visitor' AND seq > (SELECT seq FROM messages WHERE id = $2) LIMIT 1",
+    [conversationId, messageId]
+  );
+  return rowCount > 0;
+}
+
 /** Answers out of band (for in-page tools). The widget shows typing and picks up the reply by polling. */
 async function answerInBackground(agent, conv, ask, history, inpageOrigin) {
   try {
     const res = await runAnswer(agent, conv, ask, history, inpageOrigin);
+    if (ask.messageId && (await outdated(conv.id, ask.messageId, null, { waitForTyping: true }))) return;
     await persistAnswer(agent, conv, res, ask.text || "");
   } catch (e) {
     console.error(`Background answer failed for conversation ${conv.id}:`, e.message);
@@ -107,7 +143,7 @@ async function answerInBackground(agent, conv, ask, history, inpageOrigin) {
  * `answer: false` keeps the message (and reads its file) without answering: one of several sent in a
  * row, which the answer to the last of them takes in.
  */
-export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin = null, language = null, answer = true } = {}) {
+export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin = null, language = null, answer = true, stale = null } = {}) {
   const checked = file ? checkFile(file) : null;
   const seen = await visibleMessages(conv.id);
   const history = await forAI(conv.id, seen);
@@ -118,6 +154,7 @@ export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin
     conv = { ...conv, status: "ai" };
   }
   const messageId = await addMessageWithFile(conv, { role: "visitor", body: text, unread: conv.status !== "ai" }, file);
+  typingAt.delete(conv.id); // the typing that came before was this message
   await query("UPDATE conversations SET visitor_seen_at = now() WHERE id = $1", [conv.id]);
   // The page's language, kept for later answers in this chat (after a sign-in or a confirmed change).
   if (language && language !== conv.visitor?.language) {
@@ -135,7 +172,7 @@ export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin
 
   // The AI reads the file just before answering (a photo takes one model call). With the team
   // handling the chat it isn't read; later answers then just know a file came.
-  const ask = { text, language, file: checked ? () => readNewFile(agent, messageId, file.buffer, checked) : null };
+  const ask = { text, language, messageId, file: checked ? () => readNewFile(agent, messageId, file.buffer, checked) : null };
   // With in-page tools the answer runs tool calls in the customer's browser, so it can't finish
   // inside this request (the browser is waiting on it). Answer in the background; the widget polls.
   if (conv.channel === "widget" && (await agentHasInPageTools(agent.id))) {
@@ -143,6 +180,9 @@ export async function receiveMessage(agent, conv, { text, file }, { inpageOrigin
     return { conv, seen, thinking: true };
   }
   const res = await runAnswer(agent, conv, ask, history, inpageOrigin);
+  // The customer wrote again while this was being written: the next answer takes in everything
+  // they said, so this one would only arrive out of date (and the chat would get two answers).
+  if (await outdated(conv.id, messageId, stale)) return { conv, seen, thinking: false };
   return { conv: await persistAnswer(agent, conv, res, text || checked.name), seen, thinking: false };
 }
 
@@ -172,6 +212,7 @@ export async function applyDecision(agent, conv, actionId, confirm, inpageOrigin
   const outcome = await decideAction(conv.id, actionId, confirm, inpageOrigin);
   await query("UPDATE messages SET card = jsonb_set(card, '{status}', to_jsonb($3::text)) WHERE conversation_id = $1 AND card->>'action_id' = $2", [conv.id, actionId, outcome.status]);
   await settleCard(conv, actionId, outcome.status);
+  await settleTap(conv.id, actionId, outcome.status);
   const text = await describeOutcome({ agent, history: await forAI(conv.id, seen.slice(-6), 600), outcome, pageLanguage: conv.visitor?.language });
   await say(conv, { role: "ai", body: text, kind: "answer" });
   if (outcome.continuation) {
@@ -181,6 +222,14 @@ export async function applyDecision(agent, conv, actionId, confirm, inpageOrigin
   }
   if (outcome.status === "failed" && /sign in/i.test(outcome.error || "")) await disconnect(conv.id, outcome.integration_id);
   return { seen, outcome };
+}
+
+// A card button's tap (say, "Book" under a room) shows how its action ended.
+async function settleTap(conversationId, actionId, status) {
+  const { rows } = await query("SELECT id, card FROM messages WHERE conversation_id = $1 AND card->>'type' = 'products' AND card ? 'taps'", [conversationId]);
+  for (const m of rows)
+    for (const [index, tap] of Object.entries(m.card.taps || {}))
+      if (tap?.action_id === actionId) await query("UPDATE messages SET card = jsonb_set(card, ARRAY['taps', $2::text, 'status'], to_jsonb($3::text)) WHERE id = $1", [m.id, index, status]);
 }
 
 async function decideInBackground(agent, conv, actionId, inpageOrigin) {

@@ -161,6 +161,19 @@ export const widgetVisitorSchema = z.object(visitorFields);
 export const telegramChannelSchema = z.object({
   bot_token: z.string().trim().regex(/^\d{5,}:[A-Za-z0-9_-]{30,}$/, "That doesn't look like a bot token. Copy the whole line BotFather sent."),
 });
+// The bot's buttons and its Telegram profile; only what is sent changes. Telegram's own limits.
+export const telegramBotSchema = z
+  .object({
+    suggestions: z.boolean().optional(),
+    person_button: z.boolean().optional(),
+    name: z.string().trim().min(1, "Give the bot a name.").max(64, "Up to 64 characters.").optional(),
+    description: z.string().trim().max(512, "Up to 512 characters.").optional(),
+    short_description: z.string().trim().max(120, "Up to 120 characters.").optional(),
+    // A JPEG made in the browser (Telegram takes only JPEG profile photos).
+    photo: z.string().max(700000, "The photo is too large.").regex(/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/, "Use a JPEG photo.").optional(),
+    remove_photo: z.boolean().optional(),
+  })
+  .strict();
 export const widgetStartSchema = z.object({
   ...visitorFields,
   page: z.string().trim().max(500).optional(),
@@ -201,6 +214,40 @@ export const toolSchema = z.object({
   request: requestBlock,
   response: z.object({ type: z.enum(["rows", "json"]).default("json"), columns: template.optional(), rows: z.string().optional(), count: z.string().optional(), pick: z.string().optional(), limit: z.number().int().min(1).max(100).optional(), fields: z.record(z.string().max(200)).optional(), filter: z.array(z.object({ field: z.string(), equals: template.optional(), contains: template.optional() })).optional() }).default({ type: "json" }),
   confirm: z.object({ title: template, lines: template.optional(), total: template.optional() }).optional(),
+  // Where the AI may use it: the website chat, Telegram, or both (the default).
+  channels: z.array(z.enum(["widget", "telegram"])).min(1).optional(),
+  // Show the result as cards in the chat (photo, name, price, link): where the list is in the
+  // result, and where each field is inside one item. Paths like "products" and "image".
+  display: z
+    .object({
+      type: z.literal("cards").default("cards"),
+      items: z.string().max(200).default(""),
+      title: z.string().max(200),
+      image: z.string().max(200).optional(),
+      subtitle: z.string().max(200).optional(),
+      price: z.string().max(200).optional(),
+      currency: z.string().max(12).optional(),
+      url: z.string().max(200).optional(),
+      max: z.number().int().min(1).max(10).default(6),
+      // carousel: tall cards side by side to swipe; list: wide cards one under another.
+      layout: z.enum(["carousel", "list"]).optional(),
+      // The item's id, shown to the AI with the cards so "the first one" means the first card.
+      id: z.string().max(200).optional(),
+      // A button under each card that runs one of this integration's write actions for that item:
+      // args map the action's inputs to fields of the item ("id") or to fixed values (1). The
+      // customer's tap on a button that names the item is their confirmation.
+      action: z
+        .object({
+          tool: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/),
+          label: z.union([z.string().trim().min(1).max(40), z.record(z.string().trim().min(1).max(40)).refine((o) => Object.keys(o).length > 0, "Add the button's text.")]),
+          done: z.union([z.string().trim().min(1).max(40), z.record(z.string().trim().min(1).max(40))]).optional(),
+          args: z.record(z.union([z.string().max(200), z.number(), z.boolean()])).default({}),
+          // The action's input that takes how many: the card shows − 1 + and the tap sends the number.
+          quantity: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/i).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 export const procedureSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/), description: text(600), when: z.string().max(600).optional(),

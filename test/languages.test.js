@@ -147,3 +147,18 @@ test("the page's language reaches the answer, for messages with no clear languag
   assert.match(fakeAI.lastAnswer.system, /Japanese/, "junk is ignored; the saved page language stays");
   assert.doesNotMatch(fakeAI.lastAnswer.system, /Uzbek, Russian and English|one of these three/);
 });
+
+test("the reply keeps the customer's alphabet: Uzbek in Latin letters isn't answered in Cyrillic", async () => {
+  const s = await publishedAgent();
+  const v = browser();
+  const start = (await v.call("POST", `/widget/${s.agent.public_key}/conversations`, {})).body;
+  const say = (text) => v.call("POST", `/widget/${s.agent.public_key}/conversations/${start.conversation_id}/messages`, { text }, { "X-Visitor-Token": start.visitor_token });
+  await say("Shu budget 500k atrofida");
+  assert.match(fakeAI.lastAnswer.user, /written in Latin letters: reply in Latin letters too.*reply in Uzbek \(Latin script/s);
+  await say("Сколько стоит доставка?");
+  assert.match(fakeAI.lastAnswer.user, /written in Cyrillic: reply in Cyrillic too/);
+  assert.doesNotMatch(fakeAI.lastAnswer.user, /Latin letters/);
+  assert.match(fakeAI.lastAnswer.user, /Uzbek written in Cyrillic .* is Uzbek, so reply in Uzbek in Cyrillic, not Russian/);
+  await say("👍");
+  assert.doesNotMatch(fakeAI.lastAnswer.user, /written in (Latin letters|Cyrillic)/, "a message without letters says nothing about an alphabet");
+});

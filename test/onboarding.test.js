@@ -111,3 +111,29 @@ test("a page over 3 MB is read anyway; legal forms are dropped, language is judg
   assert.equal(r.body.accent, "#2fc77e", "the logo colour the page uses most, not the near-black text colour");
   assert.match(r.body.logo, /^data:image\/svg\+xml;base64,/);
 });
+
+test("without a website, the names, language and welcome are read from the documents", async () => {
+  const { b, ws } = await owner();
+  const send = (...files) => {
+    const form = new FormData();
+    for (const [name, text] of files) form.append("file", new Blob([Buffer.from(text)], { type: "text/plain" }), name);
+    return b.call("POST", `/w/${ws.id}/onboarding/analyze-docs`, form);
+  };
+  const r = await send(["prices.txt", "Baraka Mebel\nToshkentdagi mebel do'koni. Yetkazib berish va yig'ish xizmati bilan."]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.name, "Baraka Mebel");
+  assert.equal(r.body.language, "uz", "the documents' own language, not the dashboard's");
+  assert.match(r.body.agent_name, /AI agenti/);
+  assert.match(r.body.welcome, /Baraka Mebel/);
+  assert.match(r.body.purpose, /using its documents/);
+
+  // One unreadable file among readable ones is named, and the rest still count.
+  const mixed = await send(["notes.md", "Northstar Outfitters\nTravel gear for the Tian Shan."], ["blank.txt", " "]);
+  assert.equal(mixed.status, 200);
+  assert.deepEqual(mixed.body.unreadable, ["blank.txt"]);
+
+  const none = await send(["blank.txt", "  "]);
+  assert.equal(none.status, 422);
+  assert.match(none.body.message, /blank\.txt/);
+  assert.equal((await b.call("POST", `/w/${ws.id}/onboarding/analyze-docs`, new FormData())).status, 400);
+});

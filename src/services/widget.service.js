@@ -2,12 +2,12 @@ import crypto from "crypto";
 import { query, tx } from "../db.js";
 import { notFound, HttpError } from "../lib/http.js";
 import { answerQuestion } from "./answer.service.js";
-import { connectUrl, pendingToolCalls, deliverToolResult } from "./integrations.service.js";
+import { connectUrl, pendingToolCalls, deliverToolResult, queueCardAction } from "./integrations.service.js";
 import { addMessage } from "./conversations.service.js";
 import { filesForAI } from "./attachments.service.js";
 import { savedQuestions } from "./suggestions.service.js";
 import { signal } from "./events.service.js";
-import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say } from "./chat.service.js";
+import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say, noteTyping } from "./chat.service.js";
 import { widgetTexts } from "./translations.service.js";
 
 /**
@@ -88,6 +88,7 @@ export async function identifyVisitor(agent, convId, token, who) {
 /** The visitor is typing: the team's open Inbox shows it for a few seconds. */
 export async function visitorTyping(agent, convId, token) {
   const conv = await visitorHere(agent, convId, token);
+  noteTyping(conv.id); // an answer being written waits for what they're typing
   await signal(`w:${conv.workspace_id}`, "typing", { c: conv.id, who: "visitor" });
   return { ok: true };
 }
@@ -171,6 +172,21 @@ export async function afterConnect(conversationId, label, name) {
 }
 
 /** The customer pressed Confirm or Cancel on a change the AI proposed. */
+/** The customer tapped the button under one of a reply's cards (say, "Book" under a room). */
+export async function cardAction(agent, convId, token, messageId, index, inpageOrigin = null, qty = null) {
+  const conv = await ownConversation(agent, convId, token);
+  if (!/^[0-9a-f-]{36}$/i.test(messageId || "") || !Number.isInteger(index) || index < 0) throw notFound("This button is no longer available.");
+  const msg = (await query("SELECT card FROM messages WHERE id = $1 AND conversation_id = $2 AND role = 'ai'", [messageId, conv.id])).rows[0];
+  if (!msg?.card) throw notFound("This button is no longer available.");
+  const tapped = msg.card.taps?.[index];
+  if (tapped && tapped.status !== "failed") throw new HttpError(409, "This request was already handled.");
+  const actionId = await queueCardAction(agent.id, conv.id, msg.card, index, inpageOrigin, qty);
+  const count = msg.card.action?.quantity ? Math.min(99, Math.max(1, Math.round(Number(qty) || 1))) : null;
+  await query("UPDATE messages SET card = card || '{\"taps\": {}}'::jsonb WHERE id = $1 AND NOT (card ? 'taps')", [messageId]);
+  await query("UPDATE messages SET card = jsonb_set(card, ARRAY['taps', $3::text], $4::jsonb, true) WHERE id = $1 AND conversation_id = $2", [messageId, conv.id, String(index), JSON.stringify({ action_id: actionId, status: "pending", ...(count ? { qty: count } : {}) })]);
+  return decide(agent, convId, token, actionId, true, inpageOrigin);
+}
+
 export async function decide(agent, convId, token, actionId, confirm, inpageOrigin = null) {
   const conv = await ownConversation(agent, convId, token);
   const seen = await visibleMessages(conv.id);
