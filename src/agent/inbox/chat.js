@@ -17,7 +17,7 @@ import { deliver, settleCard } from "./delivery.js";
 
 // Customers see their own messages, the AI's and teammates'. Never internal notes or system events.
 const VISIBLE = ["visitor", "ai", "human"];
-/** Whether a live-update event (events.service.js) is about something the customer can see. */
+/** Whether a live-update event (core/events.js) is about something the customer can see. */
 export const visitorSees = (e) => e.t !== "messages" || VISIBLE.includes(e.r);
 
 // Emailing the team never holds up or breaks the chat.

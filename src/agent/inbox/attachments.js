@@ -1,6 +1,6 @@
 // Files and photos in conversations. A file arrives with the message it belongs to (a multipart
 // `file` next to `text`), is identified by its first bytes (never by its name or the browser's
-// word for it), and is stored under the key attachments/<id> (lib/storage.js). Files go only to people who can
+// word for it), and is stored under the key attachments/<id> (core/storage.js). Files go only to people who can
 // see their message: the visitor (with their token) for their own, the AI's and teammates'
 // messages; teammates for everything in their workspace. Internal notes' files never reach a visitor.
 // The AI reads what customers send (readForAI): documents locally, photos and scanned PDFs through

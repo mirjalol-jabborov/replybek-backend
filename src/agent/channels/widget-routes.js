@@ -41,7 +41,7 @@ router.post("/conversations", startsPerIP, validate(widgetStartSchema), wrap(asy
 }));
 const token = (req) => req.headers["x-visitor-token"];
 const inpage = (req) => { const o = req.headers["x-replybek-inpage"]; return typeof o === "string" && /^https?:\/\/[^/]+$/.test(o) ? o : null; };
-// Live updates for one conversation: says when to fetch messages again (see events.service.js).
+// Live updates for one conversation: says when to fetch messages again (see core/events.js).
 router.get("/conversations/:cid/stream", perIP, wrap(async (req, res) => {
   const conv = await ownConversation(req.agent, req.params.cid, token(req));
   await stream(req, res, [`c:${conv.id}`], visitorSees);

@@ -12,7 +12,7 @@ app.listen(PORT, () => {
   // `npm run worker` separately when the API runs on several machines.
   if (process.env.WORKER_IN_PROCESS !== "false") startWorker();
   // Without a public address, connected Telegram bots collect their own updates (see
-  // telegram-polling.service.js). With one, Telegram calls the webhook and this does nothing.
+  // agent/channels/polling.js). With one, Telegram calls the webhook and this does nothing.
   startPollingChannels().catch((e) => console.error("Telegram polling didn't start:", e.message));
   // Update ids are kept only to spot Telegram's redeliveries, which stop within a day.
   const forget = () => forgetOldUpdates().catch((e) => console.error("Forgetting old Telegram updates failed:", e.message));

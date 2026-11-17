@@ -13,7 +13,7 @@ import { widgetTexts } from "../answers/translations.js";
 /**
  * The website widget's side of a conversation: the key that identifies the agent, the token that
  * proves a browser owns its chat, and presence. The conversation itself is handled by
- * chat.service.js, which every channel shares.
+ * inbox/chat.js, which every channel shares.
  */
 
 export { visitorSees, visibleMessages } from "../inbox/chat.js";

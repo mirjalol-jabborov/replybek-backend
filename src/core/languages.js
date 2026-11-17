@@ -1,7 +1,7 @@
 // Languages: reading them from headers and attributes, naming them for the model, and the set the
 // chat widget speaks. The widget has built-in texts for each of WIDGET_LANGUAGES, and a business's
 // greeting and suggested questions are translated into them automatically when the owner hasn't
-// written their own (see translations.service.js). Keep this list in step with the widget's.
+// written their own (see agent/answers/translations.js). Keep this list in step with the widget's.
 export const WIDGET_LANGUAGES = ["en", "uz", "ru", "es", "pt", "fr", "it", "de", "ja", "ko", "zh", "ar", "tr", "hi", "id", "pl"];
 
 export const isWidgetLanguage = (code) => WIDGET_LANGUAGES.includes(code);
