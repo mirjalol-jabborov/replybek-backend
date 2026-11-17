@@ -42,10 +42,10 @@ process.env.SMTP_URL = "";
 }
 await import("./migrate.js");
 const { default: app } = await import("../src/app.js");
-const { query, closeDb } = await import("../src/db.js");
-const { drainJobs } = await import("../src/services/jobs.service.js");
-const { stopEvents } = await import("../src/services/events.service.js");
-const { isFake } = await import("../src/ai.js");
+const { query, closeDb } = await import("../src/core/db.js");
+const { drainJobs } = await import("../src/core/jobs.js");
+const { stopEvents } = await import("../src/core/events.js");
+const { isFake } = await import("../src/agent/answers/ai.js");
 if (isFake()) throw new Error("The eval needs the real model: unset AI_FAKE.");
 
 // ───── The shop's own system ─────

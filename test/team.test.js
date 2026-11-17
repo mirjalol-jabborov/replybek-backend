@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { owner, browser, drainJobs, query, base } from "./helpers/setup.js";
 
-const { outbox } = await import("../src/lib/mail.js");
+const { outbox } = await import("../src/core/mail.js");
 const mailTo = (to) => outbox.filter((m) => m.to === to);
 const tokenIn = (mail, kind) => mail.text.match(new RegExp(`#/${kind}/([A-Za-z0-9_-]+)`))?.[1];
 let n = 0;

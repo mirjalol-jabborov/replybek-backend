@@ -17,7 +17,7 @@ Run every command from this folder.
 
 `npm run smoke` checks the OpenAI key with three tiny calls and never prints it.
 
-Uploaded files (knowledge files, chat attachments) go through `src/lib/storage.js`: to the S3 bucket
+Uploaded files (knowledge files, chat attachments) go through `src/core/storage.js`: to the S3 bucket
 named by `S3_BUCKET` (MinIO locally; any S3-compatible store in production, created on the first
 upload), or to `UPLOAD_DIR` on disk when `S3_BUCKET` is empty. Tests and e2e always use the disk.
 
@@ -259,8 +259,8 @@ deployment scripts.
 ### What the AI reads from customers' files
 
 When the AI is handling a chat, a file the customer sends is read just before the answer
-(`readForAI` in `services/attachments.service.js`): PDF, DOCX, TXT and CSV text locally, XLSX cells
-with `lib/xlsx.js`, and photos and scanned PDFs (no text layer) through the chat model, which
+(`readForAI` in `src/agent/inbox/attachments.js`): PDF, DOCX, TXT and CSV text locally, XLSX cells
+with `src/agent/inbox/xlsx.js`, and photos and scanned PDFs (no text layer) through the chat model, which
 describes what they show and copies their text. Up to 8,000 characters are kept in
 `attachments.ai_text`, so later answers in the conversation still know the file. The AI gets it as
 the customer's information, never instructions, and only the customer's own words can ask for a

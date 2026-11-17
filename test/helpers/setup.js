@@ -12,10 +12,10 @@ process.env.UPLOAD_DIR = path.join(os.tmpdir(), `replybek-test-uploads-${process
 process.env.S3_BUCKET = ""; // files go to UPLOAD_DIR, even when .env names a bucket
 
 const { default: app } = await import("../../src/app.js");
-const { query, closeDb } = await import("../../src/db.js");
-const { drainJobs } = await import("../../src/services/jobs.service.js");
-const { stopEvents } = await import("../../src/services/events.service.js");
-const { dbConfig } = await import("../../src/dbConfig.js");
+const { query, closeDb } = await import("../../src/core/db.js");
+const { drainJobs } = await import("../../src/core/jobs.js");
+const { stopEvents } = await import("../../src/core/events.js");
+const { dbConfig } = await import("../../src/core/db-config.js");
 
 let server;
 export let base;

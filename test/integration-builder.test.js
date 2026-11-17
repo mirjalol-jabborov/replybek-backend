@@ -7,14 +7,14 @@ import {
   exportPackage,
   resolveInputs,
   modelInput,
-} from "../src/lib/integration-config.js";
+} from "../src/agent/integrations/config.js";
 import {
   runTool,
   decideAction,
   loadIntegration,
   simulateProcedure,
-} from "../src/services/integrations.service.js";
-import { startConversation } from "../src/services/widget.service.js";
+} from "../src/agent/integrations/integrations.js";
+import { startConversation } from "../src/agent/channels/widget.js";
 
 let system,
   url,

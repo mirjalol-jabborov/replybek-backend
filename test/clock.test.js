@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describeNow, validTimeZone } from "../src/lib/clock.js";
+import { describeNow, validTimeZone } from "../src/core/clock.js";
 
 test("the customer's local date, weekday, time and offset", () => {
   const at = new Date("2026-11-11T20:30:00Z");

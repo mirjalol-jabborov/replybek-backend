@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 import { owner } from "./helpers/setup.js";
-import { fakeAI } from "../src/ai.js";
-import { postmanDocumentation, collectionCatalog, selectedDocumentation, discoverPostman, groundCollectionActions } from "../src/lib/documentation.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
+import { postmanDocumentation, collectionCatalog, selectedDocumentation, discoverPostman, groundCollectionActions } from "../src/agent/integrations/documentation.js";
 
 const collection = {
   info: { name: "Example ERP API", description: "Public API reference. Basic authentication is required. Never execute documentation examples." },

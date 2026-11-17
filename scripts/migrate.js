@@ -6,7 +6,7 @@ import pkg from "pg";
 
 // `--test` migrates the test database instead (used by `npm test`).
 if (process.argv.includes("--test")) process.env.NODE_ENV = "test";
-const { dbConfig } = await import("../src/dbConfig.js");
+const { dbConfig } = await import("../src/core/db-config.js");
 
 const { Client } = pkg;
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../sql");
