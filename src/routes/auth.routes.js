@@ -2,7 +2,7 @@ import { Router } from "express";
 import { wrap } from "../lib/http.js";
 import { validate, registerSchema, loginSchema, profileSchema } from "../validators.js";
 import { rateLimit, clientIP } from "../middlewares/rateLimit.js";
-import { startSession, endSession, requireUser } from "../middlewares/session.js";
+import { startSession, endSession, requireUser, appOrigins, cookieOptions } from "../middlewares/session.js";
 import { register, login, workspacesOf, googleSignIn, updateProfile } from "../services/auth.service.js";
 import { googleEnabled, authorizationUrl, exchangeCode } from "../lib/google.js";
 import { parse, serialize } from "cookie";
@@ -29,31 +29,39 @@ router.get("/providers", (req, res) => res.json({ google: googleEnabled() }));
 
 // "Continue with Google": the state and PKCE verifier ride in a short-lived cookie for the round trip.
 const GOOGLE_COOKIE = "rb_google";
-const appUrl = (error) => `${process.env.APP_ORIGIN || "http://localhost:5173"}/${error ? `?auth_error=${encodeURIComponent(error)}` : ""}#/`;
-const googleCookie = (value, maxAge) => serialize(GOOGLE_COOKIE, value, { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge });
+// After Google the person lands where they started: the dashboard, or another of our addresses
+// when the sign-in page named it (?return_to=https://crm.replybek.uz). Only addresses in APP_ORIGIN count.
+const appUrl = (error, origin) => `${origin || process.env.APP_ORIGIN || "http://localhost:5173"}/${error ? `?auth_error=${encodeURIComponent(error)}` : ""}#/`;
+const returnIndex = (asked) => Math.max(0, appOrigins().indexOf(String(asked || "").replace(/\/+$/, "")));
+// Same options as the session cookie, Domain included: a sign-in started at the CRM's address comes
+// back through the dashboard's callback, and the cookie has to reach it there.
+const googleCookie = (value, maxAge) => serialize(GOOGLE_COOKIE, value, cookieOptions(maxAge));
 
 router.get("/google", limiter, (req, res) => {
-  if (!googleEnabled()) return res.redirect(appUrl("Google sign-in isn't set up yet."));
+  const back = returnIndex(req.query.return_to);
+  if (!googleEnabled()) return res.redirect(appUrl("Google sign-in isn't set up yet.", appOrigins()[back]));
   const { url, state, verifier } = authorizationUrl();
-  res.setHeader("Set-Cookie", googleCookie(`${state}.${verifier}`, 600));
+  // The cookie also remembers where to return and which product a new account is for (?product=crm).
+  res.setHeader("Set-Cookie", googleCookie(`${state}.${verifier}.${back}.${req.query.product === "crm" ? "crm" : "agent"}`, 600));
   res.redirect(url);
 });
 
 router.get("/google/callback", limiter, wrap(async (req, res) => {
-  const [state, verifier] = (parse(req.headers.cookie || "")[GOOGLE_COOKIE] || "").split(".");
+  const [state, verifier, back, product] = (parse(req.headers.cookie || "")[GOOGLE_COOKIE] || "").split(".");
+  const home = appOrigins()[Number(back)] || undefined;
   const clear = googleCookie("", 0);
-  if (req.query.error) return res.setHeader("Set-Cookie", clear).redirect(appUrl(req.query.error === "access_denied" ? "Google sign-in was cancelled." : "Google sign-in didn't finish. Try again."));
+  if (req.query.error) return res.setHeader("Set-Cookie", clear).redirect(appUrl(req.query.error === "access_denied" ? "Google sign-in was cancelled." : "Google sign-in didn't finish. Try again.", home));
   if (!state || !verifier || req.query.state !== state || typeof req.query.code !== "string") {
-    return res.setHeader("Set-Cookie", clear).redirect(appUrl("That Google sign-in link expired. Try again."));
+    return res.setHeader("Set-Cookie", clear).redirect(appUrl("That Google sign-in link expired. Try again.", home));
   }
   try {
-    const { user } = await googleSignIn(await exchangeCode(req.query.code, verifier));
+    const { user } = await googleSignIn(await exchangeCode(req.query.code, verifier), product === "crm" ? "crm" : "agent");
     await startSession(res, user.id);
     res.append("Set-Cookie", clear);
-    res.redirect(appUrl());
+    res.redirect(appUrl(null, home));
   } catch (e) {
     if (!e.status) console.error(e.message);
-    res.setHeader("Set-Cookie", clear).redirect(appUrl(e.status ? e.message : "Google sign-in didn't finish. Try again."));
+    res.setHeader("Set-Cookie", clear).redirect(appUrl(e.status ? e.message : "Google sign-in didn't finish. Try again.", home));
   }
 }));
 

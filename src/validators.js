@@ -24,13 +24,19 @@ export const profileSchema = z
   })
   .refine((v) => v.name !== undefined || v.avatar !== undefined, "Nothing to change.");
 
+export const PRODUCTS = ["agent", "crm"];
+
 export const registerSchema = z.object({
   name: text(80),
   email: z.string().trim().email().max(200),
   password: z.string().min(10, "Use at least 10 characters.").max(200),
   workspace_name: text(120),
   website: z.string().trim().max(200).optional(),
+  // What the new workspace is for: the AI agent (the dashboard's sign-up) or the CRM (the CRM's).
+  product: z.enum(PRODUCTS).default("agent"),
 });
+// A workspace can take the other product later.
+export const productAddSchema = z.object({ add: z.enum(PRODUCTS) });
 
 export const inviteSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(200),

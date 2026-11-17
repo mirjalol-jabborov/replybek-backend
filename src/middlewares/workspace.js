@@ -30,6 +30,24 @@ export async function requireWorkspace(req, res, next) {
 /** Requires at least this role: agent < admin < owner. */
 export const requireRole = (role) => (req, res, next) => (RANK[req.role] >= RANK[role] ? next() : next(forbidden("Only workspace admins can do this.")));
 
+const PRODUCT = { agent: "the AI agent", crm: "the CRM" };
+/**
+ * For routes that belong to one product. A workspace has the AI agent, the CRM or both
+ * (workspaces.products); a workspace without the product gets 404 { code: "product_off" }.
+ */
+export const requireProduct = (product) => (req, res, next) =>
+  req.workspace.products?.includes(product) ? next() : next(new HttpError(404, `This workspace doesn't have ${PRODUCT[product]}.`, { code: "product_off", product }));
+
+// What exists only with the AI agent: agents (with their knowledge, channels and playground),
+// the inbox and its files, integrations, analytics and the agent's onboarding. The rest of
+// /w/:wid (the workspace itself, the stream, the team, billing, activity, products, the CRM) is
+// for every workspace. Express matches paths whatever their letter case ("/AGENTS" reaches the
+// agents router), so this test ignores case too.
+const AGENT_ONLY = /^\/(agents|sources|unanswered|conversations|files|integrations|analytics|onboarding)(\/|$)/i;
+const needsAgent = requireProduct("agent");
+/** Closes the AI agent's routes to a workspace that only has the CRM. */
+export const agentRoutesNeedAgent = (req, res, next) => (AGENT_ONLY.test(req.path) ? needsAgent(req, res, next) : next());
+
 // What a workspace can still change while it's read-only: paying, finishing onboarding, testing in the
 // Playground (capped at PREVIEW_MESSAGES answers) and answering people already waiting in the inbox.
 const OPEN_WHILE_LOCKED = [/^\/plan$/, /^\/billing\//, /^\/onboarding\//, /^\/agents\/[^/]+\/test$/, /^\/conversations\/[^/]+\/[\w-]+$/];

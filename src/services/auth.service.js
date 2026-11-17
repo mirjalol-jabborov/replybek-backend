@@ -2,13 +2,14 @@ import bcrypt from "bcrypt";
 import { query, tx } from "../db.js";
 import { HttpError } from "../lib/http.js";
 
-export async function register({ name, email, password, workspace_name, website }) {
+export async function register({ name, email, password, workspace_name, website, product = "agent" }) {
   const exists = await query("SELECT 1 FROM users WHERE email = $1", [email]);
   if (exists.rows[0]) throw new HttpError(409, "An account with this email already exists. Sign in instead.");
   const passwordHash = await bcrypt.hash(password, 12);
   return tx(async (c) => {
     const user = (await c.query("INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email", [name, email, passwordHash])).rows[0];
-    const workspace = (await c.query("INSERT INTO workspaces (name, website) VALUES ($1, $2) RETURNING *", [workspace_name, website || null])).rows[0];
+    // The workspace starts with the product the person signed up for; the other can be added later.
+    const workspace = (await c.query("INSERT INTO workspaces (name, website, products) VALUES ($1, $2, $3) RETURNING *", [workspace_name, website || null, [product]])).rows[0];
     await c.query("INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')", [workspace.id, user.id]);
     return { user, workspace };
   });
@@ -32,9 +33,9 @@ const WEBMAIL = /^(gmail|googlemail|yahoo|ymail|outlook|hotmail|live|icloud|me|m
 /**
  * Signs in with a verified Google account: by its Google id, else by the same email (which links
  * the two), else a new account with its own workspace. A new workspace is named provisionally;
- * onboarding renames it after the business's website.
+ * onboarding renames it after the business's website. `product`: what a new workspace is for.
  */
-export async function googleSignIn({ sub, email, emailVerified, name }) {
+export async function googleSignIn({ sub, email, emailVerified, name }, product = "agent") {
   if (!email || !emailVerified) throw new HttpError(403, "Your Google account's email isn't verified.");
   const known = await query("SELECT id, name, email, google_sub FROM users WHERE google_sub = $1 OR email = $2 ORDER BY (google_sub = $1) DESC NULLS LAST LIMIT 1", [sub, email]);
   if (known.rows[0]) {
@@ -48,7 +49,7 @@ export async function googleSignIn({ sub, email, emailVerified, name }) {
   const workspaceName = (!WEBMAIL.test(domain) && label ? label.charAt(0).toUpperCase() + label.slice(1) : name || email.split("@")[0]).slice(0, 120);
   return tx(async (c) => {
     const user = (await c.query("INSERT INTO users (name, email, google_sub) VALUES ($1, $2, $3) RETURNING id, name, email", [(name || email.split("@")[0]).slice(0, 120), email, sub])).rows[0];
-    const workspace = (await c.query(`INSERT INTO workspaces (name, settings) VALUES ($1, '{"auto_named": true}') RETURNING *`, [workspaceName])).rows[0];
+    const workspace = (await c.query(`INSERT INTO workspaces (name, settings, products) VALUES ($1, '{"auto_named": true}', $2) RETURNING *`, [workspaceName, [product]])).rows[0];
     await c.query("INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')", [workspace.id, user.id]);
     return { user, created: true };
   });
@@ -65,7 +66,7 @@ export async function updateProfile(userId, { name, avatar }) {
 
 export async function workspacesOf(userId) {
   const { rows } = await query(
-    "SELECT w.id, w.name, w.website, w.plan, m.role FROM memberships m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = $1 ORDER BY m.created_at",
+    "SELECT w.id, w.name, w.website, w.plan, w.products, m.role FROM memberships m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = $1 ORDER BY m.created_at",
     [userId]
   );
   return rows;

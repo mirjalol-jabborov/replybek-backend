@@ -2,9 +2,9 @@ import { Router } from "express";
 import multer from "multer";
 import { wrap } from "../lib/http.js";
 import * as v from "../validators.js";
-import { requireWorkspace, requireRole, readOnlyUntilTrial } from "../middlewares/workspace.js";
+import { requireWorkspace, requireRole, requireProduct, agentRoutesNeedAgent, readOnlyUntilTrial } from "../middlewares/workspace.js";
 import { rateLimit } from "../middlewares/rateLimit.js";
-import { workspaceSummary, updateWorkspace, listMembers } from "../services/workspaces.service.js";
+import { workspaceSummary, updateWorkspace, listMembers, addProduct } from "../services/workspaces.service.js";
 import { listAgents, getAgent, createAgent, updateAgent, setAgentStatus, deleteAgent } from "../services/agents.service.js";
 import { listChannels, connectTelegram, disconnectChannel, botProfile, updateBot, businessStatus, startBusinessLink, unlinkBusiness } from "../services/channels.service.js";
 import { listSources, listWorkspaceSources, getSource, addWebsite, previewWebsite, addQA, addFile, retrySource, resyncSource, updateSource, listPages, removeSource, listUnanswered, dismissUnanswered } from "../services/sources.service.js";
@@ -25,10 +25,16 @@ import { testIntegration, getBrowserTest } from "../services/integration-testing
 import { suggestedQuestions, translateQuestions, languageOf } from "../services/suggestions.service.js";
 import { integrationAISchema, generateIntegration } from "../services/integration-ai.service.js";
 import { startIntegrationDraft, getIntegrationDraft, retryIntegrationDraft, cancelIntegrationDraft } from "../services/integration-ai-jobs.service.js";
+import crmRoutes from "../crm/index.js";
 
 // Everything here is scoped to /w/:wid, and every query filters by that workspace.
 const router = Router({ mergeParams: true });
 router.use(requireWorkspace);
+// A workspace has the AI agent, the CRM or both. The agent's routes below are closed to a workspace without it.
+router.use(agentRoutesNeedAgent);
+// Adding a product and the whole CRM sit above the trial lock: the CRM isn't billed yet.
+router.post("/products", requireRole("owner"), v.validate(v.productAddSchema), wrap(async (req, res) => res.json(await addProduct(req.workspace, req.valid.add))));
+router.use("/crm", requireProduct("crm"), crmRoutes);
 router.use(readOnlyUntilTrial);
 const admin = requireRole("admin");
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });

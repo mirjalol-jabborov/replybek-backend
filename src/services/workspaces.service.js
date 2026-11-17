@@ -134,6 +134,15 @@ export async function updateWorkspace(id, input) {
   return rows[0];
 }
 
+/** Gives the workspace a product it doesn't have yet ("agent" or "crm"). Adding it twice changes nothing. */
+export async function addProduct(workspace, product) {
+  const { rows } = await query(
+    "UPDATE workspaces SET products = CASE WHEN $2 = ANY(products) THEN products ELSE products || $2::text END WHERE id = $1 RETURNING products",
+    [workspace.id, product]
+  );
+  return { products: rows[0].products };
+}
+
 export async function listMembers(workspaceId) {
   const { rows } = await query(
     "SELECT u.id, u.name, u.email, u.avatar, m.role, m.created_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = $1 ORDER BY m.created_at",

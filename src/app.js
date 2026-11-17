@@ -10,7 +10,7 @@ import { widgetToolResultSchema, validate } from "./validators.js";
 import { wrap } from "./lib/http.js";
 import notFound from "./middlewares/notFound.js";
 import error from "./middlewares/error.js";
-import { requireUser, requireJsonForWrites } from "./middlewares/session.js";
+import { requireUser, requireJsonForWrites, appOrigins } from "./middlewares/session.js";
 import authRoutes from "./routes/auth.routes.js";
 import * as teamRoutes from "./routes/team.routes.js";
 import workspaceRoutes from "./routes/workspace.routes.js";
@@ -54,9 +54,8 @@ app.use("/billing", billingRoutes);
 app.options("/integration-tests/result", cors({origin:true,credentials:false}));
 app.post("/integration-tests/result", cors({origin:true,credentials:false}), express.json({limit:"32kb"}), validate(widgetToolResultSchema), wrap(async (req,res) => res.json(await finishBrowserTest(req.get("X-Replybek-Test"),req.get("Origin"),req.valid))));
 
-// The dashboard: only APP_ORIGIN, with the session cookie.
-const appOrigin = process.env.APP_ORIGIN || "http://localhost:5173";
-app.use(cors({ origin: appOrigin, credentials: true }));
+// The dashboard and the CRM: only the addresses in APP_ORIGIN, with the session cookie.
+app.use(cors({ origin: appOrigins(), credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(requireJsonForWrites);
 app.use("/auth/password", teamRoutes.password);
