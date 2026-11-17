@@ -2,12 +2,19 @@
 // What a module exports is described in ../modules.js; the routes are in routes.js.
 // A team member linked to a specialist with ownOnly sees only their own bookings, in the
 // snapshot and in a customer's history too.
-import { APPT, SERIES, STAFF, SERVICE, TIME_OFF, linkOf } from "./rows.js";
+import { APPT, SERIES, STAFF, SERVICE, TIME_OFF } from "./rows.js";
+import { linkOf } from "./staff.js";
+import "./series-job.js"; // registers the daily job that books what comes into view
 
 export { router } from "./routes.js";
 export const keys = ["staff", "services", "timeOff", "appointments", "series"];
 
-const linkFor = (ctx) => linkOf(ctx.q, ctx.cfg.workspaceId, { user: ctx.user, role: ctx.role });
+// What the signed-in person is to Booking, read once per snapshot or history (me() and snapshot() share a ctx).
+const links = new WeakMap();
+const linkFor = (ctx) => {
+  if (!links.has(ctx)) links.set(ctx, linkOf(ctx.q, ctx.cfg.workspaceId, { user: ctx.user, role: ctx.role }));
+  return links.get(ctx);
+};
 
 /** What the signed-in person is to Booking: the specialist they are linked to, if any. */
 export async function me(ctx) {

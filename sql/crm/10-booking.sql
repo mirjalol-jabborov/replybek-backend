@@ -144,7 +144,12 @@ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS crm_appointments_workspace ON crm_appointments (workspace_id, start_at);
 CREATE INDEX IF NOT EXISTS crm_appointments_customer ON crm_appointments (workspace_id, customer_id);
-CREATE INDEX IF NOT EXISTS crm_appointments_series ON crm_appointments (series_id) WHERE series_id IS NOT NULL;
+-- A specialist's bookings: "were they ever booked?" before deleting one (and the foreign key's own
+-- check), and the calendar of a team member who sees only their own.
+CREATE INDEX IF NOT EXISTS crm_appointments_staff ON crm_appointments (workspace_id, staff_id, start_at);
+-- The visits of a repeat booking, by their day. It replaces an index on series_id alone.
+CREATE INDEX IF NOT EXISTS crm_appointments_of_series ON crm_appointments (workspace_id, series_id, series_day) WHERE series_id IS NOT NULL;
+DROP INDEX IF EXISTS crm_appointments_series;
 
 -- ───── Live updates ─────
 SELECT crm_watch('crm_staff', 'staff');

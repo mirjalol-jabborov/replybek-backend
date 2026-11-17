@@ -3,12 +3,8 @@
 // Every reader takes `q(text, params)`: the snapshot's read transaction or a write's client, so
 // what a write answers with is read inside the same transaction that made the change.
 import { notFound } from "../../lib/http.js";
-import { wall } from "../db.js";
-import { totals } from "../shared/store.js";
-
-export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** `q` for a transaction's client. */
-export const qOf = (c) => (text, params) => c.query(text, params);
+import { wall, isUuid } from "../db.js";
+import { totals, isPaid } from "../shared/store.js";
 
 /* ───── Products ───── */
 
@@ -42,13 +38,18 @@ function productRow(r) {
   };
 }
 
-/** Products, newest first. `ids`: only these. The variants and their stock are added up once for all products. */
+/**
+ * Products, newest first. `ids`: only these. The variants and their stock are added up once for
+ * all products; with `ids`, only those products' stock is (a write answers about a few products).
+ */
 export async function listProducts(q, cfg, ids) {
   if (ids && !ids.length) return [];
   const only = (col) => (ids ? `AND ${col} = ANY($3::uuid[])` : "");
   const { rows } = await q(
     `WITH s AS (
-       SELECT variant_id, sum(on_hand)::bigint AS on_hand, sum(reserved)::bigint AS reserved FROM crm_stock WHERE workspace_id = $1 GROUP BY variant_id
+       SELECT variant_id, sum(on_hand)::bigint AS on_hand, sum(reserved)::bigint AS reserved FROM crm_stock
+        WHERE workspace_id = $1 ${ids ? "AND variant_id IN (SELECT id FROM crm_variants WHERE workspace_id = $1 AND product_id = ANY($3::uuid[]))" : ""}
+        GROUP BY variant_id
      ), v AS (
        SELECT v.product_id, json_agg(json_build_object('id', v.id, 'values', v.option_values, 'sku', v.sku, 'price', v.price, 'cost', v.cost,
                 'stock', COALESCE(s.on_hand, 0), 'reserved', COALESCE(s.reserved, 0), 'lowAt', v.low_at, 'archived', v.archived)
@@ -72,17 +73,16 @@ export async function listProducts(q, cfg, ids) {
 // letting them go again are ledger lines too, but they move no goods, so they stay out of it.
 const SHOWN = "m.type NOT IN ('reserve', 'release')";
 
-/** Stock movements, newest first. `where`: { ids } or { since: seq } (those written after it). */
-export async function listMovements(q, cfg, where = {}) {
-  if (where.ids && !where.ids.length) return [];
-  const extra = where.ids ? "AND m.id = ANY($3::uuid[])" : where.since !== undefined ? "AND m.seq > $3" : "";
+/** Stock movements, newest first. `ids`: only these. */
+export async function listMovements(q, cfg, ids) {
+  if (ids && !ids.length) return [];
   const { rows } = await q(
     `SELECT m.id, v.product_id AS "productId", m.variant_id AS "variantId", m.type, m.qty, ${wall("m.at", "$2")} AS at, m.by_name AS by,
             m.note, m.reason, m.order_id AS "orderId"
-       FROM crm_stock_moves m JOIN crm_variants v ON v.id = m.variant_id
-      WHERE m.workspace_id = $1 AND ${SHOWN} ${extra}
+       FROM crm_stock_moves m JOIN crm_variants v ON v.workspace_id = m.workspace_id AND v.id = m.variant_id
+      WHERE m.workspace_id = $1 AND ${SHOWN} ${ids ? "AND m.id = ANY($3::uuid[])" : ""}
       ORDER BY m.seq DESC`,
-    extra ? [cfg.workspaceId, cfg.timezone, where.ids || where.since] : [cfg.workspaceId, cfg.timezone]
+    ids ? [cfg.workspaceId, cfg.timezone, ids] : [cfg.workspaceId, cfg.timezone]
   );
   // qty is BIGINT, which pg hands over as text.
   return rows.map(({ orderId, reason, qty, ...m }) => ({ ...m, qty: Number(qty), ...(reason ? { reason } : {}), ...(orderId ? { orderId } : {}) }));
@@ -113,25 +113,36 @@ function orderRow(r) {
     createdAt: r.createdAt,
     history: r.history,
   };
-  const sums = totals(order);
-  return { ...order, totals: sums, paid: sums.balance <= 0 };
+  return { ...order, totals: totals(order), paid: isPaid(order) };
 }
 
-/** Orders, newest first. `where`: { ids } or { customerId }. `lock`: "FOR UPDATE" inside a write. */
+/**
+ * Orders, newest first. `where`: { ids } or { customerId }. `lock`: "FOR UPDATE" inside a write.
+ * Lines and payments are gathered once per query, by order, for the same orders the query lists.
+ */
 export async function listOrders(q, cfg, where = {}, lock = "") {
   if (where.ids && !where.ids.length) return [];
-  const extra = where.ids ? "AND o.id = ANY($3::uuid[])" : where.customerId ? "AND o.customer_id = $3" : "";
+  const which = (o) => (where.ids ? `AND ${o}id = ANY($3::uuid[])` : where.customerId ? `AND ${o}customer_id = $3` : "");
+  // The lines' and payments' own filter: their orders, through the order id they carry.
+  const of = (alias) => (where.ids ? `AND ${alias}.order_id = ANY($3::uuid[])` : where.customerId ? `AND ${alias}.order_id IN (SELECT id FROM crm_orders WHERE workspace_id = $1 ${which("")})` : "");
   const { rows } = await q(
-    `SELECT o.id, o.number, o.customer_id AS "customerId", o.status, o.delivery, o.payment, o.discount, o.source, o.note, o.fields,
-            o.history, o.returned, o.branch_id AS "branchId", ${wall("o.created_at", "$2")} AS "createdAt",
-       (SELECT json_agg(json_build_object('id', l.id, 'productId', v.product_id, 'variantId', l.variant_id, 'qty', l.qty, 'price', l.price, 'discount', l.discount) ORDER BY l.position, l.id)
-          FROM crm_order_lines l JOIN crm_variants v ON v.id = l.variant_id WHERE l.workspace_id = o.workspace_id AND l.order_id = o.id) AS lines,
-       (SELECT json_agg(json_build_object('id', p.id, 'amount', p.amount, 'method', p.method, 'at', ${wall("p.at", "$2")}, 'by', p.by_name, 'note', p.note) ORDER BY p.seq)
-          FROM crm_payments p WHERE p.workspace_id = o.workspace_id AND p.order_id = o.id) AS payments
-       FROM crm_orders o
-      WHERE o.workspace_id = $1 ${extra}
+    `WITH l AS (
+       SELECT l.order_id, json_agg(json_build_object('id', l.id, 'productId', v.product_id, 'variantId', l.variant_id, 'qty', l.qty, 'price', l.price, 'discount', l.discount) ORDER BY l.position, l.id) AS lines
+         FROM crm_order_lines l JOIN crm_variants v ON v.workspace_id = l.workspace_id AND v.id = l.variant_id
+        WHERE l.workspace_id = $1 ${of("l")}
+        GROUP BY l.order_id
+     ), p AS (
+       SELECT p.order_id, json_agg(json_build_object('id', p.id, 'amount', p.amount, 'method', p.method, 'at', ${wall("p.at", "$2")}, 'by', p.by_name, 'note', p.note) ORDER BY p.seq) AS payments
+         FROM crm_payments p
+        WHERE p.workspace_id = $1 ${of("p")}
+        GROUP BY p.order_id
+     )
+     SELECT o.id, o.number, o.customer_id AS "customerId", o.status, o.delivery, o.payment, o.discount, o.source, o.note, o.fields,
+            o.history, o.returned, o.branch_id AS "branchId", ${wall("o.created_at", "$2")} AS "createdAt", l.lines, p.payments
+       FROM crm_orders o LEFT JOIN l ON l.order_id = o.id LEFT JOIN p ON p.order_id = o.id
+      WHERE o.workspace_id = $1 ${which("o.")}
       ORDER BY o.created_at DESC, o.number DESC ${lock ? `${lock} OF o` : ""}`,
-    extra ? [cfg.workspaceId, cfg.timezone, where.ids || where.customerId] : [cfg.workspaceId, cfg.timezone]
+    where.ids || where.customerId ? [cfg.workspaceId, cfg.timezone, where.ids || where.customerId] : [cfg.workspaceId, cfg.timezone]
   );
   return rows.map(orderRow);
 }
@@ -139,8 +150,8 @@ export async function listOrders(q, cfg, where = {}, lock = "") {
 /* ───── What every write of an order shares ───── */
 
 /** The order, locked for this write. Another workspace's id reads as "not found". */
-export async function lockOrder(c, cfg, id) {
-  const [order] = UUID.test(id) ? await listOrders(qOf(c), cfg, { ids: [id] }, "FOR UPDATE") : [];
+export async function lockOrder(q, cfg, id) {
+  const [order] = isUuid(id) ? await listOrders(q, cfg, { ids: [id] }, "FOR UPDATE") : [];
   if (!order) throw notFound("Order not found");
   return order;
 }
@@ -152,21 +163,22 @@ export const historyLine = (cfg, user, text, extra) => ({ at: cfg.now, text, by:
 export const addPayment = (c, cfg, user, orderId, sum, method, note = "") =>
   c.query("INSERT INTO crm_payments (workspace_id, order_id, amount, method, by_id, by_name, note) VALUES ($1, $2, $3, $4, $5, $6, $7)", [cfg.workspaceId, orderId, sum, method, user?.id || null, user?.name || "", note]);
 
-/**
- * The changes an order write answers with: the order, and when stock moved, every product it
- * touched and the movements that were written. `more`: other rows to send along ({ customers }).
- */
-export async function orderChanges(c, cfg, orderId, { variantIds = [], moveIds = [], more } = {}) {
-  const q = qOf(c);
-  const set = { orders: await listOrders(q, cfg, { ids: [orderId] }), ...more };
-  if (variantIds.length) set.products = await listProducts(q, cfg, await productsOf(c, cfg, variantIds));
-  const movements = await listMovements(q, cfg, { ids: moveIds });
-  if (movements.length) set.movements = movements;
-  return { changes: { set }, id: orderId };
+/** The products these variants belong to. */
+async function productsOf(q, cfg, variantIds) {
+  const { rows } = await q("SELECT DISTINCT product_id AS id FROM crm_variants WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [cfg.workspaceId, [...new Set(variantIds)]]);
+  return rows.map((r) => r.id);
 }
 
-/** The products these variants belong to. */
-export async function productsOf(c, cfg, variantIds) {
-  const { rows } = await c.query("SELECT DISTINCT product_id AS id FROM crm_variants WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [cfg.workspaceId, [...new Set(variantIds)]]);
-  return rows.map((r) => r.id);
+/**
+ * The changes every Store write answers with, read inside its transaction: the order it wrote,
+ * the products it touched (by `productIds`, or by the variants whose stock moved) and the ledger
+ * lines it made. `more`: other rows to send along ({ customers }).
+ */
+export async function storeChanges(q, cfg, { orderId, productIds, variantIds = [], moveIds = [], more } = {}) {
+  const set = { ...(orderId ? { orders: await listOrders(q, cfg, { ids: [orderId] }) } : {}), ...more };
+  const products = productIds || (variantIds.length ? await productsOf(q, cfg, variantIds) : []);
+  if (products.length) set.products = await listProducts(q, cfg, products);
+  const movements = await listMovements(q, cfg, moveIds);
+  if (movements.length) set.movements = movements;
+  return { set };
 }

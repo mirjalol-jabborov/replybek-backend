@@ -3,10 +3,12 @@
 // The app may write a plain product the demo's way (sku, price, cost, lowAt on the product itself)
 // or send `variants`.
 import { z } from "zod";
-import { HttpError, notFound } from "../../lib/http.js";
-import { write } from "../db.js";
+import { notFound } from "../../lib/http.js";
+import { write, isUuid, updateRow } from "../db.js";
+import { bad, conflict } from "../errors.js";
+import { uuid, listId as id, money, text, someKey } from "../shapes.js";
 import { hasId } from "../shared/index.js";
-import { UUID, qOf, listProducts, listMovements } from "./rows.js";
+import { storeChanges } from "./rows.js";
 import { lockStock, postMoves } from "./stock.js";
 import { checkImage, dropUpload } from "./images.js";
 
@@ -14,16 +16,13 @@ const OPENING = { en: "Opening stock", ru: "Начальный остаток", 
 
 /* ───── Shapes ───── */
 
-const id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/, "An id is 1 to 40 letters, digits, - or _.");
-const money = z.number().int().min(0).max(1e12);
 const whole = z.number().int().min(0).max(1_000_000);
-const text = (max) => z.string().trim().min(1).max(max);
 // A picture is a path on the same site: a static one ("/products/x.jpg") or an uploaded one (see uploadImage).
 const image = z.string().trim().max(300).regex(/^(\/(?!\/)[A-Za-z0-9_\-./%]*)?$/, "A picture is a path that starts with /.");
 const option = z.object({ id, name: text(60), values: z.array(text(80)).min(1, "An option needs at least one value.").max(50) }).strict();
 const variant = z
   .object({
-    id: z.string().regex(UUID).optional(), // a variant the product already has; without it, a new one
+    id: uuid.optional(), // a variant the product already has; without it, a new one
     values: z.record(z.string().max(80)).optional(),
     sku: z.string().trim().max(64).optional(),
     price: money.optional(),
@@ -48,11 +47,9 @@ const shape = {
   opening: whole,
 };
 export const productCreateSchema = z.object(shape).partial().required({ name: true }).strict();
-export const productUpdateSchema = z.object(shape).omit({ opening: true }).partial().strict().refine((v) => Object.keys(v).length > 0, "Nothing to change.");
+export const productUpdateSchema = z.object(shape).omit({ opening: true }).partial().strict().refine(someKey, "Nothing to change.");
 
 /* ───── Checks ───── */
-
-const bad = (message, code, extra) => new HttpError(400, message, { code, ...extra });
 
 function checkLists(cfg, v, stored) {
   // What the product already has stays valid, even if the unit or category was removed since.
@@ -86,36 +83,59 @@ function checkVariants(options, variants) {
 async function checkSkus(c, cfg, variants, productId) {
   const skus = variants.map((v) => (v.sku || "").toLowerCase()).filter(Boolean);
   const twice = skus.find((s, i) => skus.indexOf(s) !== i);
-  if (twice) throw new HttpError(409, `SKU ${twice.toUpperCase()} is used twice.`, { code: "sku_taken", sku: twice });
+  if (twice) throw conflict(`SKU ${twice.toUpperCase()} is used twice.`, "sku_taken", { sku: twice });
   if (!skus.length) return;
   const { rows } = await c.query(
     "SELECT v.sku FROM crm_variants v WHERE v.workspace_id = $1 AND NOT v.archived AND lower(v.sku) = ANY($2::text[]) AND v.product_id IS DISTINCT FROM $3 LIMIT 1",
     [cfg.workspaceId, skus, productId || null]
   );
-  if (rows[0]) throw new HttpError(409, `SKU ${rows[0].sku} is already used.`, { code: "sku_taken", sku: rows[0].sku });
+  if (rows[0]) throw conflict(`SKU ${rows[0].sku} is already used.`, "sku_taken", { sku: rows[0].sku });
 }
 
-const insertVariant = async (c, cfg, productId, v, position) =>
-  (
-    await c.query(
-      "INSERT INTO crm_variants (workspace_id, product_id, option_values, sku, price, cost, low_at, position) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-      [cfg.workspaceId, productId, JSON.stringify(v.values || {}), v.sku || "", v.price || 0, v.cost || 0, v.lowAt || 0, position]
-    )
-  ).rows[0].id;
+const PRODUCT = { columns: { onSale: "on_sale" }, json: ["options"], touch: true };
+/** Each variant with its place in the product's list: [{ ...variant, position }]. */
+const placed = (variants) => variants.map((x, i) => ({ ...x, position: i }));
+
+/**
+ * Adds new variants to a product in one statement, and writes the opening stock of those that
+ * have some as receipts. Returns the receipts' ids.
+ */
+async function addVariants(c, cfg, user, productId, list) {
+  if (!list.length) return [];
+  const col = (f) => list.map(f);
+  const { rows } = await c.query(
+    `INSERT INTO crm_variants (workspace_id, product_id, option_values, sku, price, cost, low_at, position)
+     SELECT $1, $2, x.option_values, x.sku, x.price, x.cost, x.low_at, x.position
+       FROM unnest($3::jsonb[], $4::text[], $5::bigint[], $6::bigint[], $7::int[], $8::int[]) AS x(option_values, sku, price, cost, low_at, position)
+     RETURNING id, position`,
+    [cfg.workspaceId, productId, col((x) => JSON.stringify(x.values || {})), col((x) => x.sku || ""), col((x) => x.price || 0), col((x) => x.cost || 0), col((x) => x.lowAt || 0), col((x) => x.position)]
+  );
+  const idAt = Object.fromEntries(rows.map((r) => [r.position, r.id]));
+  const opening = list.filter((x) => x.opening > 0).map((x) => ({ variantId: idAt[x.position], type: "receipt", qty: x.opening }));
+  return postMoves(c, cfg, user, opening, { note: OPENING });
+}
+
+/** Saves what was sent for variants the product keeps, in one statement. What isn't sent stays. */
+async function saveVariants(c, cfg, list) {
+  if (!list.length) return;
+  const col = (f) => list.map(f);
+  await c.query(
+    `UPDATE crm_variants v SET position = x.position, option_values = COALESCE(x.option_values, v.option_values), sku = COALESCE(x.sku, v.sku),
+            price = COALESCE(x.price, v.price), cost = COALESCE(x.cost, v.cost), low_at = COALESCE(x.low_at, v.low_at)
+       FROM unnest($2::uuid[], $3::int[], $4::jsonb[], $5::text[], $6::bigint[], $7::bigint[], $8::int[]) AS x(id, position, option_values, sku, price, cost, low_at)
+      WHERE v.workspace_id = $1 AND v.id = x.id`,
+    [cfg.workspaceId, col((x) => x.id), col((x) => x.position), col((x) => (x.values ? JSON.stringify(x.values) : null)), col((x) => x.sku ?? null), col((x) => x.price ?? null), col((x) => x.cost ?? null), col((x) => x.lowAt ?? null)]
+  );
+}
 
 /** The changes a product write answers with: the product, and the receipts of any opening stock. */
-async function answer(c, cfg, productId, moveIds = []) {
-  const set = { products: await listProducts(qOf(c), cfg, [productId]) };
-  const movements = await listMovements(qOf(c), cfg, { ids: moveIds });
-  if (movements.length) set.movements = movements;
-  return { changes: { set }, id: productId };
-}
+const answer = async (q, cfg, productId, moveIds) => ({ changes: await storeChanges(q, cfg, { productIds: [productId], moveIds }), id: productId });
 
 /* ───── Writes ───── */
 
 /** A new product. Opening stock comes in as a receipt, so the ledger starts with it. */
 export function createProduct(workspace, user, input) {
-  return write(workspace.id, async (c, cfg) => {
+  return write(workspace.id, async (c, cfg, q) => {
     const { sku, price, cost, lowAt, opening, ...v } = input;
     v.unit ??= cfg.data.units[0]?.id || "";
     checkLists(cfg, v);
@@ -129,12 +149,7 @@ export function createProduct(workspace, user, input) {
       [cfg.workspaceId, v.name, v.category || "", v.unit, v.image || "", v.onSale ?? true, JSON.stringify(options)]
     );
     const productId = rows[0].id;
-    const first = [];
-    for (const [i, x] of variants.entries()) {
-      const variantId = await insertVariant(c, cfg, productId, x, i);
-      if (x.opening > 0) first.push({ variantId, type: "receipt", qty: x.opening });
-    }
-    return answer(c, cfg, productId, await postMoves(c, cfg, user, first, { note: OPENING }));
+    return answer(q, cfg, productId, await addVariants(c, cfg, user, productId, placed(variants)));
   });
 }
 
@@ -145,15 +160,15 @@ export function createProduct(workspace, user, input) {
  * rather than deleted, so old orders still read).
  */
 export async function updateProduct(workspace, user, productId, input) {
-  const { old, ...out } = await write(workspace.id, async (c, cfg) => {
-    const stored = UUID.test(productId) && (await c.query("SELECT id, unit, category, options, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
+  const { old, ...out } = await write(workspace.id, async (c, cfg, q) => {
+    const stored = isUuid(productId) && (await c.query("SELECT id, unit, category, options, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
     if (!stored) throw notFound("Product not found");
     const { sku, price, cost, lowAt, variants, ...v } = input;
     checkLists(cfg, v, stored);
     if (v.image && v.image !== stored.image) await checkImage(c, cfg.workspaceId, v.image);
     const options = v.options ?? stored.options;
     const { rows: had } = await c.query("SELECT id, option_values AS values, sku FROM crm_variants WHERE workspace_id = $1 AND product_id = $2 AND NOT archived ORDER BY position, created_at, id FOR UPDATE", [cfg.workspaceId, productId]);
-    const first = [];
+    let moveIds = [];
 
     if (variants) {
       const unknown = variants.find((x) => x.id && !had.some((h) => h.id === x.id));
@@ -165,7 +180,7 @@ export async function updateProduct(workspace, user, productId, input) {
       if (gone.length) {
         const stock = await lockStock(c, cfg, gone);
         const full = gone.find((g) => stock[g].stock > 0 || stock[g].reserved > 0);
-        if (full) throw new HttpError(409, `${stock[full].name} still has stock. Write it off or sell it first.`, { code: "variant_has_stock", variantId: full, stock: stock[full].stock, reserved: stock[full].reserved });
+        if (full) throw conflict(`${stock[full].name} still has stock. Write it off or sell it first.`, "variant_has_stock", { variantId: full, stock: stock[full].stock, reserved: stock[full].reserved });
         const { rows: used } = await c.query(
           `SELECT v.id FROM crm_variants v WHERE v.workspace_id = $1 AND v.id = ANY($2::uuid[])
             AND (EXISTS (SELECT 1 FROM crm_stock_moves m WHERE m.workspace_id = $1 AND m.variant_id = v.id)
@@ -176,18 +191,10 @@ export async function updateProduct(workspace, user, productId, input) {
         await c.query("UPDATE crm_variants SET archived = true WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [cfg.workspaceId, keep]);
         await c.query("DELETE FROM crm_variants WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [cfg.workspaceId, gone.filter((g) => !keep.includes(g))]);
       }
-      for (const [i, x] of variants.entries()) {
-        if (!x.id) {
-          const variantId = await insertVariant(c, cfg, productId, x, i);
-          if (x.opening > 0) first.push({ variantId, type: "receipt", qty: x.opening });
-          continue;
-        }
-        await c.query(
-          `UPDATE crm_variants SET position = $3, option_values = COALESCE($4, option_values), sku = COALESCE($5, sku), price = COALESCE($6, price), cost = COALESCE($7, cost), low_at = COALESCE($8, low_at)
-            WHERE workspace_id = $1 AND id = $2`,
-          [cfg.workspaceId, x.id, i, x.values ? JSON.stringify(x.values) : null, x.sku ?? null, x.price ?? null, x.cost ?? null, x.lowAt ?? null]
-        );
-      }
+      // The ones it keeps first, so a SKU one of them gives up is free for a new one.
+      const list = placed(variants);
+      await saveVariants(c, cfg, list.filter((x) => x.id));
+      moveIds = await addVariants(c, cfg, user, productId, list.filter((x) => !x.id));
     } else {
       // The options changed around variants that stayed as they were: they must still fit.
       if (v.options) checkVariants(options, had);
@@ -205,14 +212,9 @@ export async function updateProduct(workspace, user, productId, input) {
       }
     }
 
-    await c.query(
-      `UPDATE crm_products SET name = COALESCE($3, name), category = COALESCE($4, category), unit = COALESCE($5, unit), image = COALESCE($6, image),
-              on_sale = COALESCE($7, on_sale), options = COALESCE($8, options), updated_at = now()
-        WHERE workspace_id = $1 AND id = $2`,
-      [cfg.workspaceId, productId, v.name ?? null, v.category ?? null, v.unit ?? null, v.image ?? null, v.onSale ?? null, v.options ? JSON.stringify(v.options) : null]
-    );
+    await updateRow(c, cfg, "crm_products", PRODUCT, "id", productId, v);
     const old = v.image !== undefined && v.image !== stored.image ? stored.image : "";
-    return { ...(await answer(c, cfg, productId, await postMoves(c, cfg, user, first, { note: OPENING }))), old };
+    return { ...(await answer(q, cfg, productId, moveIds)), old };
   });
   // A picture uploaded for this product and no longer shown by any goes too (after the commit: files are not part of it).
   await dropUpload(workspace.id, old);
@@ -225,7 +227,7 @@ export async function updateProduct(workspace, user, productId, input) {
  */
 export async function deleteProduct(workspace, productId) {
   const out = await write(workspace.id, async (c, cfg) => {
-    const stored = UUID.test(productId) && (await c.query("SELECT id, name, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
+    const stored = isUuid(productId) && (await c.query("SELECT id, name, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
     if (!stored) throw notFound("Product not found");
     const { rows } = await c.query(
       `SELECT (SELECT count(*)::int FROM crm_variants v JOIN crm_stock_moves m ON m.workspace_id = v.workspace_id AND m.variant_id = v.id WHERE v.workspace_id = $1 AND v.product_id = $2) AS movements,
@@ -235,7 +237,7 @@ export async function deleteProduct(workspace, productId) {
     );
     const uses = rows[0];
     if (uses.movements || uses.orders) {
-      throw new HttpError(409, `${stored.name} has stock history or orders, so it can't be deleted. Take it off sale instead.`, { code: "product_in_use", ...uses });
+      throw conflict(`${stored.name} has stock history or orders, so it can't be deleted. Take it off sale instead.`, "product_in_use", uses);
     }
     await c.query("DELETE FROM crm_products WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, productId]);
     return { changes: { del: { products: [productId] } }, image: stored.image };

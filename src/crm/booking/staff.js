@@ -2,10 +2,21 @@
 // Setting it up is for admins.
 import { z } from "zod";
 import { HttpError } from "../../lib/http.js";
-import { write } from "../db.js";
+import { write, insertRow, updateRow } from "../db.js";
+import { uuid, uuids, hm, hmEnd, label, someKey } from "../shapes.js";
 import { check } from "../shared/booking.js";
-import { uuid, uuids, hm, hmEnd, label, someKey } from "./shapes.js";
-import { STAFF, APPT, asQ, one, insertRow, updateRow, upcomingOf } from "./rows.js";
+import { STAFF, APPT, one, upcomingOf } from "./rows.js";
+
+/**
+ * What the signed-in person is to the Booking module: { staffId, only }.
+ * staffId: the specialist they are, if any. only: that same id when they may see and change
+ * nothing but their own bookings (a team member with ownOnly; admins and the owner see all).
+ */
+export async function linkOf(q, workspaceId, who) {
+  const { rows } = await q("SELECT id, own_only FROM crm_staff WHERE workspace_id = $1 AND user_id = $2", [workspaceId, who.user.id]);
+  const staffId = rows[0]?.id || null;
+  return { staffId, only: staffId && rows[0].own_only && who.role === "agent" ? staffId : null };
+}
 
 const dayHours = z.union([z.null(), z.tuple([hm, hmEnd]).refine(([from, to]) => from < to, "The working day must end after it starts.")]);
 const shape = {
@@ -47,7 +58,7 @@ async function cleanStaff(c, cfg, v, id) {
 export function createStaff(workspaceId, input) {
   return write(workspaceId, async (c, cfg) => {
     await cleanStaff(c, cfg, input);
-    const { rows } = await insertRow(c, "crm_staff", MAP, STAFF, { workspace_id: workspaceId, branch_id: cfg.branchId }, input);
+    const rows = await insertRow(c, cfg, "crm_staff", MAP, STAFF, input, { branch_id: cfg.branchId });
     return { changes: { set: { staff: rows } }, id: rows[0].id };
   });
 }
@@ -58,15 +69,14 @@ export function createStaff(workspaceId, input) {
  * are; the answer lists the bookings ahead that no longer fit them (`outside`), which stay put.
  */
 export function updateStaff(workspaceId, id, input) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const stored = await one(q, cfg, "crm_staff", STAFF, id, "Specialist");
     await cleanStaff(c, cfg, input, id);
     const mine = await upcomingOf(q, cfg, { staffId: id });
     if (input.active === false && stored.active && mine.length) {
       throw new HttpError(409, `${stored.name} has bookings ahead. Move them to someone else or cancel them first.`, { code: "staff_has_bookings", ...brief(mine) });
     }
-    const { rows } = await updateRow(c, "crm_staff", MAP, STAFF, workspaceId, id, input);
+    const rows = await updateRow(c, cfg, "crm_staff", MAP, STAFF, id, input);
     const out = { changes: { set: { staff: rows } } };
     if (input.hours || input.breaks) {
       // Only the person's own hours and breaks are asked about, so the rest of the data can stay out.
@@ -79,8 +89,8 @@ export function updateStaff(workspaceId, id, input) {
 
 /** Deletes a specialist nobody was ever booked with. One with bookings stays, and can be switched off instead. */
 export function deleteStaff(workspaceId, id) {
-  return write(workspaceId, async (c, cfg) => {
-    const stored = await one(asQ(c), cfg, "crm_staff", STAFF, id, "Specialist");
+  return write(workspaceId, async (c, cfg, q) => {
+    const stored = await one(q, cfg, "crm_staff", STAFF, id, "Specialist");
     const n = (await c.query("SELECT count(*)::int AS n FROM crm_appointments WHERE workspace_id = $1 AND staff_id = $2", [workspaceId, id])).rows[0].n;
     if (n) throw new HttpError(409, `${stored.name} has bookings, so they can't be deleted. Switch them off instead.`, { code: "staff_has_bookings", count: n });
     // Their time off and repeat bookings go with them (ON DELETE CASCADE). A series can name them

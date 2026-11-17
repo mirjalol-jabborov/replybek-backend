@@ -5,21 +5,17 @@
 import { z } from "zod";
 import { HttpError } from "../../lib/http.js";
 import { write } from "../db.js";
+import { conflict, refusal } from "../errors.js";
+import { uuid, money, label } from "../shapes.js";
+import { same } from "../shared/index.js";
 import { planWriteOff, planCount } from "../shared/store.js";
-import { UUID, qOf, listProducts, listMovements, productsOf } from "./rows.js";
+import { storeChanges } from "./rows.js";
 
-/** A rule said no: 422 { code: "rules", hard: [reason], soft: [reason] }. Reasons are codes, the app has the words. */
-export const refused = (hard, soft = []) => new HttpError(422, hard.length ? "This can't be done as it stands." : "This is outside the rules the business set.", { code: "rules", hard, soft });
-
-const uuid = z.string().regex(UUID, "This id doesn't look right.");
 /** What a line of stock or of an order points at: a variant, or a product that has just one. */
 export const target = { variantId: uuid.optional(), productId: uuid.optional() };
 export const hasTarget = (v) => Boolean(v.variantId || v.productId);
 /** A note someone typed, or one the app wrote in all three languages. */
-const noteShape = z.union([
-  z.string().trim().max(500),
-  z.object({ en: z.string().trim().max(500), ru: z.string().trim().max(500), uz: z.string().trim().max(500) }).partial().strict(),
-]);
+const noteShape = label(500);
 const qty = z.number().int().min(1).max(1_000_000);
 
 /**
@@ -83,7 +79,7 @@ export async function lockStock(c, cfg, variantIds, branchId = cfg.branchId) {
  */
 function refuseArchived(stock, ids) {
   const gone = ids.find((id) => stock[id].archived);
-  if (gone) throw new HttpError(409, `${stock[gone].name} is no longer one of the product's variants.`, { code: "variant_archived", variantId: gone, productId: stock[gone].productId });
+  if (gone) throw conflict(`${stock[gone].name} is no longer one of the product's variants.`, "variant_archived", { variantId: gone, productId: stock[gone].productId });
 }
 
 /**
@@ -93,23 +89,26 @@ function refuseArchived(stock, ids) {
  * another variant took its SKU. Its shelf can still be counted or written off.
  */
 export async function reviveReturned(c, cfg, variantIds) {
+  // Each one with whether a variant in use already has its values or its SKU.
   const { rows } = await c.query(
-    `SELECT v.id, v.product_id, v.option_values AS values, v.sku, p.options
-       FROM crm_variants v JOIN crm_products p ON p.id = v.product_id
-      WHERE v.workspace_id = $1 AND v.id = ANY($2::uuid[]) AND v.archived`,
+    `SELECT v.id, v.product_id, v.option_values AS values, lower(v.sku) AS sku, p.options,
+            EXISTS (SELECT 1 FROM crm_variants w WHERE w.workspace_id = v.workspace_id AND w.product_id = v.product_id AND NOT w.archived AND w.option_values = v.option_values)
+              OR (v.sku <> '' AND EXISTS (SELECT 1 FROM crm_variants w WHERE w.workspace_id = v.workspace_id AND NOT w.archived AND lower(w.sku) = lower(v.sku))) AS clash
+       FROM crm_variants v JOIN crm_products p ON p.workspace_id = v.workspace_id AND p.id = v.product_id
+      WHERE v.workspace_id = $1 AND v.id = ANY($2::uuid[]) AND v.archived
+      ORDER BY v.id`,
     [cfg.workspaceId, [...new Set(variantIds)]]
   );
+  // One after another: a variant brought back takes its values and SKU, so a later one can clash with it.
+  const back = [];
   for (const v of rows) {
     const options = v.options || [];
     const values = v.values || {};
     if (!options.length || Object.keys(values).length !== options.length || !options.every((o) => o.values.includes(values[o.id]))) continue;
-    const { rows: taken } = await c.query(
-      `SELECT EXISTS (SELECT 1 FROM crm_variants w WHERE w.workspace_id = $1 AND w.product_id = $2 AND NOT w.archived AND w.option_values = $3::jsonb)
-           OR ($4 <> '' AND EXISTS (SELECT 1 FROM crm_variants w WHERE w.workspace_id = $1 AND NOT w.archived AND lower(w.sku) = lower($4))) AS clash`,
-      [cfg.workspaceId, v.product_id, JSON.stringify(values), v.sku]
-    );
-    if (!taken[0].clash) await c.query("UPDATE crm_variants SET archived = false WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, v.id]);
+    const twin = back.some((b) => (b.product_id === v.product_id && same(b.values, values)) || (v.sku && b.sku === v.sku));
+    if (!v.clash && !twin) back.push(v);
   }
+  if (back.length) await c.query("UPDATE crm_variants SET archived = false WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [cfg.workspaceId, back.map((v) => v.id)]);
 }
 
 /**
@@ -117,48 +116,45 @@ export async function reviveReturned(c, cfg, variantIds) {
  * The database moves the counters. Returns the new lines' ids.
  */
 export async function postMoves(c, cfg, user, moves, { branchId = cfg.branchId, orderId = null, note = "", reason = "" } = {}) {
-  const ids = [];
+  if (!moves.length) return [];
+  const col = (f) => moves.map(f);
   try {
-    for (const m of moves) {
-      const { rows } = await c.query(
-        `INSERT INTO crm_stock_moves (workspace_id, variant_id, branch_id, type, qty, by_id, by_name, note, reason, order_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-        [cfg.workspaceId, m.variantId, branchId, m.type, m.qty, user?.id || null, user?.name || "", JSON.stringify(m.note ?? note), m.reason ?? reason, m.orderId ?? orderId]
-      );
-      ids.push(rows[0].id);
-    }
+    // One statement for all the lines. They go in, and the trigger adds them up, in the order given:
+    // seq follows that order, so a release still comes before the sale it belongs to.
+    const { rows } = await c.query(
+      `INSERT INTO crm_stock_moves (workspace_id, variant_id, branch_id, type, qty, by_id, by_name, note, reason, order_id)
+       SELECT $1, m.variant_id, $2, m.type, m.qty, $3, $4, m.note, m.reason, m.order_id
+         FROM unnest($5::uuid[], $6::text[], $7::bigint[], $8::jsonb[], $9::text[], $10::uuid[]) WITH ORDINALITY AS m(variant_id, type, qty, note, reason, order_id, n)
+        ORDER BY m.n
+       RETURNING id, seq`,
+      [
+        cfg.workspaceId, branchId, user?.id || null, user?.name || "",
+        col((m) => m.variantId), col((m) => m.type), col((m) => m.qty), col((m) => JSON.stringify(m.note ?? note)), col((m) => m.reason ?? reason), col((m) => m.orderId ?? orderId),
+      ]
+    );
+    return rows.sort((a, b) => Number(a.seq) - Number(b.seq)).map((r) => r.id);
   } catch (e) {
     // The rules checked this under a lock, so the database's own refusal should never be reached.
     // If it is, nothing is saved and the person is told to look again.
-    if (e.code === "23514" && /^crm_stock_/.test(e.constraint || "")) throw new HttpError(409, "The stock changed a moment ago. Check the numbers and try again.", { code: "stock_changed" });
+    if (e.code === "23514" && /^crm_stock_/.test(e.constraint || "")) throw conflict("The stock changed a moment ago. Check the numbers and try again.", "stock_changed");
     // A number past what the database holds (more than 9 * 10^18 units): refused, never a 500.
-    if (e.code === "22003") throw new HttpError(422, "That is more stock than can be kept.", { code: "rules", hard: [{ code: "qty_too_large" }], soft: [] });
+    if (e.code === "22003") throw refusal([{ code: "qty_too_large" }], [], { message: "That is more stock than can be kept." });
     throw e;
   }
-  return ids;
-}
-
-/** The changes a stock write answers with: the products it touched and the movements it made. */
-async function stockChanges(c, cfg, variantIds, moveIds) {
-  const q = qOf(c);
-  const set = { products: await listProducts(q, cfg, await productsOf(c, cfg, variantIds)) };
-  const movements = await listMovements(q, cfg, { ids: moveIds });
-  if (movements.length) set.movements = movements;
-  return { set };
 }
 
 /* ───── Receive, write off, count ───── */
 
 export const receiveSchema = z
   .object({
-    lines: z.array(z.object({ ...target, qty, cost: z.number().int().min(0).max(1e12).optional() }).strict().refine(hasTarget, "Say which product.")).min(1, "Add at least one product.").max(200),
+    lines: z.array(z.object({ ...target, qty, cost: money.optional() }).strict().refine(hasTarget, "Say which product.")).min(1, "Add at least one product.").max(200),
     note: noteShape.optional(),
   })
   .strict();
 
 /** Stock arrives. A cost given becomes the variant's cost from now on. */
 export function receive(workspace, user, { lines, note = "" }) {
-  return write(workspace.id, async (c, cfg) => {
+  return write(workspace.id, async (c, cfg, q) => {
     const ids = await resolveVariants(c, cfg, lines);
     refuseArchived(await lockStock(c, cfg, ids), ids);
     const costs = lines.map((l, i) => [ids[i], l.cost]).filter(([, cost]) => cost > 0);
@@ -168,7 +164,7 @@ export function receive(workspace, user, { lines, note = "" }) {
       await c.query("UPDATE crm_variants v SET cost = x.cost FROM unnest($2::uuid[], $3::bigint[]) AS x(id, cost) WHERE v.workspace_id = $1 AND v.id = x.id", [cfg.workspaceId, Object.keys(last), Object.values(last)]);
     }
     const moveIds = await postMoves(c, cfg, user, lines.map((l, i) => ({ variantId: ids[i], type: "receipt", qty: l.qty })), { note });
-    return { changes: await stockChanges(c, cfg, ids, moveIds) };
+    return { changes: await storeChanges(q, cfg, { variantIds: ids, moveIds }) };
   });
 }
 
@@ -185,13 +181,13 @@ export const writeOffSchema = z
 
 /** Goods that can't be sold leave the shelf. Not more than is available: held goods belong to orders. */
 export function writeOff(workspace, user, { qty: n, reason, note = "", ...which }) {
-  return write(workspace.id, async (c, cfg) => {
+  return write(workspace.id, async (c, cfg, q) => {
     const [variantId] = await resolveVariants(c, cfg, [which]);
     const stock = await lockStock(c, cfg, [variantId]);
     const plan = planWriteOff(stock[variantId], n);
-    if (!plan.ok) throw refused(plan.missing);
+    if (!plan.ok) throw refusal(plan.missing);
     const moveIds = await postMoves(c, cfg, user, plan.movements, { note, reason });
-    return { changes: await stockChanges(c, cfg, [variantId], moveIds) };
+    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds }) };
   });
 }
 
@@ -202,14 +198,14 @@ export const countSchema = z
 
 /** A stock count: on hand becomes what was counted, and the ledger keeps the difference. */
 export function count(workspace, user, { counted, note = "", ...which }) {
-  return write(workspace.id, async (c, cfg) => {
+  return write(workspace.id, async (c, cfg, q) => {
     const [variantId] = await resolveVariants(c, cfg, [which]);
     const stock = await lockStock(c, cfg, [variantId]);
     // A variant put away can be counted down (goods that came back and left again), never up.
     if (counted > stock[variantId].stock) refuseArchived(stock, [variantId]);
     const plan = planCount(stock[variantId], counted);
-    if (!plan.ok) throw refused(plan.missing);
+    if (!plan.ok) throw refusal(plan.missing);
     const moveIds = await postMoves(c, cfg, user, plan.movements, { note });
-    return { changes: await stockChanges(c, cfg, [variantId], moveIds), diff: plan.diff };
+    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds }), diff: plan.diff };
   });
 }

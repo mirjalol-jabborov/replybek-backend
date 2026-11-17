@@ -6,28 +6,19 @@ import { HttpError } from "../../lib/http.js";
 import { write } from "../db.js";
 import { TOP_KEYS } from "../defaults.js";
 import { mergeChanges } from "../changes.js";
+import { listId as id, hm, hmEnd, day, text, label } from "../shapes.js";
 import { modules, add, countUses, moveStage } from "../modules.js";
-import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds, isDay } from "../shared/index.js";
+import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds } from "../shared/index.js";
+import { toMin } from "../shared/time.js";
 import { customerCols, sourceUses } from "./customers.js";
 
 /* ───── Shapes ───── */
 
-// Ids inside the lists are short strings the app makes up ("st4k2j9", "tagm1x").
-const id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/, "An id is 1 to 40 letters, digits, - or _.");
-const text = (max) => z.string().trim().min(1).max(max);
 // A name is what someone typed, or {en, ru, uz} for the names a workspace starts with.
-const translated = z
-  .object({ en: z.string().trim().max(80), ru: z.string().trim().max(80), uz: z.string().trim().max(80) })
-  .partial()
-  .strict()
-  .refine((n) => Object.values(n).some(Boolean), "A name can't be empty.");
-const name = z.union([text(80), translated]);
+const name = label(80, 1);
 const tone = z.enum(["", "blue", "green", "amber", "red"]);
 const icon = z.string().regex(/^[A-Za-z0-9]{1,40}$/);
-const hm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Write the time like 09:30.");
-const hmEnd = z.union([hm, z.literal("24:00")]);
 const minutes = (max) => z.number().int().min(0).max(max);
-const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
 
 /** A list of items with ids, each id once. */
 const list = (item, { min = 0, max = 100 } = {}) =>
@@ -83,7 +74,7 @@ const delivery = z
       .array(z.object({ from: hm, to: hmEnd }).strict().refine((w) => w.from < w.to, "A delivery window must end after it starts."))
       .max(24),
     daysOff: z.array(z.number().int().min(0).max(6)).max(7),
-    closed: z.array(z.object({ date: z.string().refine(isDay, "Write the date like 2026-11-17."), note: z.union([z.string().trim().max(200), translated]) }).strict()).max(366),
+    closed: z.array(z.object({ date: day, note: z.union([z.string().trim().max(200), name]) }).strict()).max(366),
     sameDayUntil: z.union([hm, z.literal("")]),
     prepMinutes: minutes(43200),
     maxDays: z.number().int().min(1).max(730),
@@ -94,10 +85,7 @@ const delivery = z
 
 const move = z.object({ from: id, to: id }).strict();
 
-let schema;
-/** What PUT /settings takes. Built on first use, so a module's own settings keys are in it. */
 function bodySchema() {
-  if (schema) return schema;
   const settings = z
     .object({
       dayStart: hm,
@@ -115,7 +103,7 @@ function bodySchema() {
     })
     .partial()
     .strict();
-  schema = z
+  return z
     .object({
       modules: z.object({ booking: z.boolean(), store: z.boolean() }).strict(),
       settings,
@@ -135,16 +123,10 @@ function bodySchema() {
     .partial()
     .strict()
     .refine((b) => TOP_KEYS.some((k) => b[k] !== undefined), "Nothing to change.");
-  return schema;
 }
-
-/** Like validators.js's validate(), for a schema that is built on first use. */
-export function validateSettings(req, res, next) {
-  const parsed = bodySchema().safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ message: "Invalid request", issues: parsed.error.issues });
-  req.valid = parsed.data;
-  next();
-}
+let built;
+/** What PUT /settings takes. Built when the first request comes, so every module's own settings keys are in it. */
+export const settingsSchema = z.lazy(() => (built ||= bodySchema()));
 
 /* ───── Reading ───── */
 
@@ -163,7 +145,7 @@ export function view(data, workspace) {
 const STAGES = { apptStages: APPT_KINDS, orderStages: ORDER_KINDS };
 // Lists whose items other rows point at by id: an item in use can't be removed.
 const GUARDED = ["sources", "deliveryMethods", "paymentMethods", "units", "serviceCategories", "productCategories"];
-const label = (n) => (typeof n === "string" ? n : n?.en || Object.values(n || {}).find(Boolean) || "");
+const shownName = (n) => (typeof n === "string" ? n : n?.en || Object.values(n || {}).find(Boolean) || "");
 const SAY = {
   stage_fixed: "The one finishing step of each kind has to stay. It can be renamed.",
   stage_min: "The board needs at least one step of this kind. Rename it instead.",
@@ -198,7 +180,7 @@ export function saveSettings(workspace, body) {
       const [used] = Object.keys(uses);
       if (used) {
         const item = before[key].find((x) => x.id === used);
-        throw new HttpError(409, `“${label(item.name)}” is in use. Change the places that use it first, then remove it.`, { code: "in_use", list: key, id: used, count: uses[used] });
+        throw new HttpError(409, `“${shownName(item.name)}” is in use. Change the places that use it first, then remove it.`, { code: "in_use", list: key, id: used, count: uses[used] });
       }
     }
 

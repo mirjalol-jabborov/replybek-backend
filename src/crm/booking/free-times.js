@@ -2,11 +2,12 @@
 // times would a customer be offered on a day. They run the same shared functions the writes run.
 import { z } from "zod";
 import { forbidden } from "../../lib/http.js";
-import { read, load } from "../db.js";
+import { read } from "../db.js";
+import { uuid, serviceList, day, moment, minutes } from "../shapes.js";
 import { check, verdict, assign, freeStarts, whyNone, totals, rulesOf, isClean } from "../shared/booking.js";
 import { dayOf, fromMin } from "../shared/time.js";
-import { uuid, serviceList, day, moment, minutes } from "./shapes.js";
-import { linkOf, loadRules } from "./rows.js";
+import { loadRules } from "./rows.js";
+import { linkOf } from "./staff.js";
 
 export const checkSchema = z
   .object({
@@ -40,8 +41,7 @@ async function askedFor(q, workspaceId, who, staffId) {
  * by "customer": as the website or the AI agent would be judged (the start-time grid counts, nothing can be forced).
  */
 export function checkDraft(workspaceId, who, body) {
-  return read(async (q) => {
-    const cfg = await load(workspaceId, q);
+  return read(workspaceId, async (q, cfg) => {
     const asked = await askedFor(q, workspaceId, who, body.staffId);
     const db = await loadRules(q, cfg, dayOf(body.start), dayOf(body.start));
     const by = body.by || "team";
@@ -58,8 +58,7 @@ export function checkDraft(workspaceId, who, body) {
  * `none` is the one reason the list is empty (see whyNone), null when there are times.
  */
 export function slots(workspaceId, who, ask) {
-  return read(async (q) => {
-    const cfg = await load(workspaceId, q);
+  return read(workspaceId, async (q, cfg) => {
     const staffId = await askedFor(q, workspaceId, who, ask.staffId);
     const db = await loadRules(q, cfg, ask.day, ask.day);
     const duration = ask.duration ?? totals(db, ask.serviceIds).duration;

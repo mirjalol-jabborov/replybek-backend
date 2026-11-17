@@ -9,22 +9,26 @@
 import { Router } from "express";
 import { HttpError, wrap } from "../lib/http.js";
 import { stream } from "../services/events.service.js";
-import { load, read } from "./db.js";
+import { read } from "./db.js";
 import { TOP_KEYS } from "./defaults.js";
 import { modules } from "./modules.js";
+import * as booking from "./booking/index.js";
+import * as store from "./store/index.js";
 import { router as core } from "./core/index.js";
 import { view } from "./core/settings.js";
 import { listCustomers } from "./core/customers.js";
+import { listBranches } from "./core/branches.js";
+
+modules.push(booking, store);
 
 const router = Router({ mergeParams: true });
 
-// req.crm: the workspace's CRM (see load() in db.js), made on its first use. req.ctx(): what a
-// module's snapshot and history hooks get.
-router.use(wrap(async (req, res, next) => {
-  req.crm = await load(req.workspace.id);
-  req.ctx = (extra) => ({ workspace: req.workspace, role: req.role, user: req.user, cfg: req.crm, want: () => true, ...extra });
+// req.ctx(): what a module's snapshot and history hooks get (read() adds q and cfg). Nothing is
+// read here: the workspace's CRM is read by the read or write that needs it, made on its first use.
+router.use((req, res, next) => {
+  req.ctx = (extra) => ({ workspace: req.workspace, role: req.role, user: req.user, want: () => true, ...extra });
   next();
-}));
+});
 
 // Who is looking, and the workspace around the rows. Always small, so every full snapshot has them.
 const ABOUT = ["id", "name", "role", "me", "packages", "branches"];
@@ -34,9 +38,8 @@ const KEYS = () => new Set(["rev", ...ABOUT, ...TOP_KEYS, "customers", ...module
  * The workspace as the app's `db`. One unchanging picture: every part is read in the same
  * transaction, so `rev` and the rows belong together.
  */
-async function snapshot(req, only) {
-  return read(async (q) => {
-    const cfg = await load(req.workspace.id, q);
+function snapshot(req, only) {
+  return read(req.workspace.id, async (q, cfg) => {
     const want = (key) => !only || only.has(key);
     const ctx = req.ctx({ q, cfg, want });
     const out = { rev: cfg.rev };
@@ -51,9 +54,7 @@ async function snapshot(req, only) {
     }
     const lists = view(cfg.data, req.workspace);
     for (const key of TOP_KEYS) if (want(key)) out[key] = lists[key];
-    if (want("branches")) {
-      out.branches = (await q('SELECT id, name, address, is_default AS "default" FROM crm_branches WHERE workspace_id = $1 ORDER BY is_default DESC, created_at, id', [cfg.workspaceId])).rows;
-    }
+    if (want("branches")) out.branches = await listBranches(q, cfg);
     if (want("customers")) out.customers = await listCustomers(q, cfg);
     for (const m of modules) {
       const mine = m.keys.filter(want);

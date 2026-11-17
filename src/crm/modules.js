@@ -1,9 +1,10 @@
 // The modules of the CRM: Booking and Store. Core (settings, customers, the snapshot) is always
-// there and hosts them. A module lives in its own folder and exports these from its index.js,
-// so core never has to know a module's tables:
+// there and hosts them. The host (index.js) puts them into `modules` when it starts, so a module
+// can use core and core can ask the modules without the two importing each other. A module lives
+// in its own folder and exports these from its index.js, so core never has to know a module's tables:
 //
 //   keys             the snapshot keys it owns: ["orders", "products", "movements"]
-//   router           its routes, mounted at /w/:wid/crm (req.workspace, req.role, req.user, req.crm are set)
+//   router           its routes, mounted at /w/:wid/crm (req.workspace, req.role, req.user are set)
 //   snapshot(ctx)    → { [key]: rows } for the keys asked for (ctx.want(key)); ctx = { q, workspace, role, user, cfg, want }
 // and, when it needs them:
 //   me(ctx)                                  → { staffId }: what this signed-in person is in the module
@@ -14,12 +15,12 @@
 //   customerUses(c, workspaceId, customerId) → { [key]: n }: its rows that belong to a customer
 //   customerHistory(ctx, customerId)         → { [key]: rows }: the same rows, for the customer's panel
 //   settingsShape                            zod fields for settings keys of its own (PUT /settings checks them)
-// `c` is the client of the write's transaction; `ctx.q(text, params)` reads inside the snapshot's.
-import * as booking from "./booking/index.js";
-import * as store from "./store/index.js";
+// `c` is the client of the write's transaction; `ctx.q(text, params)` reads inside the snapshot's,
+// and `ctx.cfg` is the workspace's CRM as read there (see read() in db.js).
 import { mergeChanges } from "./changes.js";
 
-export const modules = [booking, store];
+/** The modules that are mounted, in the order their keys and routes come: Booking, then Store. */
+export const modules = [];
 
 /** Adds one part's counts into the total. */
 export const add = (into, part) => {

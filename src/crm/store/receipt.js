@@ -1,8 +1,10 @@
 // The printed receipt of an order: everything a slip needs, read on one unchanging picture.
 import { notFound } from "../../lib/http.js";
-import { read } from "../db.js";
+import { read, isUuid } from "../db.js";
+import { findCustomer } from "../core/customers.js";
+import { branchOf } from "../core/branches.js";
 import { lineTotal } from "../shared/store.js";
-import { UUID, listOrders } from "./rows.js";
+import { listOrders } from "./rows.js";
 
 /**
  * What a printed receipt needs, read in one picture: the business, the order's number and date,
@@ -10,14 +12,14 @@ import { UUID, listOrders } from "./rows.js";
  * is owed. Names from the workspace's lists come as stored ({en, ru, uz} or text): the app shows them.
  */
 export function receipt(ctx, id) {
-  return read(async (q) => {
-    const { cfg, workspace } = ctx;
-    const [order] = UUID.test(id) ? await listOrders(q, cfg, { ids: [id] }) : [];
+  const { workspace } = ctx;
+  return read(workspace.id, async (q, cfg) => {
+    const [order] = isUuid(id) ? await listOrders(q, cfg, { ids: [id] }) : [];
     if (!order) throw notFound("Order not found");
-    const customer = (await q("SELECT name, phone FROM crm_customers WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, order.customerId])).rows[0];
-    const branch = (await q("SELECT name, address FROM crm_branches WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, order.branchId])).rows[0];
+    const customer = await findCustomer(q, cfg, order.customerId);
+    const branch = await branchOf(q, cfg, order.branchId);
     const { rows: goods } = await q(
-      `SELECT v.id, p.name, p.unit, p.options, v.option_values AS values, v.sku FROM crm_variants v JOIN crm_products p ON p.id = v.product_id
+      `SELECT v.id, p.name, p.unit, p.options, v.option_values AS values, v.sku FROM crm_variants v JOIN crm_products p ON p.workspace_id = v.workspace_id AND p.id = v.product_id
         WHERE v.workspace_id = $1 AND v.id = ANY($2::uuid[])`,
       [cfg.workspaceId, order.lines.map((l) => l.variantId)]
     );
@@ -31,7 +33,7 @@ export function receipt(ctx, id) {
       status: order.status,
       statusName: named("orderStages", order.status),
       ...(order.returned ? { returned: true } : {}),
-      customer: customer || { name: "", phone: "" },
+      customer: { name: customer?.name || "", phone: customer?.phone || "" },
       lines: order.lines.map((l) => {
         const g = goods.find((x) => x.id === l.variantId);
         return {

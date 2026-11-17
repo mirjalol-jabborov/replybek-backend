@@ -18,6 +18,10 @@ export function isDay(v) {
 /** A time written "09:30". */
 export const isHm = (v) => typeof v === "string" && HM.test(v);
 
+/** Whether two stored values (text, a list, a name, a fields object) are the same, whatever order an object's keys come in. */
+export const same = (a, b) =>
+  a && typeof a === "object" && b && typeof b === "object" ? Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => same(a[k], b[k])) : a === b;
+
 /** Required fields that are still empty: [{ id, name, … }]. `only`: check just these field ids. */
 export const missingFields = (defs, values, only) => (defs || []).filter((d) => (only ? only.includes(d.id) : d.required) && (d.type === "yesno" ? values?.[d.id] !== true && only : empty(values?.[d.id])));
 

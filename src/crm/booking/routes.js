@@ -12,6 +12,7 @@ import * as staff from "./staff.js";
 import * as services from "./services.js";
 import * as off from "./time-off.js";
 import * as appts from "./appointments.js";
+import * as steps from "./steps.js";
 import * as series from "./series.js";
 import * as free from "./free-times.js";
 
@@ -38,7 +39,7 @@ router.post("/appointments", validate(appts.createSchema), route((req) => appts.
 router.put("/appointments/:id", validate(appts.editSchema), route((req) => appts.editAppointment(wid(req), who(req), req.params.id, req.valid)));
 // Dragging on the calendar: an edit of just the time and the specialist.
 router.post("/appointments/:id/move", validate(appts.moveSchema), route((req) => appts.editAppointment(wid(req), who(req), req.params.id, req.valid)));
-router.post("/appointments/:id/step", validate(appts.stepSchema), route((req) => appts.stepAppointment(wid(req), who(req), req.params.id, req.valid)));
+router.post("/appointments/:id/step", validate(steps.stepSchema), route((req) => steps.stepAppointment(wid(req), who(req), req.params.id, req.valid)));
 router.post("/appointments/:id/pay", validate(appts.paySchema), route((req) => appts.payAppointment(wid(req), who(req), req.params.id, req.valid)));
 router.delete("/appointments/:id", admin, route((req) => appts.deleteAppointment(wid(req), req.params.id)));
 

@@ -3,10 +3,11 @@
 // decides, this file locks the order and its stock and writes exactly what the plan says.
 import { z } from "zod";
 import { write } from "../db.js";
+import { refusal } from "../errors.js";
 import { firstOf } from "../shared/index.js";
 import { K, planMove } from "../shared/store.js";
-import { addPayment, lockOrder, orderChanges } from "./rows.js";
-import { lockStock, postMoves, refused, reviveReturned } from "./stock.js";
+import { addPayment, historyLine, lockOrder, storeChanges } from "./rows.js";
+import { lockStock, postMoves, reviveReturned } from "./stock.js";
 
 const note = z.string().trim().max(500).optional();
 export const stepSchema = z.object({ to: z.string().trim().min(1).max(40), note }).strict();
@@ -25,36 +26,35 @@ export async function applyMove(c, cfg, user, order, to, text) {
   // The variants are locked before their stock is read, so two orders can't both take the last one.
   const stock = await lockStock(c, cfg, variantIds, order.branchId);
   const plan = planMove({ stages: cfg.data.orderStages, fields: cfg.data.fields.order, order, stock }, to, { note: text });
-  if (!plan.ok) throw refused(plan.missing);
+  if (!plan.ok) throw refusal(plan.missing);
   const moveIds = await postMoves(c, cfg, user, plan.movements, { orderId: order.id, branchId: order.branchId, note: plan.change === "returned" ? text || "" : "" });
   if (plan.change === "returned") await reviveReturned(c, cfg, variantIds);
   if (plan.history) {
+    const { text: what, ...about } = plan.history;
     await c.query("UPDATE crm_orders SET status = $3, returned = $4, history = history || $5::jsonb, updated_at = now() WHERE workspace_id = $1 AND id = $2", [
       cfg.workspaceId,
       order.id,
       plan.order.status,
       Boolean(plan.order.returned),
-      JSON.stringify([{ ...plan.history, at: cfg.now, by: user?.name || "" }]),
+      JSON.stringify([historyLine(cfg, user, what, about)]),
     ]);
   }
   if (plan.pay > 0) await addPayment(c, cfg, user, order.id, plan.pay, order.payment);
   return { variantIds: plan.movements.length ? variantIds : [], moveIds, change: plan.change };
 }
 
+/** Moves a locked order and answers with what changed. */
+async function moveAndAnswer(c, cfg, q, user, order, to, text) {
+  const { change, ...moved } = await applyMove(c, cfg, user, order, to, text);
+  return { changes: await storeChanges(q, cfg, { orderId: order.id, ...moved }), id: order.id, change };
+}
+
 /** Moves an order to another step. A finished order moves only to the cancelled step: that is a return. */
 export function moveOrder(workspace, user, id, { to, note: text }) {
-  return write(workspace.id, async (c, cfg) => {
-    const order = await lockOrder(c, cfg, id);
-    const moved = await applyMove(c, cfg, user, order, to, text);
-    return { ...(await orderChanges(c, cfg, order.id, moved)), change: moved.change };
-  });
+  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id), to, text));
 }
 
 /** Calls an order off: to the workspace's cancelled step. A finished order's goods come back. */
 export function cancelOrder(workspace, user, id, { note: text } = {}) {
-  return write(workspace.id, async (c, cfg) => {
-    const order = await lockOrder(c, cfg, id);
-    const moved = await applyMove(c, cfg, user, order, cancelledStep(cfg), text);
-    return { ...(await orderChanges(c, cfg, order.id, moved)), change: moved.change };
-  });
+  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id), cancelledStep(cfg), text));
 }

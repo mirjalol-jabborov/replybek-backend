@@ -2,17 +2,16 @@
 // what repeats; the visits themselves are ordinary bookings, made up to rules.maxDays ahead and
 // each checked like any booking. A day that can't be booked is never forced: it is skipped and
 // listed with its reasons, so someone can decide what to do with it. A daily job books the days
-// that come into view.
+// that come into view (series-job.js).
 import { z } from "zod";
-import { query } from "../../db.js";
 import { HttpError, forbidden, notFound } from "../../lib/http.js";
-import { registerJob } from "../../services/jobs.service.js";
-import { write } from "../db.js";
+import { write, isUuid, asQ } from "../db.js";
+import { uuid, serviceList, day, hm, minutes, money, label } from "../shapes.js";
 import { kindOf, firstOf } from "../shared/index.js";
-import { check, isClean, totals, startStage, kindHolds, rulesOf, seriesDays, seriesEnded } from "../shared/booking.js";
+import { check, isClean, totals, startStage, kindHolds, rulesOf, seriesDays } from "../shared/booking.js";
 import { dayOf, hmOf, at, addDays, weekday } from "../shared/time.js";
-import { uuid, serviceList, day, hm, money, minutes, label } from "./shapes.js";
-import { SERIES, APPT, UUID, asQ, linkOf, loadRules } from "./rows.js";
+import { SERIES, APPT, loadRules } from "./rows.js";
+import { linkOf } from "./staff.js";
 import { getAppointment, insertAppointment, saveAppointment, entry } from "./appointments.js";
 
 /* ───── Shapes ───── */
@@ -60,11 +59,12 @@ const follows = (cfg, v) => FOLLOWS.includes(kindOf(cfg.data.apptStages, v.statu
 const theirs = (me, v) => Boolean(me.only) && v.staffId !== me.only;
 
 async function getSeries(q, cfg, id, me) {
-  const { rows } = UUID.test(id) ? await q(`SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
+  const { rows } = isUuid(id) ? await q(`SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
   if (!rows[0] || (me?.only && rows[0].staffId !== me.only)) throw notFound("Repeat booking not found");
   return rows[0];
 }
-const horizonOf = (cfg) => addDays(dayOf(cfg.now), rulesOf({ settings: cfg.data.settings }).maxDays || 30);
+/** The last day customers may book now: series are booked up to here. */
+export const horizonOf = (cfg) => addDays(dayOf(cfg.now), rulesOf({ settings: cfg.data.settings }).maxDays);
 const visitsOf = async (c, cfg, id, from) =>
   (await c.query(`SELECT ${APPT("$4")} FROM crm_appointments WHERE workspace_id = $1 AND series_id = $2 AND series_day >= $3::date ORDER BY series_day`, [cfg.workspaceId, id, from, cfg.timezone])).rows;
 
@@ -90,26 +90,29 @@ async function bookDay(c, cfg, db, s, on, stage, createdBy) {
   }
 }
 
+/** The first day a series still has to book: the day after `through`, and never before today. */
+export const firstToBook = (cfg, s) => {
+  const next = addDays(s.through, 1);
+  const today = dayOf(cfg.now);
+  return next > today ? next : today;
+};
+
 /**
  * Books the days of a series that have come into view: after `through`, up to rules.maxDays
- * ahead. A day that has a visit of the series already is left alone: after maxDays was lowered,
- * a change sets `through` back to the horizon while visits further ahead stay.
+ * ahead. `have`: the days after `through` that have a visit of the series already (a new series
+ * has none), left alone: after maxDays was lowered, a change sets `through` back to the horizon
+ * while visits further ahead stay. `db`: the rules' data, when the caller read it for many series.
  * Returns { series (as stored now), created: [rows], skipped: [{ day, hard, soft }] }.
  */
-async function extend(c, cfg, s, createdBy) {
-  const today = dayOf(cfg.now);
+export async function extend(c, cfg, s, createdBy, { db: known, have = new Set() } = {}) {
   const horizon = horizonOf(cfg);
   if (horizon <= s.through) return { series: s, created: [], skipped: [] };
-  const first = addDays(s.through, 1);
-  const have = new Set(
-    (await c.query(`SELECT to_char(series_day, 'YYYY-MM-DD') AS day FROM crm_appointments WHERE workspace_id = $1 AND series_id = $2 AND series_day > $3::date`, [cfg.workspaceId, s.id, s.through])).rows.map((r) => r.day)
-  );
-  const days = seriesDays(s, first > today ? first : today, horizon).filter((d) => !have.has(d));
+  const days = seriesDays(s, firstToBook(cfg, s), horizon).filter((d) => !have.has(d));
   const created = [];
   const skipped = [];
   if (days.length) {
     const stage = startStage(cfg.data.apptStages, "team");
-    const db = await loadRules(asQ(c), cfg, days[0], days[days.length - 1]);
+    const db = known || (await loadRules(asQ(c), cfg, days[0], days[days.length - 1]));
     for (const on of days) {
       const r = stage ? await bookDay(c, cfg, db, s, on, stage, createdBy) : { skip: { day: on, hard: [{ code: "no_steps" }], soft: [] } };
       if (r.row) created.push(r.row);
@@ -130,8 +133,7 @@ async function extend(c, cfg, s, createdBy) {
  * { changes, id, created: [appointment ids], skipped: [{ day, hard, soft }] }.
  */
 export function createSeries(workspaceId, who, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const a = await getAppointment(q, cfg, body.appointmentId, await linkOf(q, workspaceId, who));
     if (a.seriesId) throw new HttpError(409, "This booking already repeats.", { code: "in_series", seriesId: a.seriesId });
     if (!kindHolds(kindOf(cfg.data.apptStages, a.status))) throw new HttpError(409, "A cancelled or missed booking can't repeat. Restore it first.", { code: "booking_closed" });
@@ -163,8 +165,7 @@ export function createSeries(workspaceId, who, body) {
  * Answers { changes, created: [ids], moved: [ids], removed: [ids], skipped: [{ day, hard, soft, id?, kept? }] }.
  */
 export function changeSeries(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const me = await linkOf(q, workspaceId, who);
     const s = await getSeries(q, cfg, id, me);
     const { from, ...patch } = body;
@@ -202,11 +203,10 @@ export function changeSeries(workspaceId, who, id, body) {
     const set = [];
 
     // Days that left the pattern: their visits go, unless someone has started on them.
-    for (const v of visits) {
-      if (days.includes(v.seriesDay) || !follows(cfg, v) || theirs(me, v)) continue;
-      await c.query("DELETE FROM crm_appointments WHERE workspace_id = $1 AND id = $2", [workspaceId, v.id]);
-      db.appointments = db.appointments.filter((x) => x.id !== v.id);
-      out.removed.push(v.id);
+    out.removed = visits.filter((v) => !days.includes(v.seriesDay) && follows(cfg, v) && !theirs(me, v)).map((v) => v.id);
+    if (out.removed.length) {
+      await c.query("DELETE FROM crm_appointments WHERE workspace_id = $1 AND id = ANY($2::uuid[])", [workspaceId, out.removed]);
+      db.appointments = db.appointments.filter((x) => !out.removed.includes(x.id));
     }
     for (const on of days) {
       const v = visits.find((x) => x.seriesDay === on);
@@ -261,66 +261,36 @@ export function changeSeries(workspaceId, who, id, body) {
  * Answers { changes, cancelled: [ids] }.
  */
 export function stopSeries(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const me = await linkOf(q, workspaceId, who);
-    const s = await getSeries(q, cfg, id, me);
-    const stages = cfg.data.apptStages;
-    const to = firstOf(stages, "cancelled");
+    await getSeries(q, cfg, id, me);
+    const to = firstOf(cfg.data.apptStages, "cancelled");
     if (!to) throw new HttpError(409, "The bookings board has no cancelled step.", { code: "no_steps" });
-    const set = [];
-    for (const v of await visitsOf(c, cfg, id, body.from)) {
-      if (!follows(cfg, v) || theirs(me, v)) continue;
-      set.push(await saveAppointment(c, cfg, v, { status: to.id, busy: false, history: [...v.history, entry(cfg, who, { type: "status", from: v.status, to: to.id, reason: body.reason || "" })] }));
+    const ids = (await visitsOf(c, cfg, id, body.from)).filter((v) => follows(cfg, v) && !theirs(me, v)).map((v) => v.id);
+    let set = [];
+    if (ids.length) {
+      // One statement for all of them: a cancelled visit holds no time, so it can't run into another booking.
+      // Each history line says which step its visit came from.
+      const line = entry(cfg, who, { type: "status", to: to.id, reason: body.reason || "" });
+      const { rows: cancelled } = await c.query(
+        `UPDATE crm_appointments SET status = $3, busy = false, history = history || jsonb_build_array($4::jsonb || jsonb_build_object('from', status))
+          WHERE workspace_id = $1 AND id = ANY($2::uuid[]) RETURNING ${APPT("$5")}`,
+        [workspaceId, ids, to.id, JSON.stringify(line), cfg.timezone]
+      );
+      set = ids.map((x) => cancelled.find((r) => r.id === x));
     }
     const { rows } = await c.query(`UPDATE crm_series SET until = $3::date - 1, count = NULL WHERE workspace_id = $1 AND id = $2 RETURNING ${SERIES}`, [workspaceId, id, body.from]);
     return { changes: { set: { series: rows, ...(set.length ? { appointments: set } : {}) } }, cancelled: set.map((r) => r.id) };
   });
 }
 
-/* ───── The daily job ───── */
+/* ───── Keeping series booked ───── */
 
-const JOB = "crm_series_extend";
-// A series that still has days to come: no end, or an end past what has been booked.
-const RUNNING = "(until IS NULL OR until > through)";
+/** The daily job that books the days coming into view (series-job.js). */
+export const JOB = "crm_series_extend";
+/** A series that still has days to come: no end, or an end past what has been booked. */
+export const RUNNING = "(until IS NULL OR until > through)";
 
 /** Makes sure the daily job is waiting. Called whenever a series is made or changed: no series, no job. */
 const keepExtending = (c) =>
   c.query(`INSERT INTO jobs (kind, payload, run_at) SELECT $1, '{}'::jsonb, now() + interval '1 day' WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND status = 'queued')`, [JOB]);
-
-/**
- * Books the days that came into view for every running series, workspace by workspace, each
- * under that workspace's write lock. Returns how many bookings were made.
- */
-export async function extendAll() {
-  let made = 0;
-  const { rows } = await query(`SELECT DISTINCT workspace_id FROM crm_series WHERE ${RUNNING}`);
-  for (const { workspace_id: workspaceId } of rows) {
-    // One workspace that fails (its data, a bug) must not keep the others' visits from being booked.
-    const done = await write(workspaceId, async (c, cfg) => {
-      let n = 0;
-      const list = (await c.query(`SELECT ${SERIES}, created_by FROM crm_series WHERE workspace_id = $1 AND ${RUNNING} AND through < $2::date ORDER BY created_at, id`, [workspaceId, horizonOf(cfg)])).rows;
-      for (const { created_by: createdBy, ...s } of list) {
-        const r = await extend(c, cfg, s, createdBy);
-        n += r.created.length;
-        // A series that ran out of its count has nothing more to book: close it, so it stops coming up.
-        if (s.count && seriesEnded(r.series, r.series.through)) {
-          await c.query("UPDATE crm_series SET until = through WHERE workspace_id = $1 AND id = $2", [workspaceId, s.id]);
-        }
-      }
-      return { made: n };
-    }).catch((e) => console.error(`Repeat bookings of workspace ${workspaceId} were not extended:`, e.message));
-    made += done?.made || 0;
-  }
-  return made;
-}
-
-registerJob(JOB, async () => {
-  await extendAll();
-  // Tomorrow again, while any series is still running.
-  await query(
-    `INSERT INTO jobs (kind, payload, run_at) SELECT $1, '{}'::jsonb, now() + interval '1 day'
-      WHERE EXISTS (SELECT 1 FROM crm_series WHERE ${RUNNING}) AND NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND status = 'queued')`,
-    [JOB]
-  );
-});

@@ -4,12 +4,15 @@
 // constraint in sql/crm/10-booking.sql); its refusal reads the same as check()'s.
 import { z } from "zod";
 import { HttpError, forbidden, notFound } from "../../lib/http.js";
-import { write } from "../db.js";
-import { cleanFields, missingFields, hasId, stageOf, kindOf } from "../shared/index.js";
-import { check, verdict, assign, totals, startStage, stepBlock, kindHolds, holdsTime, CLOSED_KINDS } from "../shared/booking.js";
+import { write, isUuid, updateRow } from "../db.js";
+import { refusal } from "../errors.js";
+import { uuid, serviceList, moment, minutes, money, label } from "../shapes.js";
+import { customerExists, needSource } from "../core/customers.js";
+import { cleanFields, missingFields, same } from "../shared/index.js";
+import { check, verdict, assign, totals, startStage, kindHolds, holdsTime } from "../shared/booking.js";
 import { dayOf, fromMin, toMin } from "../shared/time.js";
-import { uuid, serviceList, moment, money, minutes, label } from "./shapes.js";
-import { APPT, UUID, asQ, linkOf, loadRules, refusal } from "./rows.js";
+import { APPT, loadRules } from "./rows.js";
+import { linkOf } from "./staff.js";
 
 /* ───── Shapes ───── */
 
@@ -29,21 +32,26 @@ const shape = {
 export const createSchema = z.object(shape).partial().required({ customerId: true, serviceIds: true, start: true }).strict();
 export const editSchema = z.object(shape).partial().strict().refine((v) => Object.keys(v).some((k) => k !== "force"), "Nothing to change.");
 export const moveSchema = z.object({ start: shape.start, staffId: uuid, force: z.boolean() }).partial().strict().refine((v) => v.start || v.staffId, "Say where the booking goes.");
-// force: bringing a cancelled or missed booking back over the business's rules, as when booking.
-export const stepSchema = z.object({ status: z.string().min(1).max(40), reason: z.string().trim().max(500).optional(), force: z.boolean().optional() }).strict();
 export const paySchema = z.object({ paid: z.boolean() }).strict();
 
 /* ───── Shared pieces ───── */
 
 /** A booking of this workspace that this person may see, or 404. */
 export async function getAppointment(q, cfg, id, me) {
-  const { rows } = UUID.test(id) ? await q(`SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id, cfg.timezone]) : { rows: [] };
+  const { rows } = isUuid(id) ? await q(`SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id, cfg.timezone]) : { rows: [] };
   if (!rows[0] || (me?.only && rows[0].staffId !== me.only)) throw notFound("Booking not found");
   return rows[0];
 }
 
 /** One line of a booking's history: what was done, when (the business's clock) and by whom. */
 export const entry = (cfg, who, what) => ({ at: cfg.now, by: who?.user?.name || "", byId: who?.user?.id || null, ...what });
+
+/**
+ * The booking rules said no: 422 { code: "rules", hard, soft, override }. `override` says whether
+ * force could pass the soft ones.
+ */
+export const refuse = (cfg, { hard, soft }, message = hard.length ? "This time can't be booked." : "This time is outside the booking rules.") =>
+  refusal(hard, soft, { message, override: cfg.data.settings.rules?.override !== false });
 
 /**
  * Runs a write that could break the no-double-booking constraint. If it does, the transaction
@@ -59,7 +67,7 @@ async function guarded(c, cfg, draft, run) {
     // A visit that would run into the next day: check() says so first; this is the backstop.
     if (e.code === "23514" && e.constraint === "crm_appointments_same_day") {
       await c.query("ROLLBACK TO SAVEPOINT booking");
-      throw refusal(cfg, { hard: [{ code: "ends_next_day" }], soft: [] });
+      throw refuse(cfg, { hard: [{ code: "ends_next_day" }], soft: [] });
     }
     if (e.code !== "23P01" || e.constraint !== "crm_appointments_no_overlap") throw e;
     await c.query("ROLLBACK TO SAVEPOINT booking");
@@ -73,7 +81,7 @@ async function guarded(c, cfg, draft, run) {
       )
     ).rows[0];
     const hard = [{ code: "taken", staffId: draft.staffId, ...(clash ? { id: clash.id, from: clash.from, to: fromMin(toMin(clash.from) + clash.duration) } : {}) }];
-    throw refusal(cfg, { hard, soft: [] });
+    throw refuse(cfg, { hard, soft: [] });
   }
 }
 
@@ -85,12 +93,8 @@ function needServices(db, ids, kept = []) {
     if (!s.active && !kept.includes(id)) throw new HttpError(400, "One of the services is switched off.", { code: "service_off", serviceId: id });
   }
 }
-async function needCustomer(c, cfg, id) {
-  if (!(await c.query("SELECT 1 FROM crm_customers WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, id])).rows[0]) throw new HttpError(400, "This customer no longer exists.", { code: "bad_customer" });
-}
-/** Where it came from: one of the workspace's sources. What a booking already has stays valid ("ai", a removed source). */
-function needSource(cfg, source, kept) {
-  if (source && source !== kept && !hasId(cfg.data.sources, source)) throw new HttpError(400, "Choose where the booking came from.", { code: "bad_source" });
+async function needCustomer(q, cfg, id) {
+  if (!(await customerExists(q, cfg, id))) throw new HttpError(400, "This customer no longer exists.", { code: "bad_customer" });
 }
 /** The booking's own fields, checked against the workspace's list. */
 function fieldsOf(cfg, sent, stored) {
@@ -115,7 +119,7 @@ function decide(cfg, db, draft, me, force) {
   const asked = draft.staffId || me.only;
   if (asked) ownOnly(me, asked);
   const { staffId, result } = asked ? { staffId: asked, result: check(db, { ...draft, staffId: asked }, opts) } : assign(db, draft, opts);
-  if (verdict(db, result, { by: "team", force }) !== "ok") throw refusal(cfg, result);
+  if (verdict(db, result, { by: "team", force }) !== "ok") throw refuse(cfg, result);
   return { staffId, soft: result.soft };
 }
 
@@ -131,22 +135,12 @@ export function insertAppointment(c, cfg, a) {
   });
 }
 
-const COLUMN = { customerId: "customer_id", staffId: "staff_id", serviceIds: "service_ids", start: "start_at" };
-const JSON_COLS = new Set(["note", "fields", "history"]);
+const MAP = { columns: { customerId: "customer_id", staffId: "staff_id", serviceIds: "service_ids", start: "start_at" }, json: ["note", "fields", "history"] };
 /** Saves the changed columns of a booking and returns it as the app reads it. */
 export function saveAppointment(c, cfg, a, patch) {
-  const keys = Object.keys(patch);
-  return guarded(c, cfg, { staffId: patch.staffId ?? a.staffId, start: patch.start ?? a.start, duration: patch.duration ?? a.duration, ignoreId: a.id }, async () => {
-    const { rows } = await c.query(
-      `UPDATE crm_appointments SET ${keys.map((k, i) => `${COLUMN[k] || k} = $${i + 4}`).join(", ")} WHERE workspace_id = $1 AND id = $2 RETURNING ${APPT("$3")}`,
-      [cfg.workspaceId, a.id, cfg.timezone, ...keys.map((k) => (JSON_COLS.has(k) ? JSON.stringify(patch[k]) : patch[k]))]
-    );
-    return rows[0];
-  });
+  const draft = { staffId: patch.staffId ?? a.staffId, start: patch.start ?? a.start, duration: patch.duration ?? a.duration, ignoreId: a.id };
+  return guarded(c, cfg, draft, async () => (await updateRow(c, cfg, "crm_appointments", MAP, APPT, a.id, patch))[0]);
 }
-
-const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
-const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /* ───── Writes ───── */
 
@@ -156,14 +150,13 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * passed with force).
  */
 export function bookAppointment(workspaceId, who, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const me = await linkOf(q, workspaceId, who);
     const day = dayOf(body.start);
     const db = await loadRules(q, cfg, day, day);
-    await needCustomer(c, cfg, body.customerId);
+    await needCustomer(q, cfg, body.customerId);
     needServices(db, body.serviceIds);
-    needSource(cfg, body.source);
+    needSource(cfg, body.source, undefined, "booking");
     const sum = totals(db, body.serviceIds);
     const draft = { staffId: body.staffId || null, serviceIds: body.serviceIds, start: body.start, duration: body.duration ?? sum.duration };
     const { staffId, soft } = decide(cfg, db, draft, me, body.force);
@@ -186,15 +179,14 @@ export function bookAppointment(workspaceId, who, body) {
  * History gets a line for a move, a new note and new details, as the booking panel shows them.
  */
 export function editAppointment(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const me = await linkOf(q, workspaceId, who);
     const a = await getAppointment(q, cfg, id, me);
     const patch = {};
     const start = body.start ?? a.start;
     const db = await loadRules(q, cfg, dayOf(start), dayOf(start));
     if (body.customerId && body.customerId !== a.customerId) {
-      await needCustomer(c, cfg, body.customerId);
+      await needCustomer(q, cfg, body.customerId);
       patch.customerId = body.customerId;
     }
     const services = body.serviceIds && !same(body.serviceIds, a.serviceIds) ? body.serviceIds : null;
@@ -223,18 +215,18 @@ export function editAppointment(workspaceId, who, id, body) {
         ownOnly(me, staffId);
         if (!db.staff.some((p) => p.id === staffId)) throw new HttpError(400, "This specialist no longer exists.", { code: "bad_staff" });
         const hard = check(db, { ...draft, staffId }, { by: "team", now: cfg.now }).hard.filter((r) => r.code === "bad_duration" || r.code === "ends_next_day");
-        if (hard.length) throw refusal(cfg, { hard, soft: [] });
+        if (hard.length) throw refuse(cfg, { hard, soft: [] });
       }
       if (staffId !== a.staffId) patch.staffId = staffId;
     }
     if (body.source !== undefined && body.source !== a.source) {
-      needSource(cfg, body.source, a.source);
+      needSource(cfg, body.source, a.source, "booking");
       patch.source = body.source;
     }
-    if (body.note !== undefined && !sameJson(body.note, a.note)) patch.note = body.note;
+    if (body.note !== undefined && !same(body.note, a.note)) patch.note = body.note;
     if (body.fields !== undefined) {
       const fields = fieldsOf(cfg, body.fields, a.fields);
-      if (!sameJson(fields, a.fields)) patch.fields = fields;
+      if (!same(fields, a.fields)) patch.fields = fields;
     }
     if (!Object.keys(patch).length) return { changes: {} };
     const lines = [];
@@ -247,62 +239,9 @@ export function editAppointment(workspaceId, who, id, body) {
   });
 }
 
-/**
- * The start a cancelled or missed booking had when it closed. Read from its history: going back
- * through the lines since the step that closed it, the earliest move says where it was.
- */
-function startWhenClosed(stages, a) {
-  let start = a.start;
-  for (const line of [...(a.history || [])].reverse()) {
-    if (line.type === "moved") start = line.from;
-    if (line.type === "status" && !CLOSED_KINDS.includes(kindOf(stages, line.from))) break;
-  }
-  return start;
-}
-// What only says the visit's time has come or gone. A booking brought back at the time it had was
-// booked once already, so these don't count for it: a missed visit may be put back (marked missed by mistake, it did happen).
-const TIME_GONE = ["day_passed", "time_passed", "min_notice"];
-
-/**
- * Puts a booking into another step, by what the step means: "here" only on the day of the visit,
- * "done" from that day on, "noshow" only after the start. A finished visit is marked paid.
- * Bringing a cancelled or missed booking back takes its time again, so it is judged like a new
- * booking at that time (force passes the soft reasons, when override is on). Answers { changes, forced? }.
- */
-export function stepAppointment(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
-    const a = await getAppointment(q, cfg, id, await linkOf(q, workspaceId, who));
-    const stages = cfg.data.apptStages;
-    if (!hasId(stages, body.status)) throw new HttpError(400, "This step no longer exists.", { code: "bad_step" });
-    if (a.status === body.status) return { changes: {} };
-    const to = stageOf(stages, body.status);
-    const from = stageOf(stages, a.status);
-    const block = stepBlock(stages, a, to.id, cfg.now);
-    if (block) throw refusal(cfg, { hard: [block], soft: [] }, "This booking can't go into that step now.");
-    let soft = [];
-    if (CLOSED_KINDS.includes(from.kind) && kindHolds(to.kind)) {
-      const db = await loadRules(q, cfg, dayOf(a.start), dayOf(a.start));
-      const result = check(db, { ...a, ignoreId: a.id }, { by: "team", now: cfg.now });
-      // Moved while it was closed, it is a new time like any other.
-      if (startWhenClosed(stages, a) === a.start) {
-        result.hard = result.hard.filter((r) => !TIME_GONE.includes(r.code));
-        result.soft = result.soft.filter((r) => !TIME_GONE.includes(r.code));
-      }
-      if (verdict(db, result, { by: "team", force: body.force }) !== "ok") throw refusal(cfg, result);
-      soft = result.soft;
-    }
-    const patch = { status: to.id, busy: kindHolds(to.kind), history: [...a.history, entry(cfg, who, { type: "status", from: a.status, to: to.id, reason: body.reason || "" })] };
-    if (to.kind === "done" && !a.paid) patch.paid = true;
-    const row = await saveAppointment(c, cfg, a, patch);
-    return { changes: { set: { appointments: [row] } }, ...(soft.length ? { forced: soft } : {}) };
-  });
-}
-
 /** Marks a booking paid or unpaid. */
 export function payAppointment(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const a = await getAppointment(q, cfg, id, await linkOf(q, workspaceId, who));
     if (a.paid === body.paid) return { changes: {} };
     const row = await saveAppointment(c, cfg, a, { paid: body.paid, history: [...a.history, entry(cfg, who, { type: "paid", paid: body.paid })] });
@@ -312,8 +251,8 @@ export function payAppointment(workspaceId, who, id, body) {
 
 /** Removes a booking for good (admins). Cancelling is the everyday way: it keeps the record. */
 export function deleteAppointment(workspaceId, id) {
-  return write(workspaceId, async (c, cfg) => {
-    await getAppointment(asQ(c), cfg, id);
+  return write(workspaceId, async (c, cfg, q) => {
+    await getAppointment(q, cfg, id);
     await c.query("DELETE FROM crm_appointments WHERE workspace_id = $1 AND id = $2", [workspaceId, id]);
     return { changes: { del: { appointments: [id] } } };
   });

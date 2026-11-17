@@ -3,11 +3,12 @@
 // Bookings already inside new blocked time are reported, never cancelled.
 import { z } from "zod";
 import { HttpError, forbidden } from "../../lib/http.js";
-import { write } from "../db.js";
+import { write, insertRow, updateRow } from "../db.js";
+import { uuid, moment, label, someKey } from "../shapes.js";
 import { bookingsInside } from "../shared/booking.js";
 import { dayOf } from "../shared/time.js";
-import { uuid, moment, label, someKey } from "./shapes.js";
-import { TIME_OFF, asQ, one, linkOf, loadRules, insertRow, updateRow } from "./rows.js";
+import { TIME_OFF, one, loadRules } from "./rows.js";
+import { linkOf } from "./staff.js";
 
 const shape = {
   staffId: uuid.nullable(), // null: the whole business
@@ -37,33 +38,30 @@ async function inside(q, cfg, off) {
 }
 
 export function createTimeOff(workspaceId, who, input) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const v = { staffId: null, ...input };
     ownOff(await linkOf(q, workspaceId, who), v.staffId);
     await cleanOff(c, cfg, v);
-    const { rows } = await insertRow(c, "crm_time_off", MAP, TIME_OFF, { workspace_id: workspaceId, branch_id: cfg.branchId }, v);
+    const rows = await insertRow(c, cfg, "crm_time_off", MAP, TIME_OFF, v, { branch_id: cfg.branchId });
     return { changes: { set: { timeOff: rows } }, id: rows[0].id, inside: await inside(q, cfg, rows[0]) };
   });
 }
 
 export function updateTimeOff(workspaceId, who, id, input) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const stored = await one(q, cfg, "crm_time_off", TIME_OFF, id, "Blocked time");
     const me = await linkOf(q, workspaceId, who);
     ownOff(me, stored.staffId);
     const next = { ...stored, ...input };
     ownOff(me, next.staffId);
     await cleanOff(c, cfg, next);
-    const { rows } = await updateRow(c, "crm_time_off", MAP, TIME_OFF, workspaceId, id, input);
+    const rows = await updateRow(c, cfg, "crm_time_off", MAP, TIME_OFF, id, input);
     return { changes: { set: { timeOff: rows } }, inside: await inside(q, cfg, rows[0]) };
   });
 }
 
 export function deleteTimeOff(workspaceId, who, id) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     const stored = await one(q, cfg, "crm_time_off", TIME_OFF, id, "Blocked time");
     ownOff(await linkOf(q, workspaceId, who), stored.staffId);
     await c.query("DELETE FROM crm_time_off WHERE workspace_id = $1 AND id = $2", [workspaceId, id]);

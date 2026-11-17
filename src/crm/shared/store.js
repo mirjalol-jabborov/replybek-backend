@@ -11,8 +11,8 @@
 //   done      handed over: the goods leave stock (a "sale" movement)
 //   cancelled called off: whatever was held is released; a finished order becomes a return
 // Stock changes only when an order crosses from one kind to another.
+// Delivery rules are in ./delivery.js; this file passes them on, so the app can import either.
 
-import { addDays, fromMin, toMin, weekday } from "./time.js";
 import { kindOf } from "./lists.js";
 import { missingFields } from "./fields.js";
 
@@ -57,20 +57,20 @@ export const stockState = (p) => (isOut(p) ? "out" : isLow(p) ? "low" : "ok");
 
 /* ───── Steps ───── */
 
-/** The kind of the step an order is in ("" for a step that is gone: it holds nothing). */
+/** The kind of the step an order is in ("" for a step that is gone: it holds nothing). The app's pages call kindOf by this name. */
 export const kindIn = kindOf;
 /** The steps an order goes through, in list order (every step except the cancelled one). */
 export const flowOf = (stages) => (stages || []).filter((s) => s.kind !== K.cancelled);
 /** The step after this one, or null at the end (or when the order is finished or cancelled). */
 export function nextStage(stages, status) {
-  const kind = kindIn(stages, status);
+  const kind = kindOf(stages, status);
   if (kind === K.done || kind === K.cancelled) return null;
   const flow = flowOf(stages);
   const i = flow.findIndex((s) => s.id === status);
   return i >= 0 ? flow[i + 1] || null : flow[0] || null;
 }
 /** Is an order still being worked on (not accepted yet, or accepted)? */
-export const isActive = (stages, order) => [K.open, K.reserved].includes(kindIn(stages, order.status));
+export const isActive = (stages, order) => [K.open, K.reserved].includes(kindOf(stages, order.status));
 /** Lines can be changed until the order is finished, cancelled or returned. */
 export const canEditLines = (stages, order) => isActive(stages, order) && !order.returned;
 
@@ -149,7 +149,7 @@ export function planMove({ stages, fields, order, stock }, to, { note } = {}) {
   if (order.status === to) return { ok: true, change: null, order: { status: to }, stock: [], movements: [], pay: 0, history: null };
   const target = (stages || []).find((s) => s.id === to);
   if (!target) return refuse({ code: "missing_stage", stage: to });
-  const from = kindIn(stages, order.status);
+  const from = kindOf(stages, order.status);
   const into = target.kind;
   const moved = { text: "moved", to, toName: target.name, ...(note ? { note } : {}) };
   const nothing = { ok: true, change: null, order: { status: to }, stock: [], movements: [], pay: 0, history: moved };
@@ -223,7 +223,7 @@ export function planLines({ stages, order, stock }, lines) {
   const clean = (lines || []).filter((l) => l.qty > 0);
   if (!clean.length) return refuse({ code: "no_lines" });
   const plan = { ok: true, lines: clean, stock: [], movements: [], history: { text: "edited" } };
-  if (kindIn(stages, order.status) !== K.reserved) return plan;
+  if (kindOf(stages, order.status) !== K.reserved) return plan;
   const before = qtyByVariant(order.lines);
   const after = qtyByVariant(clean);
   const more = {};
@@ -258,87 +258,4 @@ export function planCount(row, counted) {
   return { ok: true, diff, stock: [{ variantId: row.variantId, onHand: diff, reserved: 0 }], movements: [{ variantId: row.variantId, type: "adjust", qty: diff }] };
 }
 
-/* ───── Delivery rules (settings.delivery) ───── */
-
-export const DELIVERY_DEFAULTS = { time: "both", windows: [], daysOff: [], closed: [], sameDayUntil: "", prepMinutes: 0, maxDays: 30, override: true };
-/** The workspace's delivery rules with every key present. Takes settings.delivery. */
-export const rulesOf = (delivery) => ({ ...DELIVERY_DEFAULTS, ...(delivery || {}) });
-/** A window as it is kept on an order: "12:00–15:00". */
-export const windowText = (w) => `${w.from}–${w.to}`;
-
-/**
- * Why a day can't be planned, or null when it can. Only the rules about the day itself:
- * past_day (hard: nobody can plan it), closed_day { date, note }, day_off { weekday },
- * too_far { maxDays }, after_cutoff { time } (today, after the same-day cutoff).
- */
-export function dayProblem(rules, day, now) {
-  const nowDay = now.slice(0, 10);
-  if (day < nowDay) return { code: "past_day" };
-  const closed = (rules.closed || []).find((c) => c.date === day);
-  if (closed) return { code: "closed_day", date: day, note: closed.note || "" };
-  if ((rules.daysOff || []).includes(weekday(day))) return { code: "day_off", weekday: weekday(day) };
-  if (rules.maxDays && day > addDays(nowDay, rules.maxDays)) return { code: "too_far", maxDays: rules.maxDays };
-  if (day === nowDay && rules.sameDayUntil && now.slice(11, 16) > rules.sameDayUntil) return { code: "after_cutoff", time: rules.sameDayUntil };
-  return null;
-}
-/** The windows to offer for a day: today's windows that have already ended are left out. */
-export const windowsFor = (rules, day, now) => (rules.windows || []).filter((w) => day !== now.slice(0, 10) || w.to > now.slice(11, 16));
-/** The earliest time an order made now can be ready today ("" when there is no preparation time). */
-export const earliestToday = (rules, now) => (rules.prepMinutes ? fromMin(Math.min(24 * 60 - 1, toMin(now.slice(11, 16)) + rules.prepMinutes)) : "");
-
-const HARD = ["past_day"];
-/**
- * Checks a planned delivery against the rules: { hard: [reason], soft: [reason] }, both empty when
- * it is fine. delivery: { date, slot: "12:00–15:00" | "", time: "14:20" | "" }. An order without
- * a day is not checked. Besides the day's reasons (dayProblem): time_passed and window_ended
- * (today, already over) and too_soon { prepMinutes, earliest } (less than the preparation time
- * from now). Soft reasons are the workspace's own rules: the team may plan past them when
- * rules.override is on. Customers are never offered a day or time with any reason.
- */
-export function checkDelivery(delivery, settingsDelivery, now) {
-  const rules = rulesOf(settingsDelivery);
-  const reasons = [];
-  if (!delivery?.date) return { hard: [], soft: [] };
-  const day = dayProblem(rules, delivery.date, now);
-  if (day) reasons.push(day);
-  const nowMin = toMin(now.slice(11, 16));
-  const end = delivery.time || (delivery.slot ? delivery.slot.split("–")[1] : "");
-  if (delivery.date === now.slice(0, 10) && end && !day) {
-    if (toMin(end) <= nowMin) reasons.push({ code: delivery.time ? "time_passed" : "window_ended" });
-    else if (rules.prepMinutes && toMin(end) - nowMin < rules.prepMinutes) reasons.push({ code: "too_soon", prepMinutes: rules.prepMinutes, earliest: earliestToday(rules, now) });
-  }
-  return { hard: reasons.filter((r) => HARD.includes(r.code)), soft: reasons.filter((r) => !HARD.includes(r.code)) };
-}
-/** May this delivery be saved? Hard reasons never pass; soft ones pass with `force` when the workspace lets the team override. */
-export function deliveryAllowed(check, settingsDelivery, force) {
-  if (check.hard.length) return false;
-  return !check.soft.length || Boolean(force && rulesOf(settingsDelivery).override);
-}
-
-/**
- * The first delivery that keeps every rule, to start a new order with: the earliest allowed day,
- * and on it the first window (or exact time) that leaves enough time to prepare. Looks a week
- * ahead. `dayStart` is the business's opening time ("10:00" when not given).
- */
-export function suggestDelivery(settingsDelivery, now, dayStart = "10:00") {
-  const rules = rulesOf(settingsDelivery);
-  const exact = !rules.windows.length || rules.time === "exact";
-  const nowDay = now.slice(0, 10);
-  const fine = (d) => {
-    const c = checkDelivery(d, rules, now);
-    return !c.hard.length && !c.soft.length;
-  };
-  for (let i = 0; i <= 7; i++) {
-    const date = addDays(nowDay, i);
-    if (dayProblem(rules, date, now)) continue;
-    if (exact) {
-      const start = date === nowDay ? toMin(earliestToday(rules, now) || now.slice(11, 16)) : toMin(dayStart);
-      const time = fromMin(Math.min(23 * 60 + 55, Math.ceil(start / 5) * 5));
-      if (fine({ date, time, slot: "" })) return { date, slot: "", time };
-      continue;
-    }
-    const w = windowsFor(rules, date, now).find((x) => fine({ date, slot: windowText(x), time: "" }));
-    if (w) return { date, slot: windowText(w), time: "" };
-  }
-  return { date: nowDay, slot: "", time: "" };
-}
+export * from "./delivery.js";

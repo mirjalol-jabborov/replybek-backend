@@ -1,7 +1,7 @@
 // How the Booking module's rows read: the columns as the app gets them (the demo's field names,
 // moments as "2026-11-17T09:30"), and the loaders every route shares.
-import { HttpError, notFound } from "../../lib/http.js";
-import { wall } from "../db.js";
+import { notFound } from "../../lib/http.js";
+import { wall, isUuid } from "../db.js";
 import { stageIds } from "../shared/index.js";
 import { OPEN_KINDS } from "../shared/booking.js";
 import { addDays } from "../shared/time.js";
@@ -21,46 +21,11 @@ export const SERIES = `id, customer_id AS "customerId", staff_id AS "staffId", s
   price::float8 AS price, source, note, fields, every, weekdays, ${day("start_day")} AS "startDay", ${day("until")} AS until, count,
   ${day("through")} AS through, skipped, branch_id AS "branchId"`;
 
-export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** A client inside a transaction as the plain q(text, params) the loaders take. */
-export const asQ = (c) => (text, params) => c.query(text, params);
-
 /** One row of this workspace by id, or 404. Another workspace's id reads as "not found". */
 export async function one(q, cfg, table, cols, id, what) {
-  const { rows } = UUID.test(id) ? await q(`SELECT ${cols} FROM ${table} WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
+  const { rows } = isUuid(id) ? await q(`SELECT ${cols} FROM ${table} WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
   if (!rows[0]) throw notFound(`${what} not found`);
   return rows[0];
-}
-
-/**
- * How an entity's fields are stored: `columns` maps a field to its column where the names differ,
- * `json` lists the fields kept as JSONB.
- */
-function stored(map, v) {
-  const keys = Object.keys(v);
-  return { cols: keys.map((k) => map.columns?.[k] || k), values: keys.map((k) => (map.json?.includes(k) ? JSON.stringify(v[k]) : v[k])) };
-}
-/** INSERT of the fields in `v` plus the `base` columns; returns the new row as `ret` reads it. */
-export function insertRow(c, table, map, ret, base, v) {
-  const { cols, values } = stored(map, v);
-  const all = [...Object.keys(base), ...cols];
-  return c.query(`INSERT INTO ${table} (${all.join(", ")}) VALUES (${all.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING ${ret}`, [...Object.values(base), ...values]);
-}
-/** UPDATE of the fields in `v` on one row of the workspace. */
-export function updateRow(c, table, map, ret, workspaceId, id, v) {
-  const { cols, values } = stored(map, v);
-  return c.query(`UPDATE ${table} SET ${cols.map((k, i) => `${k} = $${i + 3}`).join(", ")} WHERE workspace_id = $1 AND id = $2 RETURNING ${ret}`, [workspaceId, id, ...values]);
-}
-
-/**
- * What the signed-in person is to the Booking module: { staffId, only }.
- * staffId: the specialist they are, if any. only: that same id when they may see and change
- * nothing but their own bookings (a team member with ownOnly; admins and the owner see all).
- */
-export async function linkOf(q, workspaceId, who) {
-  const { rows } = await q("SELECT id, own_only FROM crm_staff WHERE workspace_id = $1 AND user_id = $2", [workspaceId, who.user.id]);
-  const staffId = rows[0]?.id || null;
-  return { staffId, only: staffId && rows[0].own_only && who.role === "agent" ? staffId : null };
 }
 
 /**
@@ -94,15 +59,3 @@ export async function upcomingOf(q, cfg, { staffId = null, serviceId = null } = 
   );
   return rows;
 }
-
-/**
- * A rule refusal: 422 { code: "rules", hard, soft, override }. `override` says whether force could
- * pass the soft ones. The app speaks from the codes; `message` is for logs and API callers.
- */
-export const refusal = (cfg, result, message = result.hard.length ? "This time can't be booked." : "This time is outside the booking rules.") =>
-  new HttpError(422, message, {
-    code: "rules",
-    hard: result.hard,
-    soft: result.soft,
-    override: cfg.data.settings.rules?.override !== false,
-  });

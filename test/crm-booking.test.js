@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { crmOwner, teammate, base, query, drainJobs } from "./helpers/setup.js";
 import { nowIn, addDays, dayOf, weekday } from "../src/crm/shared/time.js";
 import { seriesDays } from "../src/crm/shared/booking.js";
-import { extendAll } from "../src/crm/booking/series.js";
+import { extendAll } from "../src/crm/booking/series-job.js";
 
 const today = () => dayOf(nowIn("Asia/Tashkent", new Date()));
 const D = (n) => addDays(today(), n);

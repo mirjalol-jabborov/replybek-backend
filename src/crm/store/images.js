@@ -8,9 +8,9 @@ import crypto from "node:crypto";
 import multer from "multer";
 import { HttpError, notFound } from "../../lib/http.js";
 import { putFile, getFile, removeFile } from "../../lib/storage.js";
-import { query, tx } from "../../db.js";
-import { write } from "../db.js";
-import { UUID, qOf, listProducts } from "./rows.js";
+import { query } from "../../db.js";
+import { write, isUuid } from "../db.js";
+import { storeChanges } from "./rows.js";
 
 // A picture is identified by its first bytes, never by its name or what the browser calls it.
 const bytes = (b, from, to) => b.subarray(from, to).toString("latin1");
@@ -51,15 +51,14 @@ export async function checkImage(c, workspaceId, path) {
 
 /**
  * Forgets these uploaded pictures, those no product shows, and removes their files. `stale`: also
- * every upload older than a day that no product took. The rows go in a transaction that holds the
- * same lock as every product write, and the files only after it commits: a write that wanted one
+ * every upload older than a day that no product took. The rows go in a write (the same lock as
+ * every product write), and the files only after it commits: a write that wanted one
  * of them either came first (and the picture stays) or finds the row gone and is refused.
  */
 async function forget(workspaceId, paths, { stale = false } = {}) {
   const names = paths.map((p) => uploadName(workspaceId, p)).filter(Boolean);
   if (!names.length && !stale) return;
-  const removed = await tx(async (c) => {
-    await c.query("SELECT 1 FROM crm_settings WHERE workspace_id = $1 FOR UPDATE", [workspaceId]);
+  const { removed } = await write(workspaceId, async (c) => {
     const { rows } = await c.query(
       `DELETE FROM crm_product_images i
         WHERE i.workspace_id = $1 AND (i.name = ANY($2::text[]) OR ($3 AND i.created_at < now() - interval '1 day'))
@@ -70,7 +69,7 @@ async function forget(workspaceId, paths, { stale = false } = {}) {
     // An upload from before its row existed (none in a new database) goes by its path alone.
     const legacy = names.filter((n) => !rows.some((r) => r.name === n));
     const { rows: shown } = legacy.length ? await c.query("SELECT image FROM crm_products WHERE workspace_id = $1 AND image = ANY($2::text[])", [workspaceId, legacy.map((n) => pathOf(workspaceId, n))]) : { rows: [] };
-    return [...rows.map((r) => r.name), ...legacy.filter((n) => !shown.some((s) => s.image === pathOf(workspaceId, n)))];
+    return { removed: [...rows.map((r) => r.name), ...legacy.filter((n) => !shown.some((s) => s.image === pathOf(workspaceId, n)))] };
   });
   for (const name of removed) await removeFile(keyOf(workspaceId, name)).catch(() => {});
 }
@@ -101,14 +100,14 @@ export async function uploadImage(workspace, file) {
 
 /** Uploads a picture and makes it the product's. The picture it had, if it was uploaded, is removed. */
 export async function setProductImage(workspace, productId, file) {
-  if (!UUID.test(productId)) throw notFound("Product not found");
+  if (!isUuid(productId)) throw notFound("Product not found");
   const { image: path } = await uploadImage(workspace, file);
   try {
-    const out = await write(workspace.id, async (c, cfg) => {
+    const out = await write(workspace.id, async (c, cfg, q) => {
       const stored = (await c.query("SELECT image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
       if (!stored) throw notFound("Product not found");
       await c.query("UPDATE crm_products SET image = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, productId, path]);
-      return { changes: { set: { products: await listProducts(qOf(c), cfg, [productId]) } }, image: path, old: stored.image };
+      return { changes: await storeChanges(q, cfg, { productIds: [productId] }), image: path, old: stored.image };
     });
     const { old, ...body } = out;
     await dropUpload(workspace.id, old);

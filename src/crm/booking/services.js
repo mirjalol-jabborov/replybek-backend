@@ -2,10 +2,10 @@
 // Setting them up is for admins.
 import { z } from "zod";
 import { HttpError } from "../../lib/http.js";
-import { write } from "../db.js";
+import { write, insertRow, updateRow } from "../db.js";
+import { label, money, someKey } from "../shapes.js";
 import { hasId } from "../shared/index.js";
-import { label, money, someKey } from "./shapes.js";
-import { SERVICE, STAFF, asQ, one, insertRow, updateRow, upcomingOf } from "./rows.js";
+import { SERVICE, STAFF, one, upcomingOf } from "./rows.js";
 
 const shape = {
   name: label(120, 1),
@@ -29,16 +29,16 @@ function cleanService(cfg, v, stored) {
 export function createService(workspaceId, input) {
   return write(workspaceId, async (c, cfg) => {
     cleanService(cfg, input);
-    const { rows } = await insertRow(c, "crm_services", MAP, SERVICE, { workspace_id: workspaceId }, input);
+    const rows = await insertRow(c, cfg, "crm_services", MAP, SERVICE, input);
     return { changes: { set: { services: rows } }, id: rows[0].id };
   });
 }
 
 export function updateService(workspaceId, id, input) {
-  return write(workspaceId, async (c, cfg) => {
-    const stored = await one(asQ(c), cfg, "crm_services", SERVICE, id, "Service");
+  return write(workspaceId, async (c, cfg, q) => {
+    const stored = await one(q, cfg, "crm_services", SERVICE, id, "Service");
     cleanService(cfg, input, stored);
-    const { rows } = await updateRow(c, "crm_services", MAP, SERVICE, workspaceId, id, input);
+    const rows = await updateRow(c, cfg, "crm_services", MAP, SERVICE, id, input);
     return { changes: { set: { services: rows } } };
   });
 }
@@ -48,8 +48,7 @@ export function updateService(workspaceId, id, input) {
  * off instead, so nobody new can book it. Past bookings keep its id and read as a removed service.
  */
 export function deleteService(workspaceId, id) {
-  return write(workspaceId, async (c, cfg) => {
-    const q = asQ(c);
+  return write(workspaceId, async (c, cfg, q) => {
     await one(q, cfg, "crm_services", SERVICE, id, "Service");
     const using = await upcomingOf(q, cfg, { serviceId: id });
     const series = (await c.query("SELECT count(*)::int AS n FROM crm_series WHERE workspace_id = $1 AND $2 = ANY(service_ids) AND (until IS NULL OR until > through)", [workspaceId, id])).rows[0].n;

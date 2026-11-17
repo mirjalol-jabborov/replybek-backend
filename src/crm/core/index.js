@@ -4,13 +4,13 @@ import { Router } from "express";
 import { wrap } from "../../lib/http.js";
 import { validate } from "../../validators.js";
 import { requireRole } from "../../middlewares/workspace.js";
-import { validateSettings, saveSettings } from "./settings.js";
+import { settingsSchema, saveSettings } from "./settings.js";
 import { customerCreateSchema, customerUpdateSchema, createCustomer, updateCustomer, deleteCustomer, customerHistory } from "./customers.js";
 
 export const router = Router({ mergeParams: true });
 const admin = requireRole("admin");
 
-router.put("/settings", admin, validateSettings, wrap(async (req, res) => res.json(await saveSettings(req.workspace, req.valid))));
+router.put("/settings", admin, validate(settingsSchema), wrap(async (req, res) => res.json(await saveSettings(req.workspace, req.valid))));
 
 router.post("/customers", validate(customerCreateSchema), wrap(async (req, res) => res.status(201).json(await createCustomer(req.workspace.id, req.valid))));
 router.put("/customers/:id", validate(customerUpdateSchema), wrap(async (req, res) => res.json(await updateCustomer(req.workspace.id, req.params.id, req.valid))));
