@@ -99,7 +99,7 @@ test("answers cite the exact page; Uzbek apostrophes and word endings match by k
   assert.equal(r.body.kind, "answer", JSON.stringify(r.body));
   assert.equal(r.body.sources[0].url, `${siteUrl}/uz/narx-qoshish/`);
   assert.equal(r.body.sources[0].name, "TMC ga narx qo‘shish");
-  const { keywordQuery, searchKnowledge } = await import("../src/services/retrieval.service.js");
+  const { keywordQuery, searchKnowledge } = await import("../src/agent/knowledge/retrieval.js");
   assert.equal(keywordQuery("TMC qanday yaratiladi?"), "tmc:* | yarati:*");
   assert.equal(keywordQuery("Qo‘shiladi"), "qoshi:*", "apostrophe removed, ending cut");
   const agentId = a.split("/").pop();
@@ -111,7 +111,7 @@ test("re-sync re-embeds only changed pages, adds new ones and drops removed ones
   const { b, w, a } = await setup();
   const add = (await b.call("POST", `${a}/sources/website`, { url: `${siteUrl}/uz/`, mode: "site" })).body;
   await drainJobs();
-  const { fakeAI } = await import("../src/ai.js");
+  const { fakeAI } = await import("../src/agent/answers/ai.js");
   const real = fakeAI.embed;
   let embedded = [];
   fakeAI.embed = async (texts) => {

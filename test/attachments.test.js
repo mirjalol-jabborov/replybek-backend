@@ -8,7 +8,7 @@ const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer 
 const site = { Origin: "https://northstar.example" };
 // The fake AI reads a PNG's "Description" text as what the photo shows.
 const photoOf = (said) => Buffer.concat([PNG, Buffer.from(`\0\0\0\x20tEXtDescription\0${said}`, "latin1")]);
-const { fakeAI } = await import("../src/ai.js");
+const { fakeAI } = await import("../src/agent/answers/ai.js");
 const readings = async (convId) => (await query("SELECT name, ai_text FROM attachments WHERE conversation_id = $1 ORDER BY created_at", [convId])).rows;
 
 /** A minimal .xlsx: a ZIP of stored (uncompressed) XML parts. */

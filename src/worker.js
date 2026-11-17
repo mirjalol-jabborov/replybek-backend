@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { startWorker } from "./core/jobs.js";
-import "./services/ingest.service.js";
-import "./services/integration-ai-jobs.service.js";
+import "./agent/knowledge/ingest.js";
+import "./agent/integrations/ai-jobs.js";
 
 startWorker();
 console.log("Replybek worker started.");

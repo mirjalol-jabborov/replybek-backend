@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { owner, browser, query } from "./helpers/setup.js";
-import { fakeAI } from "../src/ai.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
 import { languageOf, languageName } from "../src/core/languages.js";
 
 afterEach(() => {

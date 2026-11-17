@@ -5,7 +5,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { finishBrowserTest } from "./services/integration-testing.service.js";
+import { finishBrowserTest } from "./agent/integrations/testing.js";
 import { widgetToolResultSchema, validate } from "./validators.js";
 import { wrap } from "./core/http.js";
 import notFound from "./core/not-found.js";
@@ -14,11 +14,11 @@ import { requireUser, requireJsonForWrites, appOrigins } from "./core/auth/sessi
 import authRoutes from "./core/auth/routes.js";
 import * as teamRoutes from "./core/team/invite-routes.js";
 import workspaceRoutes from "./routes/workspace.routes.js";
-import widgetRoutes from "./routes/widget.routes.js";
-import oauthRoutes from "./routes/oauth.routes.js";
+import widgetRoutes from "./agent/channels/widget-routes.js";
+import oauthRoutes from "./agent/integrations/oauth-routes.js";
 import billingRoutes from "./core/billing/polar-routes.js";
-import channelsRoutes from "./routes/channels.routes.js";
-import "./services/ingest.service.js"; // registers the ingest job
+import channelsRoutes from "./agent/channels/telegram-routes.js";
+import "./agent/knowledge/ingest.js"; // registers the ingest job
 
 const app = express();
 app.disable("x-powered-by");

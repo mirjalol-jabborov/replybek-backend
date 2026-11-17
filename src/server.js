@@ -1,8 +1,8 @@
 import "dotenv/config";
 import app from "./app.js";
 import { startWorker } from "./core/jobs.js";
-import { startPollingChannels } from "./services/telegram-polling.service.js";
-import { forgetOldUpdates } from "./services/channels.service.js";
+import { startPollingChannels } from "./agent/channels/polling.js";
+import { forgetOldUpdates } from "./agent/channels/channels.js";
 
 const PORT = process.env.PORT || 3100;
 

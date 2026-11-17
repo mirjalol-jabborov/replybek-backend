@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { after, before, test } from "node:test";
 import { owner, browser, drainJobs, query } from "./helpers/setup.js";
-import { fakeAI } from "../src/ai.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
 
 // A tiny website for the crawler: two help pages, a page robots.txt forbids, and a 404.
 let site;
@@ -190,7 +190,7 @@ test("removing a source removes its passages", async () => {
 
 test("a temporary failure is retried by the job queue", async () => {
   const { b, a } = await setup();
-  const { fakeAI } = await import("../src/ai.js");
+  const { fakeAI } = await import("../src/agent/answers/ai.js");
   const realEmbed = fakeAI.embed;
   let failures = 1;
   fakeAI.embed = async (texts) => {

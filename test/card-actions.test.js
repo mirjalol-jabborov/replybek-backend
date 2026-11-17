@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test, before, after } from "node:test";
 import { owner, browser, query, drainJobs } from "./helpers/setup.js";
-import { fakeAI } from "../src/ai.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
 
 // A flower shop: a catalog, and a basket that takes one bouquet at a time.
 const shop = { added: [] };
