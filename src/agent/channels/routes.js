@@ -3,7 +3,9 @@ import { wrap } from "../../core/http.js";
 import { validate } from "../../core/validate.js";
 import { requireRole } from "../../core/workspaces/access.js";
 import { telegramChannelSchema, telegramBotSchema } from "./checks.js";
-import { listChannels, connectTelegram, disconnectChannel, botProfile, updateBot, businessStatus, startBusinessLink, unlinkBusiness } from "./channels.js";
+import { listChannels, connectTelegram, disconnectChannel } from "./channels.js";
+import { botProfile, updateBot } from "./bot-profile.js";
+import { businessStatus, startBusinessLink, unlinkBusiness } from "./business-setup.js";
 
 const router = Router({ mergeParams: true });
 const admin = requireRole("admin");

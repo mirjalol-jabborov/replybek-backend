@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { after, before, test } from "node:test";
 import { owner, browser, drainJobs, query } from "./helpers/setup.js";
-import { agentTools } from "../src/agent/integrations/integrations.js";
+import { agentTools } from "../src/agent/integrations/tools.js";
 import { startPolling, stopPolling } from "../src/agent/channels/polling.js";
 import { forgetOldUpdates } from "../src/agent/channels/channels.js";
 import { fakeAI } from "../src/agent/answers/ai.js";

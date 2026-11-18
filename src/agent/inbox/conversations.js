@@ -5,7 +5,7 @@ import { logActivity } from "../../core/activity/activity.js";
 import { ATTACHMENTS_SQL, checkFile, storeAttachment } from "./attachments.js";
 import { signal } from "../../core/events.js";
 import { deliver } from "./delivery.js";
-import { businessConnection } from "../channels/channels.js";
+import { businessConnection } from "../channels/business.js";
 
 const VIEWS = {
   all: "TRUE",
