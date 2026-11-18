@@ -29,6 +29,12 @@ export const isUuid = (id) => typeof id === "string" && UUID.test(id);
 export const ONE = "LIMIT 1";
 export const EACH = "OFFSET 0";
 
+/**
+ * One page of rows that were read with one more than `limit`: { rows, next }. `next` is the id of
+ * the page's last row, the cursor for the page after it (null on the last page).
+ */
+export const pageOf = (rows, limit) => ({ rows: rows.slice(0, limit), next: rows.length > limit ? rows[limit - 1].id : null });
+
 /** A client inside a transaction as the plain q(text, params) the readers take. */
 export const asQ = (c) => (text, params) => c.query(text, params);
 
@@ -67,7 +73,9 @@ export async function write(at, fn) {
   let cfg;
   const out = await tx(async (c) => {
     const q = asQ(c);
-    const bump = `UPDATE crm_settings s SET rev = s.rev + 1 WHERE s.workspace_id = $1 RETURNING ${ROW}`;
+    // crm.rev: the live updates of this transaction carry its rev (sql/crm/00-core.sql), so a
+    // screen can tell its own writes, which it already merged, from someone else's.
+    const bump = `UPDATE crm_settings s SET rev = s.rev + 1 WHERE s.workspace_id = $1 RETURNING ${ROW}, set_config('crm.rev', s.rev::text, true)`;
     let { rows } = await q(bump, [workspaceId]);
     if (!rows[0]) {
       await ensureCrm(q, workspaceId);

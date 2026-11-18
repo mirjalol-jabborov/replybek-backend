@@ -1,7 +1,9 @@
 // The Store module: products, the stock ledger and orders. What a module exports is described
 // in ../modules.js; the routes are in routes.js.
 import { asQ } from "../db.js";
-import { listProducts, listMovements, listOrders } from "./rows.js";
+import { stageIds } from "../shared/index.js";
+import { listProducts, listMovements, pageMovements, listOrders } from "./rows.js";
+import { orderCounts } from "./counts.js";
 
 export { router } from "./routes.js";
 export const keys = ["products", "movements", "orders"];
@@ -22,14 +24,30 @@ export { productCreateSchema, OPENING } from "./products.js";
 /* ───── What core asks a module ───── */
 
 // `branchId`: narrowed to one branch (?branch=, or a team member limited to one): its orders, its
-// ledger lines, and each product's stock there.
-export async function snapshot({ q, cfg, want, branchId }) {
+// ledger lines, and each product's stock there. `recent` (the window): every order that is open or
+// reserved, and every other one changed since its first day; the newest `moves` movements (the rest
+// come page by page from `next`). Products are always whole. `ids`: only those rows.
+export async function snapshot({ q, cfg, want, branchId, recent, ids }) {
   const out = {};
-  if (want("products")) out.products = await listProducts(q, cfg, undefined, branchId);
-  if (want("movements")) out.movements = await listMovements(q, cfg, undefined, branchId);
-  if (want("orders")) out.orders = await listOrders(q, cfg, { branchId });
-  return out;
+  const windows = {};
+  if (want("products")) out.products = await listProducts(q, cfg, ids || undefined, branchId);
+  if (want("movements")) {
+    if (recent) {
+      const page = await pageMovements(q, cfg, { branchId, limit: recent.moves });
+      out.movements = page.movements;
+      windows.movements = { limit: recent.moves, next: page.next };
+    } else out.movements = await listMovements(q, cfg, ids || undefined, branchId);
+  }
+  if (want("orders")) {
+    const window = recent ? { open: stageIds(cfg.data.orderStages, "open", "reserved"), since: recent.from } : {};
+    out.orders = await listOrders(q, cfg, { branchId, ...(ids ? { ids } : {}), ...window });
+    if (recent) windows.orders = { from: recent.from };
+  }
+  return recent ? { ...out, windows } : out;
 }
+
+/** The sidebar's and Today's numbers of orders (see counts.js). */
+export const counts = (ctx) => orderCounts(ctx.q, ctx.cfg, ctx.branchId || null);
 
 // Where each settings list is used in this module's rows. A payment method counts for the orders
 // that are to be paid by it and for those some money already came in by.

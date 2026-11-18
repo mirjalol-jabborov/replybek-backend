@@ -17,6 +17,7 @@ import { orderCreateSchema, orderUpdateSchema, createOrder, updateOrder, deleteO
 import { stepSchema, cancelSchema, moveOrder, cancelOrder } from "./steps.js";
 import { paySchema, refundSchema, payOrder, refundOrder } from "./payments.js";
 import { receipt } from "./receipt.js";
+import { ordersSchema, movementsSchema, browseOrders, browseMovements } from "./browse.js";
 
 export const router = Router({ mergeParams: true });
 const admin = requireRole("admin");
@@ -38,8 +39,12 @@ router.post("/stock/receive", validate(receiveSchema), wrap(async (req, res) => 
 router.post("/stock/write-off", validate(writeOffSchema), wrap(async (req, res) => res.json(await writeOff(ws(req), by(req), req.valid))));
 router.post("/stock/count", validate(countSchema), wrap(async (req, res) => res.json(await count(ws(req), by(req), req.valid))));
 
+// Older rows than the snapshot's window, a page at a time.
+router.get("/movements", validate(movementsSchema, "query"), wrap(async (req, res) => res.json(await browseMovements(ws(req).id, by(req), req.valid))));
+router.get("/orders", validate(ordersSchema, "query"), wrap(async (req, res) => res.json(await browseOrders(ws(req).id, by(req), req.valid))));
+
 // Orders
-router.post("/orders", validate(orderCreateSchema), wrap(async (req, res) => res.status(201).json(await createOrder(ws(req).id, by(req), req.valid))));
+router.post("/orders",validate(orderCreateSchema), wrap(async (req, res) => res.status(201).json(await createOrder(ws(req).id, by(req), req.valid))));
 router.put("/orders/:id", validate(orderUpdateSchema), wrap(async (req, res) => res.json(await updateOrder(ws(req), by(req), req.params.id, req.valid))));
 router.delete("/orders/:id", admin, wrap(async (req, res) => res.json(await deleteOrder(ws(req), req.params.id))));
 router.post("/orders/:id/step", validate(stepSchema), wrap(async (req, res) => res.json(await moveOrder(ws(req), by(req), req.params.id, req.valid))));

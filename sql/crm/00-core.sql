@@ -80,10 +80,75 @@ DROP INDEX IF EXISTS crm_customers_telegram;
 CREATE INDEX IF NOT EXISTS crm_customers_handle ON crm_customers (workspace_id, lower(telegram)) WHERE telegram <> '';
 
 -- ───── Live updates ─────
--- Every CRM table says when it changed: {"w": workspace, "t": "crm", "k": snapshot key} on the
--- same channel the inbox uses (replybek_notify in schema.sql). src/core/events.js
--- passes it on to open CRM screens, which then fetch snapshot?only=<key>. An UPDATE that changes
--- nothing stays quiet. The same payload sent twice in one transaction arrives once.
+-- Every CRM table says when it changed, on the same channel the inbox uses (replybek_notify in
+-- schema.sql). src/core/events.js passes it on to open CRM screens, which then fetch
+-- snapshot?only=<key>, or just the rows named (snapshot?only=<key>&ids=..., AS-BUILT-snapshot.md).
+-- One announcement per statement and workspace (not one per row, so a step removed from a board
+-- with 20,000 orders on it is one message):
+--   {"w": workspace, "t": "crm", "k": snapshot key, "i": [ids] | "many", "r": rev}
+--   {"w": workspace, "t": "crm", "k": snapshot key, "d": [ids] | "many", "r": rev}   rows deleted
+-- `i`: the snapshot rows that were added or changed (an order line names its order, a variant or a
+-- stock sum its product). `d`: rows of the key's own table that were deleted. More than 100 ids: "many".
+-- `r`: the write's rev (src/crm/db.js sets crm.rev in every write), left out for changes made outside one.
+-- Row contents never travel: screens fetch the rows by id. An UPDATE that changes nothing stays quiet.
+-- Arguments: the key; the column naming the snapshot row ('id', 'order_id', ...); 'variant' when
+-- that column is a variant id and the row is its product.
+CREATE OR REPLACE FUNCTION crm_announce_rows() RETURNS trigger AS $$
+DECLARE
+  col TEXT := COALESCE(NULLIF(TG_ARGV[1], ''), 'id');
+  gone BOOLEAN := TG_OP = 'DELETE' AND COALESCE(NULLIF(TG_ARGV[1], ''), 'id') = 'id';
+  rev TEXT := NULLIF(current_setting('crm.rev', true), '');
+  changed TEXT;
+  named TEXT;
+  r RECORD;
+BEGIN
+  changed := CASE TG_OP
+    WHEN 'INSERT' THEN 'SELECT to_jsonb(n) AS j FROM new_rows n'
+    WHEN 'DELETE' THEN 'SELECT to_jsonb(o) AS j FROM old_rows o'
+    -- Rows that differ, as they were and as they are: a line moved to another order names both.
+    ELSE '(SELECT to_jsonb(n) AS j FROM new_rows n EXCEPT SELECT to_jsonb(o) FROM old_rows o)
+          UNION ALL (SELECT to_jsonb(o) FROM old_rows o EXCEPT SELECT to_jsonb(n) FROM new_rows n)'
+  END;
+  named := format('SELECT (j->>''workspace_id'')::uuid AS w, (j->>%L)::uuid AS x FROM (%s) t', col, changed);
+  IF TG_ARGV[2] = 'variant' THEN
+    named := format('SELECT c.w, v.product_id AS x FROM (%s) c JOIN crm_variants v ON v.workspace_id = c.w AND v.id = c.x', named);
+  END IF;
+  FOR r IN EXECUTE format('SELECT w, array_agg(DISTINCT x) AS ids FROM (%s) c WHERE x IS NOT NULL GROUP BY w', named) LOOP
+    PERFORM pg_notify('replybek_events', json_strip_nulls(json_build_object(
+      'w', r.w, 't', 'crm', 'k', TG_ARGV[0],
+      CASE WHEN gone THEN 'd' ELSE 'i' END, CASE WHEN cardinality(r.ids) > 100 THEN to_json('many'::text) ELSE to_json(r.ids) END,
+      'r', rev::bigint))::text);
+  END LOOP;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- SELECT crm_watch('crm_order_lines', 'orders', 'order_id'): from now on the table announces its
+-- changes under that snapshot key, naming the rows by that column (its own id when left out). The
+-- table needs a workspace_id column. The one place these triggers are made: every CRM file calls it.
+-- Before, crm_watch(tbl, key) made a row trigger named crm_notify that named only the key; it is
+-- dropped here, and each call below and in the other files replaces that trigger.
+DROP FUNCTION IF EXISTS crm_watch(TEXT, TEXT);
+CREATE OR REPLACE FUNCTION crm_watch(tbl TEXT, key TEXT, col TEXT DEFAULT 'id', via TEXT DEFAULT '') RETURNS void AS $$
+BEGIN
+  EXECUTE format('DROP TRIGGER IF EXISTS crm_notify ON %I', tbl);
+  EXECUTE format('DROP TRIGGER IF EXISTS crm_announce_insert ON %I', tbl);
+  EXECUTE format('DROP TRIGGER IF EXISTS crm_announce_update ON %I', tbl);
+  EXECUTE format('DROP TRIGGER IF EXISTS crm_announce_delete ON %I', tbl);
+  EXECUTE format('CREATE TRIGGER crm_announce_insert AFTER INSERT ON %I REFERENCING NEW TABLE AS new_rows
+                  FOR EACH STATEMENT EXECUTE FUNCTION crm_announce_rows(%L, %L, %L)', tbl, key, col, via);
+  EXECUTE format('CREATE TRIGGER crm_announce_update AFTER UPDATE ON %I REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+                  FOR EACH STATEMENT EXECUTE FUNCTION crm_announce_rows(%L, %L, %L)', tbl, key, col, via);
+  EXECUTE format('CREATE TRIGGER crm_announce_delete AFTER DELETE ON %I REFERENCING OLD TABLE AS old_rows
+                  FOR EACH STATEMENT EXECUTE FUNCTION crm_announce_rows(%L, %L, %L)', tbl, key, col, via);
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT crm_watch('crm_customers', 'customers');
+SELECT crm_watch('crm_branches', 'branches');
+
+-- Settings speak up only when what the business edits changed: rev moves with every write. One
+-- row per workspace, so a row trigger, naming only the key: {"w": workspace, "t": "crm", "k": "settings"}.
 CREATE OR REPLACE FUNCTION crm_notify() RETURNS trigger AS $$
 DECLARE
   r RECORD;
@@ -94,19 +159,6 @@ BEGIN
   RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
-
--- SELECT crm_watch('crm_orders', 'orders'): from now on the table announces its changes under
--- that snapshot key. The table needs a workspace_id column.
-CREATE OR REPLACE FUNCTION crm_watch(tbl TEXT, key TEXT) RETURNS void AS $$
-BEGIN
-  EXECUTE format('DROP TRIGGER IF EXISTS crm_notify ON %I', tbl);
-  EXECUTE format('CREATE TRIGGER crm_notify AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION crm_notify(%L)', tbl, key);
-END;
-$$ LANGUAGE plpgsql;
-
-SELECT crm_watch('crm_customers', 'customers');
-SELECT crm_watch('crm_branches', 'branches');
--- Settings speak up only when what the business edits changed: rev moves with every write.
 DROP TRIGGER IF EXISTS crm_notify ON crm_settings;
 CREATE TRIGGER crm_notify AFTER UPDATE ON crm_settings FOR EACH ROW
   WHEN (OLD.data IS DISTINCT FROM NEW.data OR OLD.timezone IS DISTINCT FROM NEW.timezone)

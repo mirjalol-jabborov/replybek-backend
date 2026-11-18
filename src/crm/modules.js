@@ -5,8 +5,13 @@
 //
 //   keys             the snapshot keys it owns: ["orders", "products", "movements"]
 //   router           its routes, mounted at /w/:wid/crm (req.workspace, req.role, req.user are set)
-//   snapshot(ctx)    → { [key]: rows } for the keys asked for (ctx.want(key)); ctx = { q, workspace, role, user, cfg, want }
+//   snapshot(ctx)    → { [key]: rows } for the keys asked for (ctx.want(key)); ctx = { q, workspace, role, user, cfg, want,
+//                      branchId, recent, ids }. `recent` (?recent=1): { from (a day), days, moves }: a key that grows
+//                      with the business's age is cut to that window, and `windows: { [key]: what it holds }` says so.
+//                      `ids`: only these rows (the host also keeps every key to them, so a small list may ignore it).
 // and, when it needs them:
+//   counts(ctx)                              → { [key]: { name: n } }: numbers the sidebar and Today show, counted in the
+//                                              database (snapshot key `counts`)
 //   me(ctx)                                  → { staffId }: what this signed-in person is in the module
 //   countUses(c, workspaceId, list, ids)     → { [id]: n }: how many of its rows use these ids of a settings
 //                                              list ("sources", "apptStages", "orderStages", "deliveryMethods",

@@ -2,8 +2,10 @@
 // What a module exports is described in ../modules.js; the routes are in routes.js.
 // A team member linked to a specialist with ownOnly sees only their own bookings, in the
 // snapshot and in a customer's history too.
-import { APPT, SERIES, STAFF, SERVICE, TIME_OFF } from "./rows.js";
+import { APPT, SERIES, STAFF, SERVICE, TIME_OFF, listAppointments } from "./rows.js";
 import { linkOf } from "./staff.js";
+import { bookingCounts } from "./counts.js";
+import { stageIds } from "../shared/index.js";
 import "./series-job.js"; // registers the daily job that books what comes into view
 
 export { router } from "./routes.js";
@@ -31,6 +33,9 @@ export async function me(ctx) {
 /**
  * The module's part of the snapshot: one query per key asked for. `ctx.branchId`: narrowed to one
  * branch (?branch=, or a team member limited to one): its team, time off, bookings and series.
+ * `ctx.recent`: bookings from its first day on (`windows.appointments.from`; everything later is
+ * there), and older ones still waiting for confirmation, which the sidebar counts (counts.js).
+ * `ctx.ids`: only those bookings (the host keeps the other keys to them too).
  */
 export async function snapshot(ctx) {
   const { q, cfg, want } = ctx;
@@ -45,10 +50,19 @@ export async function snapshot(ctx) {
   await rows("timeOff", `SELECT ${TIME_OFF} FROM crm_time_off WHERE workspace_id = $1 AND ($2::uuid IS NULL OR branch_id = $2) ORDER BY start_at, id`, [w, b]);
   if (want("appointments") || want("series")) {
     const { only } = await linkFor(ctx);
-    await rows("appointments", `SELECT ${APPT("$2")} FROM crm_appointments WHERE workspace_id = $1 AND ($3::uuid IS NULL OR staff_id = $3) AND ($4::uuid IS NULL OR branch_id = $4) ORDER BY start_at, id`, [w, cfg.timezone, only, b]);
+    if (want("appointments")) {
+      const open = ctx.recent && stageIds(cfg.data.apptStages, "pending");
+      out.appointments = await listAppointments(q, cfg, { staffId: only, branchId: b, ids: ctx.ids, from: ctx.recent?.from, open });
+    }
     await rows("series", `SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND ($2::uuid IS NULL OR staff_id = $2) AND ($3::uuid IS NULL OR branch_id = $3) ORDER BY created_at, id`, [w, only, b]);
   }
+  if (ctx.recent && want("appointments")) out.windows = { appointments: { from: ctx.recent.from } };
   return out;
+}
+
+/** The sidebar's and Today's numbers of bookings (see counts.js). */
+export async function counts(ctx) {
+  return { appointments: await bookingCounts(ctx.q, ctx.cfg, { staffId: (await linkFor(ctx)).only, branchId: ctx.branchId || null }) };
 }
 
 /** How many bookings (or services) use these ids of a settings list: { [id]: n }. */
@@ -85,10 +99,5 @@ export async function customerUses(c, workspaceId, customerId) {
 /** A customer's bookings for their panel, newest first (one branch's, for a team member limited to it). */
 export async function customerHistory(ctx, customerId) {
   const { only } = await linkFor(ctx);
-  const { rows } = await ctx.q(
-    `SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND customer_id = $2 AND ($4::uuid IS NULL OR staff_id = $4) AND ($5::uuid IS NULL OR branch_id = $5)
-      ORDER BY start_at DESC, id`,
-    [ctx.cfg.workspaceId, customerId, ctx.cfg.timezone, only, ctx.branchId || null]
-  );
-  return { appointments: rows };
+  return { appointments: await listAppointments(ctx.q, ctx.cfg, { customerId, staffId: only, branchId: ctx.branchId || null, newest: true }) };
 }

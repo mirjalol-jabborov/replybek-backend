@@ -2,11 +2,12 @@
 // ones through here, so a customer is checked the same way wherever they come from.
 import { z } from "zod";
 import { notFound } from "../../core/http.js";
-import { read, write, wall, isUuid, asQ, insertRow, updateRow } from "../db.js";
+import { read, write, wall, isUuid, asQ, insertRow, updateRow, pageOf, ONE } from "../db.js";
 import { bad, conflict } from "../errors.js";
-import { someKey } from "../shapes.js";
+import { someKey, uuid } from "../shapes.js";
 import { modules, customerUses } from "../modules.js";
 import { cleanFields, hasId, normalPhone, same, telegramHandle } from "../shared/index.js";
+import { addDays, dayOf } from "../shared/time.js";
 
 /** The columns of a customer as the app reads it. `tz`: the parameter holding the workspace's time zone ("$2"). */
 export const customerCols = (tz) => `id, name, phone, telegram, instagram, source, tags, note, fields, ${wall("created_at", tz)} AS "createdAt"`;
@@ -31,6 +32,54 @@ export const customerUpdateSchema = z.object(shape).partial().strict().refine(so
 export async function listCustomers(q, cfg) {
   const { rows } = await q(`SELECT ${customerCols("$2")} FROM crm_customers WHERE workspace_id = $1 ORDER BY created_at, id`, [cfg.workspaceId, cfg.timezone]);
   return rows;
+}
+
+/** The windowed snapshot's customers: these (the ones its rows are about) and every one added since `from` (a day), oldest first. */
+export async function linkedCustomers(q, cfg, ids, from) {
+  // Each one looked up by its index (ONE), so the work follows the window, not the whole list.
+  const { rows } = await q(
+    `SELECT ${customerCols("$2")}
+       FROM (SELECT unnest($3::uuid[]) AS cid UNION SELECT id FROM crm_customers WHERE workspace_id = $1 AND created_at >= ($4::date::timestamp AT TIME ZONE $2)) x
+       JOIN LATERAL (SELECT * FROM crm_customers WHERE workspace_id = $1 AND id = x.cid ${ONE}) c ON true
+      ORDER BY created_at, id`,
+    [cfg.workspaceId, cfg.timezone, ids, from]
+  );
+  return rows;
+}
+
+/** For the snapshot's counts: how many customers there are, and how many were added in the last 30 days (Today). */
+export async function customerCounts(q, cfg) {
+  const { rows } = await q(
+    `SELECT (SELECT count(*)::int FROM crm_customers WHERE workspace_id = $1) AS total,
+            (SELECT count(*)::int FROM crm_customers WHERE workspace_id = $1 AND created_at >= ($2::date::timestamp AT TIME ZONE $3)) AS "newMonth"`,
+    [cfg.workspaceId, addDays(dayOf(cfg.now), -30), cfg.timezone]
+  );
+  return rows[0];
+}
+
+export const searchSchema = z
+  .object({
+    // Any part of the name, the phone (digits as stored: "+998901234567") or the Telegram handle, any letter case.
+    q: z.string().trim().max(80),
+    // The id of the last customer of the page before.
+    after: uuid,
+    limit: z.coerce.number().int().min(1).max(500),
+  })
+  .partial()
+  .strict();
+
+/** Customers oldest first, a page at a time, found by `q` when it is given: { customers, next }. */
+export function searchCustomers(workspaceId, { q: words = "", after, limit = 100 }) {
+  return read(workspaceId, async (q, cfg) => {
+    const params = [cfg.workspaceId, cfg.timezone];
+    const where = ["workspace_id = $1"];
+    // The same expression as the index crm_customers_search (sql/crm/90-windowing.sql), so it is used.
+    if (words) where.push(`lower(name || ' ' || phone || ' ' || telegram) LIKE $${params.push(`%${words.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`)}`);
+    if (after) where.push(`(created_at, id) > (SELECT created_at, id FROM crm_customers WHERE workspace_id = $1 AND id = $${params.push(after)})`);
+    const { rows } = await q(`SELECT ${customerCols("$2")} FROM crm_customers WHERE ${where.join(" AND ")} ORDER BY created_at, id LIMIT ${limit + 1}`, params);
+    const page = pageOf(rows, limit);
+    return { customers: page.rows, next: page.next };
+  });
 }
 
 /**

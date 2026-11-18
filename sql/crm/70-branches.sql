@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS crm_member_branches (
 );
 -- Who is limited to a branch, for its row in the snapshot.
 CREATE INDEX IF NOT EXISTS crm_member_branches_branch ON crm_member_branches (workspace_id, branch_id);
-SELECT crm_watch('crm_member_branches', 'branches');
+-- Announced as a change to the branch the person is limited to.
+SELECT crm_watch('crm_member_branches', 'branches', 'branch_id');
 
 -- ───── Rows carry the branch of their specialist ─────
 -- A booking, a repeat booking and a specialist's time off are where the specialist works: set

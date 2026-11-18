@@ -261,11 +261,12 @@ ALTER TABLE crm_orders ADD COLUMN IF NOT EXISTS customer_made BOOLEAN NOT NULL D
 CREATE INDEX IF NOT EXISTS crm_orders_customer_made ON crm_orders (workspace_id, created_at) WHERE customer_made;
 
 -- ───── Live updates ─────
--- Stock numbers are part of a product as the app reads it, so they announce "products".
+-- Stock numbers are part of a product as the app reads it, so they announce "products", naming
+-- the product (a stock sum through its variant); a line or a payment names its order.
 SELECT crm_watch('crm_products', 'products');
-SELECT crm_watch('crm_variants', 'products');
-SELECT crm_watch('crm_stock', 'products');
+SELECT crm_watch('crm_variants', 'products', 'product_id');
+SELECT crm_watch('crm_stock', 'products', 'variant_id', 'variant');
 SELECT crm_watch('crm_stock_moves', 'movements');
 SELECT crm_watch('crm_orders', 'orders');
-SELECT crm_watch('crm_order_lines', 'orders');
-SELECT crm_watch('crm_payments', 'orders');
+SELECT crm_watch('crm_order_lines', 'orders', 'order_id');
+SELECT crm_watch('crm_payments', 'orders', 'order_id');

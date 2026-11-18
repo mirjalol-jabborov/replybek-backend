@@ -5,10 +5,11 @@
 // as a fallback, so a dropped connection only makes updates slower, never lost.
 // Signals (someone is typing) are different: nothing is stored, the event carries what screens
 // show, and it goes out at once as a named event (`event: typing`).
-// The CRM's tables announce themselves the same way (crm_notify in sql/crm/00-core.sql) as
-// {"w": workspace, "t": "crm", "k": snapshot key}. Those go out as their own named event
-// (`event: crm`, data {"k": [keys]}), so the inbox's screens, which read unnamed messages, never
-// see them. They reach the workspace's stream and the CRM's own (`crm:<workspace>`).
+// The CRM's tables announce themselves the same way (sql/crm/00-core.sql, crm_watch) as
+// {"w": workspace, "t": "crm", "k": snapshot key, "i"|"d": [row ids] | "many", "r": rev}. Those go
+// out as their own named event (`event: crm`, data {"k": [keys]}), so the inbox's screens, which
+// read unnamed messages, never see them. They reach the workspace's stream and the CRM's own
+// (`crm:<workspace>`); a stream opened with `rows` also says which rows (see crmEvent).
 import { EventEmitter } from "node:events";
 import pkg from "pg";
 import { dbConfig } from "./db-config.js";
@@ -18,6 +19,7 @@ const CHANNEL = "replybek_events";
 const HEARTBEAT_MS = 25 * 1000;      // proxies (Cloudflare: 100 s) close connections that go quiet
 const MAX_STREAM_MS = 30 * 60 * 1000; // streams end now and then; clients reconnect on their own
 const BATCH_MS = 120;                 // a reply touches several rows: send one event for them
+const MAX_IDS = 200;                  // more rows of one key in one event: "many", the screen reads the key again
 
 const bus = new EventEmitter();
 bus.setMaxListeners(0);
@@ -109,13 +111,56 @@ export function subscribe(keys, fn) {
 }
 
 /**
+ * What one batch of CRM announcements says, gathered as they arrive. `data(rows)`:
+ *   { k: [snapshot keys] }, and with `rows` also
+ *   ids:  { [key]: [row ids added or changed] | "many" }   a key that names no rows (settings) is not in it
+ *   del:  { [key]: [row ids deleted] }
+ *   revs: [the writes' revs]                                only when every change came from a write
+ * Row contents never travel: the screen fetches snapshot?only=<key>&ids=<ids>.
+ */
+function crmEvent() {
+  const keys = new Map();
+  const revs = new Set();
+  let unknownRev = false;
+  const take = (e) => {
+    const k = keys.get(e.k) || { ids: new Set(), del: new Set(), many: false, named: false };
+    keys.set(e.k, k);
+    if (e.r === undefined) unknownRev = true;
+    else revs.add(e.r);
+    for (const [list, sent] of [[k.ids, e.i], [k.del, e.d]]) {
+      if (sent === undefined) continue;
+      k.named = true;
+      if (sent === "many") k.many = true;
+      else for (const id of sent) list.add(id);
+    }
+  };
+  const data = (rows) => {
+    if (!rows) return { k: [...keys.keys()] };
+    const out = { k: [...keys.keys()], ids: {}, del: {} };
+    for (const [key, k] of keys) {
+      if (!k.named) continue;
+      for (const id of k.del) k.ids.delete(id);
+      if (k.many || k.ids.size + k.del.size > MAX_IDS) {
+        out.ids[key] = "many";
+        continue;
+      }
+      if (k.ids.size) out.ids[key] = [...k.ids];
+      if (k.del.size) out.del[key] = [...k.del];
+    }
+    if (!unknownRev) out.revs = [...revs].sort((a, b) => a - b);
+    return out;
+  };
+  return { take, data, get size() { return keys.size; } };
+}
+
+/**
  * Turns this response into an event stream for the given keys. `accept(event)` filters what this
  * viewer is told about. Each message is `data: {"c": [conversation ids]}`; `{"resync": true}`
- * means "fetch everything". CRM changes come as `event: crm` with `data: {"k": [snapshot keys]}`.
- * The first message, `event: ready`, comes once events flow, so a client that fetches on ready
- * can't miss a change made while it was connecting.
+ * means "fetch everything". CRM changes come as `event: crm` with `data: {"k": [snapshot keys]}`,
+ * and with `rows` also which rows changed (crmEvent above). The first message, `event: ready`,
+ * comes once events flow, so a client that fetches on ready can't miss a change made while it was connecting.
  */
-export async function stream(req, res, keys, accept = () => true) {
+export async function stream(req, res, keys, accept = () => true, { rows = false } = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -123,21 +168,21 @@ export async function stream(req, res, keys, accept = () => true) {
   });
   res.write("retry: 3000\n\n");
   let changed = new Set();
-  let crm = new Set();
+  let crm = crmEvent();
   let resync = false;
   let batch = null;
   const flush = () => {
     batch = null;
     if (resync || changed.size) res.write(`data: ${JSON.stringify(resync ? { resync: true } : { c: [...changed] })}\n\n`);
     // After a resync the screen fetches everything anyway.
-    if (crm.size && !resync) res.write(`event: crm\ndata: ${JSON.stringify({ k: [...crm] })}\n\n`);
+    if (crm.size && !resync) res.write(`event: crm\ndata: ${JSON.stringify(crm.data(rows))}\n\n`);
     changed = new Set();
-    crm = new Set();
+    crm = crmEvent();
     resync = false;
   };
   const unsubscribe = subscribe(keys, (e) => {
     if (e.s) return void res.write(`event: ${e.s}\ndata: ${JSON.stringify(e.d)}\n\n`);
-    if (e.t === "crm") crm.add(e.k);
+    if (e.t === "crm") crm.take(e);
     else if (e.resync) resync = true;
     else if (accept(e)) changed.add(e.c);
     else return;

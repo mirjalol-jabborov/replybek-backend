@@ -3,15 +3,15 @@
 // don't notice the server. Nothing in this folder imports the AI agent's code and the agent's code
 // imports nothing from here: the two products meet only in src/bridge.
 //
-// Reads: GET /snapshot gives the whole workspace; ?only=orders,products gives just those keys.
+// Reads: GET /snapshot gives the whole workspace; ?only=orders,products gives just those keys;
+// ?recent=1 cuts the keys that grow to a window; ?only=orders&ids=a,b gives just those rows.
 // Writes answer with { changes: { set, del, top }, rev } (see changes.js), and every table says
-// when it changed (crm_notify in sql/crm/00-core.sql), so other open screens fetch what moved.
+// when it changed (sql/crm/00-core.sql), so other open screens fetch what moved.
 import { Router } from "express";
-import { HttpError, wrap } from "../core/http.js";
+import { wrap } from "../core/http.js";
 import { stream } from "../core/events.js";
-import { read } from "./db.js";
-import { TOP_KEYS } from "./defaults.js";
 import { modules } from "./modules.js";
+import { snapshot, parseAsk } from "./snapshot.js";
 import * as booking from "./booking/index.js";
 import * as store from "./store/index.js";
 import * as notices from "./notices/index.js";
@@ -19,8 +19,6 @@ import * as publicPages from "./public/index.js";
 import * as reports from "./reports/index.js";
 import * as exchange from "./exchange/index.js";
 import { router as core } from "./core/index.js";
-import { view } from "./core/settings.js";
-import { listCustomers } from "./core/customers.js";
 import * as branches from "./branches/index.js";
 
 modules.push(booking, store, notices, publicPages, reports, exchange, branches);
@@ -37,58 +35,14 @@ router.use((req, res, next) => {
 });
 router.use(branches.scope);
 
-// Who is looking, and the workspace around the rows. Always small, so every full snapshot has them.
-const ABOUT = ["id", "name", "role", "me", "packages"];
-const KEYS = () => new Set(["rev", ...ABOUT, ...TOP_KEYS, "customers", ...modules.flatMap((m) => m.keys)]);
-
-/**
- * The workspace as the app's `db`. One unchanging picture: every part is read in the same
- * transaction, so `rev` and the rows belong together. ?branch=<id> narrows the rows to one branch.
- */
-function snapshot(req, only) {
-  return read(req.workspace.id, async (q, cfg) => {
-    const want = (key) => !only || only.has(key);
-    const ctx = req.ctx({ q, cfg, want, branchId: await branches.narrowTo(q, cfg, req.query.branch, req.branchOnly) });
-    const out = { rev: cfg.rev };
-    if (want("id")) out.id = req.workspace.id;
-    if (want("name")) out.name = req.workspace.name;
-    if (want("role")) out.role = req.role;
-    if (want("packages")) out.packages = req.workspace.products;
-    if (want("me")) {
-      // A module can add what this person is to it: Booking links a team member to a specialist.
-      out.me = { id: req.user.id, name: req.user.name, staffId: null };
-      for (const m of modules) if (m.me) Object.assign(out.me, await m.me(ctx));
-    }
-    const lists = view(cfg.data, req.workspace, cfg.timezone);
-    for (const key of TOP_KEYS) if (want(key)) out[key] = lists[key];
-    if (want("customers")) out.customers = await listCustomers(q, cfg);
-    for (const m of modules) {
-      const mine = m.keys.filter(want);
-      if (!mine.length) continue;
-      const part = await m.snapshot(ctx);
-      for (const key of mine) out[key] = part[key] || [];
-    }
-    return out;
-  });
-}
-
-router.get("/snapshot", wrap(async (req, res) => {
-  let only = null;
-  if (typeof req.query.only === "string") {
-    only = new Set(req.query.only.split(",").map((k) => k.trim()).filter(Boolean));
-    const known = KEYS();
-    const unknown = [...only].find((k) => !known.has(k));
-    if (unknown) throw new HttpError(400, `There is no "${unknown}" in the snapshot.`, { code: "bad_key", key: unknown });
-    // The editable lists are saved together and announced as one key, "settings": asking for it gives them all.
-    if (only.has("settings")) for (const k of TOP_KEYS) only.add(k);
-  }
-  res.json(await snapshot(req, only));
-}));
+// The workspace as the app's `db`, whole, windowed (?recent=1) or a few rows by id (snapshot.js).
+router.get("/snapshot", wrap(async (req, res) => res.json(await snapshot(req, parseAsk(req.query)))));
 
 // Live updates for the CRM's screens: `event: crm` with data {"k": [snapshot keys]} (see
 // src/core/events.js). GET /w/:wid/stream carries the same events; this stream carries only them,
-// and an open CRM doesn't count as "someone is watching the inbox".
-router.get("/stream", wrap((req, res) => stream(req, res, [`crm:${req.workspace.id}`])));
+// and an open CRM doesn't count as "someone is watching the inbox". ?rows=1: the events also say
+// which rows changed ({ k, ids, del, revs }), so a screen fetches those rows instead of whole keys.
+router.get("/stream", wrap((req, res) => stream(req, res, [`crm:${req.workspace.id}`], undefined, { rows: req.query.rows === "1" })));
 
 router.use(core);
 for (const m of modules) router.use(m.router);

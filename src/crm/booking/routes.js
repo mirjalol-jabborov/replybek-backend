@@ -15,6 +15,7 @@ import * as appts from "./appointments.js";
 import * as steps from "./steps.js";
 import * as series from "./series.js";
 import * as free from "./free-times.js";
+import * as browse from "./browse.js";
 
 export const router = Router({ mergeParams: true });
 const admin = requireRole("admin");
@@ -36,6 +37,8 @@ router.post("/time-off", validate(off.timeOffCreateSchema), route((req) => off.c
 router.put("/time-off/:id", validate(off.timeOffUpdateSchema), route((req) => off.updateTimeOff(wid(req), who(req), req.params.id, req.valid)));
 router.delete("/time-off/:id", route((req) => off.deleteTimeOff(wid(req), who(req), req.params.id)));
 
+// Bookings outside the snapshot's window, a page at a time.
+router.get("/appointments", validate(browse.browseSchema, "query"), route((req) => browse.browseAppointments(wid(req), who(req), req.valid)));
 router.post("/appointments", validate(appts.createSchema), route((req) => appts.bookAppointment(wid(req), who(req), req.valid), 201));
 router.put("/appointments/:id", validate(appts.editSchema), route((req) => appts.editAppointment(wid(req), who(req), req.params.id, req.valid)));
 // Dragging on the calendar: an edit of just the time and the specialist.

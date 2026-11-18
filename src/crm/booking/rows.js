@@ -22,6 +22,34 @@ export const SERIES = `id, customer_id AS "customerId", staff_id AS "staffId", s
   price::float8 AS price, source, note, fields, every, weekdays, ${day("start_day")} AS "startDay", ${day("until")} AS until, count,
   ${day("through")} AS through, skipped, branch_id AS "branchId"`;
 
+/**
+ * Bookings in the calendar's order (start, then id), or `newest` first (a customer's panel).
+ * `where`, any of: `ids`; `from`, `to` (days, both included); `open` (step ids: with `from`, the
+ * bookings in these steps come too, whatever their day); `staffId`; `customerId`; `branchId`; `after`
+ * (a booking's id: the ones after it in the calendar's order, for the next page); `limit`. Each part
+ * is an index range or a filter on one (crm_appointments_workspace, _status, _staff, _customer, _branch).
+ */
+export async function listAppointments(q, cfg, where = {}) {
+  if (where.ids && !where.ids.length) return [];
+  const params = [cfg.workspaceId, cfg.timezone];
+  const and = ["workspace_id = $1"];
+  const add = (sql, ...values) => and.push(values.reduce((text, v) => text.replace("$x", `$${params.push(v)}`), sql));
+  if (where.ids) add("id = ANY($x::uuid[])", where.ids);
+  if (where.from && where.open) add("(start_at >= $x::date OR status = ANY($x::text[]))", where.from, where.open);
+  else if (where.from) add("start_at >= $x::date", where.from);
+  if (where.to) add("start_at < $x::date + 1", where.to);
+  if (where.staffId) add("staff_id = $x", where.staffId);
+  if (where.customerId) add("customer_id = $x", where.customerId);
+  if (where.branchId) add("branch_id = $x", where.branchId);
+  if (where.after) add("(start_at, id) > (SELECT start_at, id FROM crm_appointments WHERE workspace_id = $1 AND id = $x)", where.after);
+  const { rows } = await q(
+    `SELECT ${APPT("$2")} FROM crm_appointments WHERE ${and.join(" AND ")}
+      ORDER BY ${where.newest ? "start_at DESC, id" : "start_at, id"} ${where.limit ? `LIMIT ${Number(where.limit)}` : ""}`,
+    params
+  );
+  return rows;
+}
+
 /** One row of this workspace by id, or 404. Another workspace's id reads as "not found". */
 export async function one(q, cfg, table, cols, id, what) {
   const { rows } = isUuid(id) ? await q(`SELECT ${cols} FROM ${table} WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
