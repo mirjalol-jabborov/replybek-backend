@@ -74,15 +74,15 @@ const visitsOf = async (c, cfg, id, from) =>
  * Books one day of a series, if the rules allow it with no reasons at all.
  * Returns { row } or { skip: { day, hard, soft } }. `db` (the rules' data) gains the new booking.
  */
-async function bookDay(c, cfg, db, s, on, stage, createdBy) {
+async function bookDay(c, cfg, db, s, on, stage, who) {
   const draft = { staffId: s.staffId, serviceIds: s.serviceIds, start: at(on, s.time), duration: s.duration };
   const result = check(db, draft, { by: "team", now: cfg.now });
   if (!isClean(result)) return { skip: { day: on, ...result } };
   try {
     const row = await insertAppointment(c, cfg, {
       ...draft, customerId: s.customerId, price: s.price, status: stage.id, busy: kindHolds(stage.kind), source: s.source, note: s.note, fields: s.fields,
-      seriesId: s.id, seriesDay: on, createdBy,
-    });
+      seriesId: s.id, seriesDay: on,
+    }, who);
     db.appointments.push(row);
     return { row };
   } catch (e) {
@@ -104,9 +104,11 @@ export const firstToBook = (cfg, s) => {
  * ahead. `have`: the days after `through` that have a visit of the series already (a new series
  * has none), left alone: after maxDays was lowered, a change sets `through` back to the horizon
  * while visits further ahead stay. `db`: the rules' data, when the caller read it for many series.
+ * `who`: who books the visits (the person making or changing the series; for the daily job, the
+ * one who made it), kept on each as its createdBy.
  * Returns { series (as stored now), created: [rows], skipped: [{ day, hard, soft }] }.
  */
-export async function extend(c, cfg, s, createdBy, { db: known, have = new Set() } = {}) {
+export async function extend(c, cfg, s, who, { db: known, have = new Set() } = {}) {
   const horizon = horizonOf(cfg);
   if (horizon <= s.through) return { series: s, created: [], skipped: [] };
   const days = seriesDays(s, firstToBook(cfg, s), horizon).filter((d) => !have.has(d));
@@ -116,7 +118,7 @@ export async function extend(c, cfg, s, createdBy, { db: known, have = new Set()
     const stage = startStage(cfg.data.apptStages, "team");
     const db = known || (await loadRules(asQ(c), cfg, days[0], days[days.length - 1]));
     for (const on of days) {
-      const r = stage ? await bookDay(c, cfg, db, s, on, stage, createdBy) : { skip: { day: on, hard: [{ code: "no_steps" }], soft: [] } };
+      const r = stage ? await bookDay(c, cfg, db, s, on, stage, who) : { skip: { day: on, hard: [{ code: "no_steps" }], soft: [] } };
       if (r.row) created.push(r.row);
       else skipped.push(r.skip);
     }
@@ -153,7 +155,7 @@ export function createSeries(workspaceId, who, body) {
       [workspaceId, branchId, a.customerId, a.staffId, a.serviceIds, hmOf(a.start), a.duration, a.price, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), body.every || 1, weekdays, first, body.until || null, body.count || null, who.user.id]
     );
     const anchor = (await c.query(`UPDATE crm_appointments SET series_id = $3, series_day = $4 WHERE workspace_id = $1 AND id = $2 RETURNING ${APPT("$5")}`, [workspaceId, a.id, rows[0].id, first, cfg.timezone])).rows[0];
-    const { series, created, skipped } = await extend(c, cfg, rows[0], who.user.id);
+    const { series, created, skipped } = await extend(c, cfg, rows[0], who);
     await keepExtending(c);
     return { changes: { set: { series: [series], appointments: [anchor, ...created] } }, id: series.id, created: created.map((r) => r.id), skipped };
   });
@@ -221,7 +223,7 @@ export function changeSeries(workspaceId, who, id, body) {
       if (!v) {
         // Past the horizon, the daily job books it once it comes into view.
         if (on > horizon) continue;
-        const r = stage ? await bookDay(c, cfg, db, next, on, stage, who.user.id) : { skip: { day: on, hard: [{ code: "no_steps" }], soft: [] } };
+        const r = stage ? await bookDay(c, cfg, db, next, on, stage, who) : { skip: { day: on, hard: [{ code: "no_steps" }], soft: [] } };
         if (r.row) set.push(r.row), out.created.push(r.row.id);
         else out.skipped.push(r.skip);
         continue;

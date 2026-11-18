@@ -193,6 +193,37 @@ test("products: preview, every skip reason, apply with opening stock", async () 
   assert.equal(done.changes.set.products.length, 3);
 });
 
+test("products: opening stock arrives at the branch the import names, as a receipt does; a closed branch is refused", async () => {
+  const o = await shop();
+  const branch = (await post(o, "/branches", { name: "Chilonzor" })).id;
+  const header = ["Product", "SKU", "Stock"];
+  const send = (rows, qs = "") => {
+    const form = new FormData();
+    form.append("file", new Blob([book(header, rows)]), "file.xlsx");
+    return o.b.call("POST", `${o.crm}/import/products${qs}`, form);
+  };
+  // Named: the receipt is at that branch.
+  const p = ok(await send([["Vase", "V-1", "7"]], `?branchId=${branch}`));
+  const done = ok(await apply(o, p.token));
+  const [receipt] = done.changes.set.movements;
+  assert.deepEqual([receipt.type, receipt.qty, receipt.branchId], ["receipt", 7, branch]);
+  assert.deepEqual(done.changes.set.products[0].branches[branch], { stock: 7, reserved: 0 });
+  // Not named: the default branch, as a receipt with no branch.
+  const def = (await snap(o, "branches")).branches.find((b) => b.default).id;
+  const plain = ok(await apply(o, ok(await send([["Bowl", "B-1", "2"]])).token));
+  assert.equal(plain.changes.set.movements[0].branchId, def);
+  // Another workspace's branch, or none: bad_branch. A closed one: branch_closed, at the preview and again at apply.
+  const r = await send([["Cup", "C-1", "1"]], `?branchId=${crypto.randomUUID()}`);
+  assert.deepEqual([r.status, r.body.code], [400, "bad_branch"]);
+  const waiting = ok(await send([["Cup", "C-1", "1"]], `?branchId=${branch}`));
+  ok(await o.b.call("PUT", `${o.crm}/branches/${branch}`, { active: false }));
+  const closed = await send([["Plate", "P-1", "1"]], `?branchId=${branch}`);
+  assert.deepEqual([closed.status, closed.body.code], [409, "branch_closed"]);
+  const late = await apply(o, waiting.token);
+  assert.deepEqual([late.status, late.body.code], [409, "branch_closed"]);
+  assert.equal((await snap(o, "products")).products.some((x) => x.name === "Cup"), false, "nothing saved");
+});
+
 test("previews: another workspace's, another person's, expired and out of date are refused", async () => {
   const o = await shop();
   const file = book(["Name", "Phone"], [["Sardor", "90 700 00 01"]]);

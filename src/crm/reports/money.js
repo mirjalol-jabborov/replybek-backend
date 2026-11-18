@@ -11,19 +11,12 @@
 // - A refund (a minus payment) of a handed-over order is its own line, on the day it was given back
 //   (or the hand-over day, if earlier). So orders less refunds is what the order panels say was paid.
 
+import { ONE, EACH } from "../db.js";
+
 /** The span as instants, for columns that are real moments (payments, the ledger). */
 export const FROM = "($3::date::timestamp AT TIME ZONE $2)";
 export const END = "($4::date::timestamp AT TIME ZONE $2)";
 
-/**
- * Ends a LATERAL subquery that looks rows up for each row before it (an order's payments, a
- * customer's earlier visits), so the work follows the span, not the history. Postgres folds a
- * plain LATERAL subquery into a join, and may then answer it by reading the workspace's whole
- * table (a hash join); one with LIMIT or OFFSET stays as it is and is run by its index.
- * ONE: the row, or the first that fits. EACH: all of them.
- */
-export const ONE = "LIMIT 1";
-export const EACH = "OFFSET 0";
 
 /** `handed`: (order_id, at, customer_id, branch_id) for every order that may have money in the span, with when it was handed over. */
 export const HANDED = `

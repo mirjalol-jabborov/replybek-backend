@@ -409,6 +409,11 @@ test("a team member limited to one branch sees and changes only it", async () =>
   refused(await as("POST", "/stock/transfer", { fromBranchId: o.B, toBranchId: o.A, lines: [{ variantId: v, qty: 1 }] }), 403, "other_branch");
   const opened = ok(await as("POST", "/products", { name: "Tulips", price: 1, opening: 2 }), 201);
   assert.equal(opened.changes.set.movements[0].branchId, o.B, "opening stock at their branch");
+  // A product's new picture answers with their branch's numbers too.
+  const form = new FormData();
+  form.append("file", new Blob([Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex")], { type: "image/png" }), "a.png");
+  const pictured = ok(await mate.b.call("POST", `${o.crm}/products/${p.id}/image`, form)).changes.set.products[0];
+  assert.deepEqual([pictured.stock, "branches" in pictured], [5, false]);
   // Orders: made at B; A's can't be seen or changed.
   const mine = ok(await as("POST", "/orders", { customerId: o.c1, delivery: { type: "pickup" }, lines: [{ variantId: v, qty: 1 }] }), 201);
   assert.equal(mine.changes.set.orders[0].branchId, o.B);

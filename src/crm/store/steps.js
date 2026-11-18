@@ -30,16 +30,17 @@ export async function applyMove(c, cfg, user, order, to, text) {
   const moveIds = await postMoves(c, cfg, user, plan.movements, { orderId: order.id, branchId: order.branchId, note: plan.change === "returned" ? text || "" : "" });
   if (plan.change === "returned") await reviveReturned(c, cfg, variantIds);
   if (plan.history) {
-    const { text: what, ...about } = plan.history;
+    // The move, then what handing over took, as a payment taken by hand says it.
+    const lines = [plan.history, plan.paid].filter(Boolean).map(({ text: what, ...about }) => historyLine(cfg, user, what, about));
     await c.query("UPDATE crm_orders SET status = $3, returned = $4, history = history || $5::jsonb, updated_at = now() WHERE workspace_id = $1 AND id = $2", [
       cfg.workspaceId,
       order.id,
       plan.order.status,
       Boolean(plan.order.returned),
-      JSON.stringify([historyLine(cfg, user, what, about)]),
+      JSON.stringify(lines),
     ]);
   }
-  if (plan.pay > 0) await addPayment(c, cfg, user, order.id, plan.pay, order.payment);
+  if (plan.pay > 0) await addPayment(c, cfg, user, order.id, plan.pay, plan.paid.method);
   return { variantIds: plan.movements.length ? variantIds : [], moveIds, change: plan.change };
 }
 

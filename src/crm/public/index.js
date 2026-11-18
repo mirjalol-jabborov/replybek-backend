@@ -19,10 +19,16 @@ const slugQuery = z.object({ slug: z.string().max(40) }).strict();
 // GET /w/:wid/crm/public/slug?slug=x (admins): whether the settings tab may save this address.
 router.get("/public/slug", requireRole("admin"), validate(slugQuery, "query"), wrap(async (req, res) => res.json(await checkSlug(req.workspace.id, req.valid.slug))));
 
-/** Before settings are saved: a page's new address must not be another workspace's (409 slug_taken). */
+/**
+ * Before settings are saved: a page's new address must not be another workspace's (409 slug_taken).
+ * Saves of one address run one after another (a lock on the address until the save commits), so
+ * of several businesses taking it at once one gets it and the others hear slug_taken, the code the
+ * address check answers, instead of meeting the unique index.
+ */
 export async function checkSettings(c, cfg, next) {
   const slug = next.settings?.publicPage?.slug;
   if (!slug || slug === cfg.data.settings.publicPage?.slug) return;
+  await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`crm_public_slug:${slug}`]);
   const owner = await slugOwner(slug, asQ(c));
   if (owner && owner.id !== cfg.workspaceId) throw conflict("Another business has this address.", "slug_taken");
 }

@@ -500,3 +500,39 @@ test("a paid CRM alone never gives the AI agent: added through POST /products it
   assert.deepEqual((await o.b.call("POST", `${w}/products`, { add: "agent" })).body, { products: ["crm", "agent"], changed: true });
   assert.equal((await query("SELECT billing_package FROM workspaces WHERE id = $1", [o.ws.id])).rows[0].billing_package, "both");
 });
+
+test("the business's public pages: while its billed CRM is unpaid customers can look but not book, cancel or order", async () => {
+  const { browser } = setup;
+  const { addDays, dayOf, nowIn } = await import("../src/crm/shared/time.js");
+  const day = addDays(dayOf(nowIn("Asia/Tashkent", new Date())), 2);
+  const o = await crmOwner();
+  const crm = `/w/${o.ws.id}/crm`;
+  const post = async (path, body) => (await o.b.call("POST", crm + path, body)).body;
+  const slug = `unpaid-${process.pid}`;
+  const page = { slug, booking: true, shop: true, description: "", phone: "", address: "", languages: ["uz"], paymentMethods: ["cash"], deliveryMethods: ["pickup"] };
+  assert.equal((await o.b.call("PUT", `${crm}/settings`, { modules: { booking: true, store: true }, settings: { publicPage: page } })).status, 200);
+  const service = (await post("/services", { name: "Haircut", duration: 30, price: 50000 })).id;
+  const hours = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map((d) => [d, ["00:00", "24:00"]]));
+  await post("/staff", { name: "Aziz", hours, serviceIds: [service] });
+  const shampoo = (await post("/products", { name: "Shampoo", price: 40000, opening: 5 })).changes.set.products[0];
+  const visitor = browser();
+  const pub = (method, path, body) => visitor.call(method, `/public/crm/${slug}${path}`, body);
+  const visit = (start) => ({ serviceIds: [service], start: `${day}T${start}`, name: "Dilnoza", phone: "+998 90 111 22 33" });
+  const order = { lines: [{ productId: shampoo.id, variantId: shampoo.variants[0].id, qty: 1 }], name: "Madina", phone: "+998 93 444 55 66", delivery: { method: "pickup", date: day, window: { from: "12:00", to: "15:00" } }, payment: "cash" };
+  const made = await pub("POST", "/bookings", visit("10:00"));
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+
+  // Billed and never paid: the team's writes are refused, and so are the page's, in a code a page can show.
+  crmBilled();
+  assert.equal((await addCustomer(o)).status, 402);
+  for (const [path, body] of [["/bookings", visit("11:00")], [`/bookings/${made.body.ref}/cancel`, { token: made.body.token }], ["/orders", order]]) {
+    const r = await pub("POST", path, body);
+    assert.deepEqual([r.status, r.body], [402, { message: "This isn't available right now.", code: "unavailable" }], path);
+  }
+  // Reads go on.
+  for (const path of ["/", "/services", "/products", `/bookings/${made.body.ref}?token=${made.body.token}`]) assert.equal((await pub("GET", path)).status, 200, path);
+  // Nothing about the page changes with the switch off.
+  delete process.env.CRM_BILLING;
+  assert.equal((await pub("POST", "/orders", order)).status, 201);
+  assert.equal((await pub("POST", `/bookings/${made.body.ref}/cancel`, { token: made.body.token })).status, 200);
+});

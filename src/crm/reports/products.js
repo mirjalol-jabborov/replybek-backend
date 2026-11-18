@@ -6,8 +6,8 @@
 // the lines' sums, whole soʻm, the rounding to the order's first line). The delivery fee is not a
 // product's income. Margin: income less quantity x the variant's cost as it is now (orders don't
 // keep the cost of the day). Returned: units that came back in the span (the ledger's `return` lines).
-import { read } from "../db.js";
-import { FROM, END, ONE, EACH } from "./money.js";
+import { read, ONE, EACH } from "../db.js";
+import { FROM, END } from "./money.js";
 import { periodOf } from "./period.js";
 
 /**

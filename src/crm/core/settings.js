@@ -9,7 +9,7 @@ import { mergeChanges } from "../changes.js";
 import { listId as id, hm, hmEnd, day, text, label } from "../shapes.js";
 import { modules, add, countUses, moveStage, checkSettings } from "../modules.js";
 import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds } from "../shared/index.js";
-import { toMin } from "../shared/time.js";
+import { toMin, isZoneName } from "../shared/time.js";
 import { customerCols, sourceUses } from "./customers.js";
 
 /* ───── Shapes ───── */
@@ -97,6 +97,9 @@ function bodySchema() {
       lowStockAlerts: z.boolean(),
       aiConnected: z.boolean(),
       aiAct: z.boolean(),
+      // The business's clock: kept as the workspace's time zone (crm_settings.timezone), not in the
+      // settings. Checked in newZone, so every wrong value is the one code.
+      timezone: z.unknown(),
       rules,
       delivery,
       ...Object.assign({}, ...modules.map((m) => m.settingsShape || {})),
@@ -134,10 +137,23 @@ const hasAgent = (workspace) => (workspace.products || []).includes("agent");
 
 /**
  * The lists and settings as the app gets them. The AI agent shows as connected only when the
- * workspace has the agent product and switched the connection on.
+ * workspace has the agent product and switched the connection on. `settings.timezone` is the
+ * business's clock (cfg.timezone), the zone every "now" of the server is read in.
  */
-export function view(data, workspace) {
-  return { ...data, settings: { ...data.settings, aiConnected: Boolean(data.settings.aiConnected) && hasAgent(workspace) } };
+export function view(data, workspace, timezone) {
+  return { ...data, settings: { ...data.settings, timezone, aiConnected: Boolean(data.settings.aiConnected) && hasAgent(workspace) } };
+}
+
+/**
+ * The time zone to keep, when the save names another one: a zone name as the app's own check
+ * takes it (isZoneName), that the database knows too, since every "now" of the CRM is read there
+ * in it. Anything else is 400 bad_timezone.
+ */
+async function newZone(c, cfg, sent) {
+  if (sent === undefined || sent === cfg.timezone) return null;
+  const known = isZoneName(sent) && (await c.query("SELECT 1 FROM pg_timezone_names WHERE name = $1", [sent])).rows[0];
+  if (!known) throw new HttpError(400, "Choose a time zone from the list.", { code: "bad_timezone" });
+  return sent;
 }
 
 /* ───── Saving ───── */
@@ -168,6 +184,8 @@ export function saveSettings(workspace, body) {
       if (body[key] === undefined) continue;
       next[key] = key === "settings" || key === "fields" ? { ...before[key], ...body[key] } : body[key];
     }
+    const zone = await newZone(c, cfg, body.settings?.timezone);
+    if (body.settings) delete next.settings.timezone;
     if (toMin(next.settings.dayStart) >= toMin(next.settings.dayEnd)) throw new HttpError(400, "The day must end after it starts.", { code: "day_hours" });
     // Connecting the AI agent means something only for a workspace that has it.
     if (!hasAgent(workspace)) next.settings = { ...next.settings, aiConnected: false };
@@ -213,8 +231,8 @@ export function saveSettings(workspace, body) {
     }
 
     await checkSettings(c, cfg, next);
-    await c.query("UPDATE crm_settings SET data = $2, updated_at = now() WHERE workspace_id = $1", [workspace.id, JSON.stringify(next)]);
-    const shown = view(next, workspace);
+    await c.query("UPDATE crm_settings SET data = $2, timezone = COALESCE($3, timezone), updated_at = now() WHERE workspace_id = $1", [workspace.id, JSON.stringify(next), zone]);
+    const shown = view(next, workspace, zone || cfg.timezone);
     return { changes: mergeChanges(...changes, { top: Object.fromEntries(TOP_KEYS.filter((k) => body[k] !== undefined).map((k) => [k, shown[k]])) }) };
   });
 }

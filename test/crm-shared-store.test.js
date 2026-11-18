@@ -27,7 +27,7 @@ const byVariant = (rows) => Object.fromEntries(rows.map((r) => [r.variantId, r])
 
 test("money: lines, both discounts, the fee, payments and the balance", () => {
   const o = { lines: [{ qty: 2, price: 100000, discount: 20000 }, { qty: 1, price: 50000 }], discount: 30000, delivery: { fee: 25000 }, payments: [{ amount: 100000 }, { amount: 150000 }, { amount: -50000 }] };
-  assert.deepEqual(totals(o), { lines: 250000, lineDiscounts: 20000, subtotal: 230000, discount: 30000, fee: 25000, total: 225000, paid: 200000, balance: 25000 });
+  assert.deepEqual(totals(o), { lines: 250000, lineDiscounts: 20000, subtotal: 230000, discount: 30000, fee: 25000, total: 225000, paid: 200000, refunded: 50000, balance: 25000 });
   assert.equal(lineTotal(o.lines[0]), 180000);
   assert.equal(orderTotal(o), 225000);
   assert.equal(isPaid(o), false);
@@ -35,10 +35,33 @@ test("money: lines, both discounts, the fee, payments and the balance", () => {
   // Overpaid after the order got cheaper: the balance goes below zero, it still counts as paid.
   assert.equal(totals({ ...o, payments: [{ amount: 300000 }] }).balance, -75000);
   // An order discount is never more than there is to take off; the fee is still owed.
-  assert.deepEqual(totals({ lines: [{ qty: 1, price: 1000 }], discount: 5000, delivery: { fee: 300 } }), { lines: 1000, lineDiscounts: 0, subtotal: 1000, discount: 1000, fee: 300, total: 300, paid: 0, balance: 300 });
+  assert.deepEqual(totals({ lines: [{ qty: 1, price: 1000 }], discount: 5000, delivery: { fee: 300 } }), { lines: 1000, lineDiscounts: 0, subtotal: 1000, discount: 1000, fee: 300, total: 300, paid: 0, refunded: 0, balance: 300 });
   // Nothing set at all.
-  assert.deepEqual(totals({ lines: [] }), { lines: 0, lineDiscounts: 0, subtotal: 0, discount: 0, fee: 0, total: 0, paid: 0, balance: 0 });
+  assert.deepEqual(totals({ lines: [] }), { lines: 0, lineDiscounts: 0, subtotal: 0, discount: 0, fee: 0, total: 0, paid: 0, refunded: 0, balance: 0 });
   assert.equal(isPaid({ lines: [{ qty: 1, price: 10 }] }), false);
+});
+
+test("money: a refund on a finished order is a reduction, never a new debt", () => {
+  const lines = [{ variantId: "a", qty: 1, price: 100000 }];
+  const done = (payments, over = {}) => ({ status: "done", lines, payments, ...over });
+  // Handed over and paid, then 30 000 given back without the goods: still paid in full.
+  const part = done([{ amount: 100000 }, { amount: -30000 }]);
+  assert.deepEqual(totals(part, STAGES), { lines: 100000, lineDiscounts: 0, subtotal: 100000, discount: 0, fee: 0, total: 100000, paid: 70000, refunded: 30000, balance: 0 });
+  assert.equal(isPaid(part, STAGES), true);
+  // All of it given back: nothing owed either.
+  assert.equal(totals(done([{ amount: 100000 }, { amount: -100000 }]), STAGES).balance, 0);
+  // Overpaid, then the extra given back: the balance comes back to zero, and a refund past it stays at zero.
+  assert.equal(totals(done([{ amount: 120000 }]), STAGES).balance, -20000);
+  assert.equal(totals(done([{ amount: 120000 }, { amount: -20000 }]), STAGES).balance, 0);
+  assert.equal(totals(done([{ amount: 120000 }, { amount: -50000 }]), STAGES).balance, 0);
+  // Never collected in full (an old order): a refund doesn't make the debt bigger.
+  assert.equal(totals(done([{ amount: 60000 }, { amount: -20000 }]), STAGES).balance, 40000);
+  // While the order is still open, or once its goods came back, money given back is owed again.
+  for (const status of ["ok", "new", "off"]) assert.equal(totals({ ...part, status }, STAGES).balance, 30000, status);
+  assert.equal(totals({ ...part, status: "off", returned: true }, STAGES).balance, 30000);
+  assert.equal(isPaid({ ...part, status: "ok" }, STAGES), false);
+  // Without the steps a sum knows nothing of the step: a draft.
+  assert.equal(totals(part).balance, 30000);
 });
 
 test("stock numbers", () => {
@@ -208,6 +231,11 @@ test("handing over settles what is still owed", () => {
   assert.equal(move(order("ok", { payments: [{ amount: 3400 }] }), "done").pay, 0);
   assert.equal(move(order("ok", { payments: [{ amount: 9000 }] }), "done").pay, 0);
   assert.equal(move(order("ok", { discount: 400, delivery: { fee: 1000 } }), "done").pay, 4000);
+  // Money given back while the order was open is owed again when it is handed over.
+  assert.equal(move(order("ok", { payments: [{ amount: 3400 }, { amount: -400 }] }), "done").pay, 400);
+  // What handing over takes, the history says, as a payment taken by hand does.
+  assert.deepEqual(move(order("ok", { payment: "cash", payments: [{ amount: 1400 }] }), "done").paid, { text: "paid", amount: 2000, method: "cash" });
+  assert.equal(move(order("ok", { payments: [{ amount: 3400 }] }), "done").paid, null);
 });
 
 test("required fields", () => {
@@ -335,6 +363,9 @@ test("delivery: what is offered", () => {
   // Exact times: the earliest ready time, on a five minute mark; tomorrow from the opening time.
   assert.deepEqual(suggestDelivery({ ...RULES, time: "exact" }, "2026-11-17T13:02"), { date: "2026-11-17", slot: "", time: "14:35" });
   assert.deepEqual(suggestDelivery({ ...RULES, time: "exact" }, "2026-11-17T19:00", "09:00"), { date: "2026-11-18", slot: "", time: "09:00" });
+  // Windows and exact times both: the first exact time can be asked for too.
+  assert.deepEqual(suggestDelivery(RULES, "2026-11-17T13:02", "10:00", { exact: true }), { date: "2026-11-17", slot: "", time: "14:35" });
+  assert.deepEqual(suggestDelivery(RULES, "2026-11-17T19:00", "09:00", { exact: true }), { date: "2026-11-18", slot: "", time: "09:00" });
   // Saturday evening, Sunday off: Monday.
   assert.deepEqual(suggestDelivery(RULES, "2026-11-21T19:00"), { date: "2026-11-23", slot: "09:00–12:00", time: "" });
   assert.equal(K.reserved, "reserved");

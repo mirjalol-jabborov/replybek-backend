@@ -1,6 +1,5 @@
 // Bookings of a span of days (by the day of the visit) as a sheet, for an export.
-import { wall } from "../db.js";
-import { ONE } from "../reports/money.js";
+import { wall, ONE } from "../db.js";
 import { header, yesNo, L } from "./words.js";
 import { listName, fieldCell } from "./cells.js";
 

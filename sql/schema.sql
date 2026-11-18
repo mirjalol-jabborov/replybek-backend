@@ -545,6 +545,8 @@ CREATE TABLE IF NOT EXISTS agent_channels (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS agent_channels_agent ON agent_channels (agent_id);
+-- A workspace's bots: whether it has one connected (the CRM's messages go out through it).
+CREATE INDEX IF NOT EXISTS agent_channels_workspace ON agent_channels (workspace_id, type, status);
 -- One bot belongs to one agent: the same token connected twice would steal the first webhook.
 CREATE UNIQUE INDEX IF NOT EXISTS agent_channels_account ON agent_channels (type, (config->>'account_id'));
 

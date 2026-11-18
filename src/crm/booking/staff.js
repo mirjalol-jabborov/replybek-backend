@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { HttpError } from "../../core/http.js";
 import { write, insertRow, updateRow } from "../db.js";
-import { uuid, uuids, hm, hmEnd, label, someKey } from "../shapes.js";
+import { uuid, uuids, hm, weekHours, label, someKey } from "../shapes.js";
 import { check } from "../shared/booking.js";
 import { dayOf } from "../shared/time.js";
 import { STAFF, APPT, TIME_OFF, SERIES, one, upcomingOf } from "./rows.js";
@@ -24,13 +24,11 @@ export async function linkOf(q, workspaceId, who) {
   return { staffId, only: staffId && rows[0].own_only && who.role === "agent" ? staffId : null, branch: who.branchOnly || null };
 }
 
-const dayHours = z.union([z.null(), z.tuple([hm, hmEnd]).refine(([from, to]) => from < to, "The working day must end after it starts.")]);
 const shape = {
   name: z.string().trim().min(1, "Add the specialist's name.").max(120),
   role: label(120),
   tone: z.enum(["t1", "t2", "t3", "t4", "t5", "t6"]),
-  // Every weekday, 0 = Sunday: ["10:00", "20:00"] or null for a day off.
-  hours: z.object({ 0: dayHours, 1: dayHours, 2: dayHours, 3: dayHours, 4: dayHours, 5: dayHours, 6: dayHours }).strict(),
+  hours: weekHours,
   breaks: z
     .array(z.object({ from: hm, to: hm }).strict().refine((b) => b.from < b.to, "A break must end after it starts."))
     .max(10)

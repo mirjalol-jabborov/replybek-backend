@@ -7,6 +7,7 @@ import { modules } from "../src/crm/modules.js";
 import { read } from "../src/crm/db.js";
 import { findCustomer, findCustomers } from "../src/crm/core/customers.js";
 import { telegramHandle } from "../src/crm/shared/customer.js";
+import { nowIn, isZoneName } from "../src/crm/shared/time.js";
 
 /** Opens an event stream like a browser does and collects what arrives. */
 async function openStream(path, cookie) {
@@ -141,6 +142,41 @@ test("the first snapshot of a new workspace has the default lists and nothing el
   const again = await snap(o);
   assert.equal(again.rev, db.rev);
   assert.deepEqual(again.branches, db.branches);
+});
+
+test("the business's clock: the snapshot names its time zone, an admin changes it, and every now follows it", async () => {
+  const o = await crmOwner();
+  assert.equal((await snap(o, "settings")).settings.timezone, "Asia/Tashkent");
+  const put = (b, settings) => b.call("PUT", `${o.crm}/settings`, { settings });
+  // Only real zones, written as the zone database writes them: every other name or value is the one code,
+  // and the app's own check (isZoneName) refuses the same names.
+  for (const timezone of ["Mars/Olympus", "", "asia/tashkent", "Asia/TASHKENT", "Asia/tashkent", "Asia/kolkata", "Etc/GMT+5", "GMT+5", 5, null]) {
+    const r = await put(o.b, { timezone });
+    assert.equal(r.status, 400, String(timezone));
+    assert.equal(r.body.code, "bad_timezone", String(timezone));
+    assert.equal(isZoneName(timezone), false, String(timezone));
+  }
+  // An old name and its new one are both the zone database's (ICU knows Asia/Kolkata as Asia/Calcutta).
+  for (const timezone of ["Asia/Kolkata", "Asia/Calcutta", "America/Argentina/Salta", "UTC"]) assert.equal(isZoneName(timezone), true, timezone);
+  assert.equal((await put(o.b, { timezone: "Asia/Kolkata" })).status, 200);
+  const mate = await teammate(o, "agent");
+  assert.equal((await put(mate.b, { timezone: "Europe/Moscow" })).status, 403);
+  // Two zones 25 hours apart: the business's day is never the same in both.
+  const saved = await put(o.b, { timezone: "Pacific/Kiritimati", slot: 20 });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual([saved.body.changes.top.settings.timezone, saved.body.changes.top.settings.slot], ["Pacific/Kiritimati", 20]);
+  const near = (tz) => nowIn(tz, new Date());
+  const there = (await addCustomer(o, { name: "Aziz Karimov" })).body.changes.set.customers[0].createdAt;
+  assert.ok(Math.abs(Date.parse(`${there}:00Z`) - Date.parse(`${near("Pacific/Kiritimati")}:00Z`)) <= 60000, there);
+  await put(o.b, { timezone: "Pacific/Pago_Pago" });
+  const here = (await addCustomer(o, { name: "Bobur Aliyev" })).body.changes.set.customers[0].createdAt;
+  assert.ok(Math.abs(Date.parse(`${here}:00Z`) - Date.parse(`${near("Pacific/Pago_Pago")}:00Z`)) <= 60000, here);
+  assert.notEqual(here.slice(0, 10), there.slice(0, 10));
+  // Kept as the workspace's clock, not inside the saved settings; the snapshot reads it from there.
+  const db = await snap(o, "settings");
+  assert.deepEqual([db.settings.timezone, db.settings.slot], ["Pacific/Pago_Pago", 20]);
+  const stored = await read(o.ws.id, async (q, cfg) => [cfg.timezone, "timezone" in cfg.data.settings]);
+  assert.deepEqual(stored, ["Pacific/Pago_Pago", false]);
 });
 
 test("snapshot ?only= gives just those keys, with rev", async () => {

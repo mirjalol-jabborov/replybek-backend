@@ -100,6 +100,18 @@ test("without both products, the connection and a module the agent gets no CRM t
   assert.deepEqual(names(await crmTools(readOnly.row)), ["crm_find_products", "crm_free_times", "crm_identify_customer", "crm_list_services", "crm_my_bookings", "crm_my_orders", "crm_order_options"]);
   assert.deepEqual((await (await chat(readOnly)).run("crm_book", { services: [readOnly.s1], start: `${D(2)}T10:00` })).output, { error: "unavailable" });
 
+  // The CRM billed and not paid for: the agent may look things up, as the team may, and never change anything.
+  const unpaid = await business();
+  Object.assign(process.env, { POLAR_ACCESS_TOKEN: "test-token", CRM_BILLING: "on" });
+  try {
+    assert.deepEqual(names(await crmTools(unpaid.row)), names(await crmTools(readOnly.row)));
+    assert.deepEqual((await (await chat(unpaid)).run("crm_book", { services: [unpaid.s1], start: `${D(2)}T10:00` })).output, { error: "unavailable" });
+  } finally {
+    delete process.env.POLAR_ACCESS_TOKEN;
+    delete process.env.CRM_BILLING;
+  }
+  assert.ok(names(await crmTools(unpaid.row)).includes("crm_book"), "with the billing switch off nothing changes");
+
   // On: the tools reach the model, under the workspace's name.
   const on = await business();
   const tools = await crmTools(on.row);
@@ -426,6 +438,8 @@ test("booking fields the business needs: listed for the agent to ask, shown on t
   ok(await c.decide((await c.run("crm_book", { services: [s.s1], start: `${D(2)}T11:00`, specialist: s.p1 })).card.action_id));
   const [first, second] = (await snapshot(s, "appointments")).appointments;
   assert.deepEqual([first.fields, first.history], [{ allergy: "None" }, []]);
+  // Who made it: the customer, through the AI agent.
+  assert.deepEqual(first.createdBy, { by: "", byId: null, customer: true, via: "ai" });
   assert.deepEqual(second.history.map((h) => [h.type, h.fields, h.customer, h.via]), [["missing", ["allergy"], true, "ai"]]);
 });
 

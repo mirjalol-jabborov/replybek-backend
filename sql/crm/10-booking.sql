@@ -154,6 +154,10 @@ DROP INDEX IF EXISTS crm_appointments_series;
 -- toward the customer's daily share (shared/customer.js PER_PHONE_PER_DAY).
 ALTER TABLE crm_appointments ADD COLUMN IF NOT EXISTS customer_made BOOLEAN NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS crm_appointments_customer_made ON crm_appointments (workspace_id, customer_id, created_at) WHERE customer_made;
+-- Who made the booking, as a history line names someone: { by, byId } for a team member (the
+-- person who made the series, for its visits), { by: "", byId: null, customer: true, via } for a
+-- customer on a page or through the AI agent. NULL: made before this was kept, unknown.
+ALTER TABLE crm_appointments ADD COLUMN IF NOT EXISTS creator JSONB;
 
 -- ───── Live updates ─────
 SELECT crm_watch('crm_staff', 'staff');

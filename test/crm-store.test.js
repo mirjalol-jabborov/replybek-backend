@@ -341,7 +341,7 @@ test("an order's whole life through the workspace's own steps", async () => {
   assert.deepEqual([ord.number, ord.status, ord.customerId, ord.payment, ord.source, ord.note, ord.paid, ord.discount], [1001, "new", made.changes.set.customers[0].id, "click", "telegram", "Call first", false, 0]);
   assert.deepEqual(ord.lines.map((l) => [l.productId, l.variantId === vr, l.qty, l.price, l.discount]), [[roses.id, true, 2, 100000, 0], [card.id, false, 1, 5000, 0]]);
   assert.deepEqual(ord.delivery, { type: "courier", address: "Chilonzor 9", date: "", slot: "", time: "", fee: 30000 });
-  assert.deepEqual(ord.totals, { lines: 205000, lineDiscounts: 0, subtotal: 205000, discount: 0, fee: 30000, total: 235000, paid: 0, balance: 235000 });
+  assert.deepEqual(ord.totals, { lines: 205000, lineDiscounts: 0, subtotal: 205000, discount: 0, fee: 30000, total: 235000, paid: 0, refunded: 0, balance: 235000 });
   assert.deepEqual(ord.history.map((h) => [h.text, h.by]), [["created", "Kamola Yusupova"]]);
   assert.deepEqual(await stockOf(o, roses.id), [5, 0]);
   assert.equal((await order(o, { customerId: ord.customerId, lines: [{ productId: card.id, qty: 1 }] })).changes.set.orders[0].number, 1002);
@@ -495,7 +495,7 @@ test("editing an order: what is held follows its items", async () => {
   const rest = ok(await put(ord.id, { note: "Ring twice", payment: "payme", customerId: c2, source: "phone", delivery: { type: "courier", address: "Sergeli 7" }, discount: 15000 })).changes.set.orders[0];
   assert.deepEqual([rest.note, rest.payment, rest.customerId, rest.source, rest.discount], ["Ring twice", "payme", c2, "phone", 15000]);
   assert.deepEqual(rest.delivery, { type: "courier", address: "Sergeli 7", date: "", slot: "", time: "", fee: 30000 });
-  assert.deepEqual(rest.totals, { lines: 235000, lineDiscounts: 0, subtotal: 235000, discount: 15000, fee: 30000, total: 250000, paid: 0, balance: 250000 });
+  assert.deepEqual(rest.totals, { lines: 235000, lineDiscounts: 0, subtotal: 235000, discount: 15000, fee: 30000, total: 250000, paid: 0, refunded: 0, balance: 250000 });
   assert.deepEqual(rest.history.slice(-5).map((h) => h.text), ["customer", "payment", "note", "delivery", "discount"]);
   const lines = async () => (await query("SELECT count(*)::int AS n FROM crm_stock_moves WHERE order_id = $1", [ord.id])).rows[0].n;
   const before = await lines();
@@ -592,7 +592,7 @@ test("money: discounts, part payments and refunds add up; the receipt", async ()
   // Paid in full on the spot: one payment for the whole sum, by the order's method.
   const made = (await order(o, { customerId: c, lines: [{ variantId: L, qty: 2, discount: 10000 }, { productId: card.id, qty: 3 }], discount: 5000, delivery: { type: "courier", address: "Navoiy 21" }, payment: "payme", paid: true })).changes.set.orders[0];
   const sums = { lines: 205000, lineDiscounts: 10000, subtotal: 195000, discount: 5000, fee: 30000, total: 220000 };
-  assert.deepEqual(made.totals, { ...sums, paid: 220000, balance: 0 });
+  assert.deepEqual(made.totals, { ...sums, paid: 220000, refunded: 0, balance: 0 });
   assert.deepEqual([made.paid, made.payments.map((p) => [p.amount, p.method])], [true, [[220000, "payme"]]]);
   const id = made.id;
   const refund = (body, who = o) => who.b.call("POST", `${o.crm}/orders/${id}/refund`, body);
@@ -631,7 +631,7 @@ test("money: discounts, part payments and refunds add up; the receipt", async ()
     [{ name: "T-shirt", variant: "L", sku: "TS-L", unit: "pcs", qty: 2, price: 95000, discount: 10000, total: 180000 }, "pcs"],
     [{ name: "Card", variant: "", sku: "CARD", unit: "pcs", qty: 5, price: 5000, discount: 0, total: 25000 }, "pcs"],
   ]);
-  assert.deepEqual(slip.totals, { lines: 215000, lineDiscounts: 10000, subtotal: 205000, discount: 0, fee: 30000, total: 235000, paid: 235000, balance: 0 });
+  assert.deepEqual(slip.totals, { lines: 215000, lineDiscounts: 10000, subtotal: 205000, discount: 0, fee: 30000, total: 235000, paid: 235000, refunded: 20000, balance: 0 });
   assert.deepEqual([slip.delivery.name.en, slip.delivery.address, slip.delivery.fee, slip.payment, slip.paymentName], ["Courier", "Navoiy 21", 30000, "payme", "Payme"]);
   assert.deepEqual(slip.payments.map((p) => [p.amount, p.method, p.methodName.en || p.methodName]), [[220000, "payme", "Payme"], [-20000, "cash", "Cash"], [5000, "payme", "Payme"], [30000, "payme", "Payme"]]);
   assert.equal((await o.b.call("GET", `${o.crm}/orders/${crypto.randomUUID()}/receipt`)).status, 404);
@@ -650,6 +650,43 @@ test("money: discounts, part payments and refunds add up; the receipt", async ()
   assert.equal((await o.b.call("POST", `${o.crm}/orders/${open.id}/refund`, { returnGoods: true })).body.code, "not_done");
   assert.equal(ok(await o.b.call("POST", `${o.crm}/orders/${open.id}/refund`, {})).changes.set.orders[0].totals.paid, 0);
   await ledgerHolds(o);
+});
+
+test("a refund on a finished order without the goods is a reduction: the order stays paid, every sum agrees", async () => {
+  const o = await crmOwner();
+  const roses = await product(o, { name: "Roses", price: 100000, opening: 5 });
+  const c = await customer(o);
+  // Paid on the spot: the history says so, as it does for a payment taken by hand.
+  const spot = (await order(o, { customerId: c, lines: [{ productId: roses.id, qty: 1 }], payment: "cash", paid: true })).changes.set.orders[0];
+  assert.deepEqual(spot.history.map((h) => [h.text, h.amount, h.method]), [["created", undefined, undefined], ["paid", 100000, "cash"]]);
+
+  // Handing over takes the rest by the order's method, and the history has a "paid" line for it.
+  const made = (await order(o, { customerId: c, lines: [{ productId: roses.id, qty: 2 }], payment: "click" })).changes.set.orders[0];
+  ok(await o.b.call("POST", `${o.crm}/orders/${made.id}/pay`, { amount: 50000, method: "cash" }));
+  const done = ok(await step(o, made.id, "delivered")).changes.set.orders[0];
+  assert.deepEqual(done.history.slice(-2).map(({ at, ...h }) => h), [
+    { text: "moved", to: "delivered", toName: done.history.at(-2).toName, by: "Kamola Yusupova" },
+    { text: "paid", amount: 150000, method: "click", by: "Kamola Yusupova" },
+  ]);
+  assert.deepEqual(done.payments.map((p) => [p.amount, p.method]), [[50000, "cash"], [150000, "click"]]);
+
+  // 30 000 back, the goods stay with the customer: still paid in full, the refund its own number.
+  const r = ok(await o.b.call("POST", `${o.crm}/orders/${made.id}/refund`, { amount: 30000, method: "cash" })).changes.set.orders[0];
+  assert.deepEqual([r.paid, r.totals.total, r.totals.paid, r.totals.refunded, r.totals.balance], [true, 200000, 170000, 30000, 0]);
+  assert.equal((await o.b.call("POST", `${o.crm}/orders/${made.id}/pay`, {})).body.code, "already_paid");
+  // The board, the receipt and the panel say the same.
+  assert.deepEqual(await one(o, "orders", made.id).then((x) => [x.paid, x.totals]), [true, r.totals]);
+  const slip = ok(await o.b.call("GET", `${o.crm}/orders/${made.id}/receipt`));
+  assert.deepEqual([slip.paid, slip.totals], [true, r.totals]);
+  // The reports count the order and the refund apart; orders less refunds is what the order kept
+  // (the order paid on the spot was never handed over, so it is not income yet).
+  const today = nowIn("Asia/Tashkent", new Date()).slice(0, 10);
+  const income = ok(await o.b.call("GET", `${o.crm}/reports/income?from=${today}&to=${today}`)).total;
+  assert.deepEqual([income.orders, income.refunds, income.net], [200000, 30000, r.totals.paid]);
+
+  // The rest given back with the goods: the order is closed as returned, nothing kept.
+  const back = ok(await o.b.call("POST", `${o.crm}/orders/${made.id}/refund`, { returnGoods: true })).changes.set.orders[0];
+  assert.deepEqual([back.returned, back.totals.paid, back.totals.refunded], [true, 0, 200000]);
 });
 
 test("cancel and delete", async () => {
@@ -899,6 +936,38 @@ test("stock counters go past what a 32-bit number holds", async () => {
   assert.deepEqual([held.stock, held.reserved, held.variants[0].stock], [2_200_000_000, 1_000_000, 2_200_000_000]);
   const kept = await o.b.call("DELETE", `${o.crm}/products/${p.id}`);
   assert.deepEqual([kept.status, kept.body.stock], [409, 2_200_000_000]);
+  // A count can say what such a shelf holds, as receipts can raise it.
+  const counted = ok(await o.b.call("POST", `${o.crm}/stock/count`, { productId: p.id, counted: 2_150_000_000 }));
+  assert.deepEqual([counted.diff, counted.changes.set.products[0].stock], [-50_000_000, 2_150_000_000]);
+  assert.equal((await o.b.call("POST", `${o.crm}/stock/count`, { productId: p.id, counted: Number.MAX_SAFE_INTEGER + 2 })).status, 400);
+  await ledgerHolds(o);
+});
+
+test("stock never grows past what the app is sent exactly: per branch, and for the product as a whole", async () => {
+  const o = await crmOwner();
+  const MAX = Number.MAX_SAFE_INTEGER;
+  const tooMuch = (r) => assert.deepEqual(rules(r), { status: 422, code: "rules", hard: [{ code: "qty_too_large" }], soft: [] });
+  const onHand = async (variantId) => (await query("SELECT sum(on_hand)::text AS n FROM crm_stock WHERE variant_id = $1", [variantId])).rows[0].n;
+  const p = await product(o, { price: 1, opening: 1 });
+  const v = p.variants[0].id;
+  // A count can say the most there is; nothing can be brought in on top of it.
+  assert.equal(ok(await o.b.call("POST", `${o.crm}/stock/count`, { productId: p.id, counted: MAX })).changes.set.products[0].stock, MAX);
+  tooMuch(await o.b.call("POST", `${o.crm}/stock/receive`, { lines: [{ productId: p.id, qty: 2 }] }));
+  assert.equal(await onHand(v), String(MAX));
+  // The next count sees the real number, so it writes no wrong difference.
+  assert.deepEqual(rules(await o.b.call("POST", `${o.crm}/stock/count`, { productId: p.id, counted: MAX })).hard, [{ code: "no_difference", variantId: v, productId: p.id, name: "Roses" }]);
+  // Each branch's shelf within the limit is not enough: the product's stock is them added up.
+  const B = ok(await o.b.call("POST", `${o.crm}/branches`, { name: "Chilonzor" }), 201).id;
+  tooMuch(await o.b.call("POST", `${o.crm}/stock/count`, { productId: p.id, counted: 5, branchId: B }));
+  tooMuch(await o.b.call("POST", `${o.crm}/stock/receive`, { lines: [{ productId: p.id, qty: 1 }], branchId: B }));
+  // So are a product's variants: the second one can't take the product past it.
+  const t = ok(await o.b.call("POST", `${o.crm}/products`, { name: "T-shirt", options: [{ id: "size", name: "Size", values: ["S", "M"] }], variants: [{ values: { size: "S" }, price: 1 }, { values: { size: "M" }, price: 1 }] }), 201).changes.set.products[0];
+  ok(await o.b.call("POST", `${o.crm}/stock/count`, { variantId: t.variants[0].id, counted: MAX - 1 }));
+  ok(await o.b.call("POST", `${o.crm}/stock/receive`, { lines: [{ variantId: t.variants[1].id, qty: 1 }] }));
+  tooMuch(await o.b.call("POST", `${o.crm}/stock/receive`, { lines: [{ variantId: t.variants[1].id, qty: 1 }] }));
+  assert.equal(ok(await o.b.call("GET", `${o.crm}/snapshot?only=products`)).products.find((x) => x.id === t.id).stock, MAX);
+  // Going down is never refused for it.
+  ok(await o.b.call("POST", `${o.crm}/stock/count`, { variantId: t.variants[0].id, counted: 0 }));
   await ledgerHolds(o);
 });
 

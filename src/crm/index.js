@@ -59,7 +59,7 @@ function snapshot(req, only) {
       out.me = { id: req.user.id, name: req.user.name, staffId: null };
       for (const m of modules) if (m.me) Object.assign(out.me, await m.me(ctx));
     }
-    const lists = view(cfg.data, req.workspace);
+    const lists = view(cfg.data, req.workspace, cfg.timezone);
     for (const key of TOP_KEYS) if (want(key)) out[key] = lists[key];
     if (want("customers")) out.customers = await listCustomers(q, cfg);
     for (const m of modules) {

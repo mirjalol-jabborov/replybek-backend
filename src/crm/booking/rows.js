@@ -17,7 +17,7 @@ export const TIME_OFF = `id, staff_id AS "staffId", ${moment("start_at")} AS sta
 /** `tz`: the parameter holding the workspace's time zone ("$2"), for createdAt. */
 export const APPT = (tz) => `id, customer_id AS "customerId", staff_id AS "staffId", service_ids AS "serviceIds", ${moment("start_at")} AS start, duration,
   price::float8 AS price, status, source, note, paid, fields, history, series_id AS "seriesId", ${day("series_day")} AS "seriesDay",
-  branch_id AS "branchId", ${wall("created_at", tz)} AS "createdAt"`;
+  branch_id AS "branchId", ${wall("created_at", tz)} AS "createdAt", creator AS "createdBy"`;
 export const SERIES = `id, customer_id AS "customerId", staff_id AS "staffId", service_ids AS "serviceIds", time_of_day AS time, duration,
   price::float8 AS price, source, note, fields, every, weekdays, ${day("start_day")} AS "startDay", ${day("until")} AS until, count,
   ${day("through")} AS through, skipped, branch_id AS "branchId"`;

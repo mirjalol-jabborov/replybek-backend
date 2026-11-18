@@ -13,7 +13,8 @@ import { storeChanges } from "./rows.js";
 import { lockStock, postMoves } from "./stock.js";
 import { checkImage, dropUpload } from "./images.js";
 
-const OPENING = { en: "Opening stock", ru: "Начальный остаток", uz: "Boshlangʻich qoldiq" };
+/** The note on a new variant's first stock, a receipt in the ledger. */
+export const OPENING = { en: "Opening stock", ru: "Начальный остаток", uz: "Boshlangʻich qoldiq" };
 
 /* ───── Shapes ───── */
 

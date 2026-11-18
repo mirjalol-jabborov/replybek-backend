@@ -5,7 +5,7 @@ import { z } from "zod";
 import { notFound } from "../../core/http.js";
 import { write, insertRow, updateRow, isUuid } from "../db.js";
 import { bad, conflict } from "../errors.js";
-import { uuid, hm, hmEnd, someKey } from "../shapes.js";
+import { uuid, weekHours, someKey } from "../shapes.js";
 import { normalPhone } from "../shared/phone.js";
 
 /**
@@ -37,13 +37,12 @@ async function getBranch(q, cfg, id) {
 
 /* ───── Shapes ───── */
 
-const dayHours = z.union([z.null(), z.tuple([hm, hmEnd]).refine(([from, to]) => from < to, "The working day must end after it starts.")]);
 const shape = {
   name: z.string().trim().max(120),
   address: z.string().trim().max(300),
   phone: z.string().trim().max(40),
   // Its own working days and hours, 0 = Sunday; null: the specialists' own hours count.
-  hours: z.object({ 0: dayHours, 1: dayHours, 2: dayHours, 3: dayHours, 4: dayHours, 5: dayHours, 6: dayHours }).strict().nullable(),
+  hours: weekHours.nullable(),
   active: z.boolean(),
 };
 export const branchCreateSchema = z.object(shape).partial().required({ name: true }).strict();

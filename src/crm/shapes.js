@@ -19,6 +19,9 @@ export const hm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Write the time 
 /** The end of a working day may be midnight. */
 export const hmEnd = z.union([hm, z.literal("24:00")]);
 export const day = z.string().refine(isDay, "Write the day like 2026-11-17.");
+/** Working hours for every weekday, 0 = Sunday: ["10:00", "20:00"], or null for a day off. */
+const dayHours = z.union([z.null(), z.tuple([hm, hmEnd]).refine(([from, to]) => from < to, "The working day must end after it starts.")]);
+export const weekHours = z.object({ 0: dayHours, 1: dayHours, 2: dayHours, 3: dayHours, 4: dayHours, 5: dayHours, 6: dayHours }).strict();
 export const moment = z.string().refine(isMoment, "Write the moment like 2026-11-17T09:30.");
 /** How long a visit takes. */
 export const minutes = z.number().int().min(1).max(1440);

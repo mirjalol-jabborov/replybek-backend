@@ -9,7 +9,7 @@ import { validate } from "../../core/validate.js";
 import { rateLimit, clientIP } from "../../core/rate-limit.js";
 import { appOrigins } from "../../core/auth/session.js";
 import { SLUG } from "./rules.js";
-import { showFront, workspaceOfPage, checkPart, pageNotFound } from "./pages.js";
+import { showFront, workspaceOfPage, checkPart, needWritable, pageNotFound } from "./pages.js";
 import { decoy } from "./requests.js";
 import { slotsQuery, daysQuery, lookupQuery, tokenBody, bookingBody, orderBody } from "./checks.js";
 import { listServices, listSlots, listDays, bookVisit, showBooking, cancelVisit } from "./booking.js";
@@ -29,16 +29,22 @@ router.use((req, res, next) => {
 });
 
 // Limits: per address of the caller, and per page, so neither one visitor nor a crowd can flood a business.
+// Pictures have their own: a shop page shows many of them, and they must not use up the page's reads.
+/** How many pictures one address may load from a page in a minute. */
+export const PICTURES_PER_IP = 300;
 const slugOf = (req) => (SLUG.test(req.params.slug || "") ? req.params.slug : null);
 const code = "rate_limited";
 const limits = {
+  picturesPerIP: rateLimit({ windowMs: 60 * 1000, max: PICTURES_PER_IP, key: clientIP, code }),
+  picturesPerPage: rateLimit({ windowMs: 60 * 1000, max: 10 * PICTURES_PER_IP, key: slugOf, code }),
   readsPerIP: rateLimit({ windowMs: 60 * 1000, max: 120, key: clientIP, code }),
   readsPerPage: rateLimit({ windowMs: 60 * 1000, max: 1200, key: slugOf, code }),
   writesPerIP: rateLimit({ windowMs: 10 * 60 * 1000, max: 10, key: clientIP, message: "Too many tries from this network. Try again later.", code }),
   writesPerPage: rateLimit({ windowMs: 10 * 60 * 1000, max: 100, key: slugOf, message: "Too many tries. Try again later.", code }),
 };
-router.use((req, res, next) => (READS.includes(req.method) ? limits.readsPerIP : limits.writesPerIP)(req, res, next));
-router.use((req, res, next) => (READS.includes(req.method) ? limits.readsPerPage : limits.writesPerPage)(req, res, next));
+const kindOf = (req) => (!READS.includes(req.method) ? "writes" : req.path.startsWith("/images/") ? "pictures" : "reads");
+router.use((req, res, next) => limits[`${kindOf(req)}PerIP`](req, res, next));
+router.use((req, res, next) => limits[`${kindOf(req)}PerPage`](req, res, next));
 
 // The workspace behind the address (404 for an unknown one).
 router.use(wrap(async (req, res, next) => {
@@ -56,6 +62,11 @@ const part = (name) => wrap(async (req, res, next) => {
 const front = part("any");
 const booking = part("booking");
 const shop = part("shop");
+// A write waits while the business's CRM is read-only (after the part: a closed page is still the 404).
+const writable = wrap(async (req, res, next) => {
+  needWritable(req.page);
+  next();
+});
 
 const ws = (req) => req.page;
 const answer = (fn, status = 200) => wrap(async (req, res) => res.status(status).json(await fn(req)));
@@ -67,14 +78,14 @@ router.get("/", front, answer((req) => showFront(ws(req))));
 router.get("/services", booking, answer((req) => listServices(ws(req))));
 router.get("/slots", booking, validate(slotsQuery, "query"), answer((req) => listSlots(ws(req), req.valid)));
 router.get("/days", booking, validate(daysQuery, "query"), answer((req) => listDays(ws(req), req.valid)));
-router.post("/bookings", booking, validate(bookingBody), answer(human((req) => bookVisit(ws(req), req.valid)), 201));
+router.post("/bookings", booking, writable, validate(bookingBody), answer(human((req) => bookVisit(ws(req), req.valid)), 201));
 router.get("/bookings/:ref", booking, validate(lookupQuery, "query"), answer((req) => showBooking(ws(req), req.params.ref, req.valid.token)));
-router.post("/bookings/:ref/cancel", booking, validate(tokenBody), answer((req) => cancelVisit(ws(req), req.params.ref, req.valid.token)));
+router.post("/bookings/:ref/cancel", booking, writable, validate(tokenBody), answer((req) => cancelVisit(ws(req), req.params.ref, req.valid.token)));
 
 router.get("/products", shop, answer((req) => listCatalogue(ws(req), req.params.slug)));
 router.get("/categories", shop, answer((req) => listCategories(ws(req))));
 router.get("/images/:name", shop, wrap((req, res) => sendPicture(res, ws(req), req.params.name)));
-router.post("/orders", shop, validate(orderBody), answer(human((req) => placeOrder(ws(req), req.valid)), 201));
+router.post("/orders", shop, writable, validate(orderBody), answer(human((req) => placeOrder(ws(req), req.valid)), 201));
 router.get("/orders/:ref", shop, validate(lookupQuery, "query"), answer((req) => showOrder(ws(req), req.params.ref, req.valid.token)));
 
 // A path the page doesn't have: the same 404 as an unknown address.

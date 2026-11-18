@@ -258,22 +258,25 @@ async function setReminders(q, cfg, reminders) {
 
 /**
  * Settings were saved: what waits follows them. A switch turned off drops its waiting messages;
- * a new remindBefore re-times the waiting reminders (their text names the visit, not the gap), by
- * the rule a new booking follows: one whose new moment has passed is dropped (too_late), never
- * sent at once. A reminder waiting for another try keeps its time.
+ * a new remindBefore or a new time zone re-times the waiting reminders (their text names the visit,
+ * not the gap): the visit's start is read on the business's clock as it is now, by the rule a new
+ * booking follows: one whose new moment has passed is dropped (too_late), never sent at once. A
+ * reminder waiting for another try keeps its time.
  */
 async function settingsSaved(q, cfg, ws) {
   const off = Object.keys(ws.notices).filter((k) => ws.notices[k]?.on === false);
   if (off.length) await q("UPDATE crm_notices SET status = 'skipped', reason = 'switched_off' WHERE workspace_id = $1 AND status = 'queued' AND kind = ANY($2::text[])", [cfg.workspaceId, off]);
   const { rows } = await q(
-    `WITH t AS (SELECT id, item_at - make_interval(mins => $2) AS at FROM crm_notices
-                 WHERE workspace_id = $1 AND kind = 'reminder' AND status = 'queued' AND tries = 0 AND send_at <> item_at - make_interval(mins => $2))
-     UPDATE crm_notices n SET send_at = CASE WHEN t.at > now() THEN t.at ELSE n.send_at END,
+    `WITH v AS (SELECT id, COALESCE(item_start::timestamp AT TIME ZONE $3, item_at) AS item_at FROM crm_notices
+                 WHERE workspace_id = $1 AND kind = 'reminder' AND status = 'queued' AND tries = 0),
+          t AS (SELECT id, item_at, item_at - make_interval(mins => $2) AS at FROM v)
+     UPDATE crm_notices n SET item_at = t.item_at,
+                              send_at = CASE WHEN t.at > now() THEN t.at ELSE n.send_at END,
                               status = CASE WHEN t.at > now() THEN 'queued' ELSE 'skipped' END,
                               reason = CASE WHEN t.at > now() THEN n.reason ELSE 'too_late' END
-       FROM t WHERE n.workspace_id = $1 AND n.id = t.id
+       FROM t WHERE n.workspace_id = $1 AND n.id = t.id AND (n.send_at <> t.at OR n.item_at <> t.item_at)
      RETURNING n.status, n.send_at`,
-    [cfg.workspaceId, cfg.data.settings.remindBefore]
+    [cfg.workspaceId, cfg.data.settings.remindBefore, cfg.timezone]
   );
   return rows.filter((r) => r.status === "queued").map((r) => r.send_at);
 }

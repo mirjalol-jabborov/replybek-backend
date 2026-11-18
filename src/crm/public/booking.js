@@ -10,10 +10,9 @@ import { bookAppointment, cancelAppointment, getAppointment, loadRules } from ".
 import { findOrAddCustomer } from "../core/customers.js";
 import { eligible, customerCatalogue, totals, freeStarts, whyNone, rulesOf, cancelProblem, cancelBy } from "../shared/booking.js";
 import { forCustomer } from "../shared/customer.js";
-import { customerFields } from "../shared/fields.js";
 import { stageOf } from "../shared/lists.js";
 import { addDays, dayOf, fromMin } from "../shared/time.js";
-import { openPart, pageWrite } from "./pages.js";
+import { openPart, pageWrite, fieldsToAsk } from "./pages.js";
 import { pageCustomer } from "./settings.js";
 import { recordRequest, findRequest } from "./requests.js";
 
@@ -43,7 +42,7 @@ export function listServices(ws) {
       categories: cfg.data.serviceCategories.filter((c) => services.some((s) => s.category === c.id)).map((c) => ({ id: c.id, name: c.name })),
       services: services.map((s) => ({ id: s.id, name: s.name, category: s.category, duration: s.duration, price: s.price, staffIds: eligible(db, [s.id]).map((p) => p.id) })),
       staff: staff.map(specialist),
-      fields: customerFields(cfg.data.fields.appointment).map(({ id, name, type, options }) => ({ id, name, type, ...(options ? { options } : {}) })),
+      fields: fieldsToAsk(cfg.data.fields.appointment),
     };
   });
 }

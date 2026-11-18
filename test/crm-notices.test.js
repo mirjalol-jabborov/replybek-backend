@@ -291,6 +291,20 @@ test("reminder: remindBefore minutes before the start, on the business's clock, 
   assert.deepEqual([(await row(reminder.id)).status, (await row(reminder.id)).reason], ["skipped", "too_late"]);
 });
 
+test("reminder: a new time zone saved in settings re-times what waits on the new clock", async () => {
+  const o = await shop();
+  await o.settings({ remindBefore: 60 });
+  const made = await o.book(`${D(3)}T10:00`);
+  const [, reminder] = await o.about(made.id);
+  assert.equal(new Date((await row(reminder.id)).send_at).getTime(), at(`${D(3)}T09:00`, "+05:00"));
+  await o.settings({ timezone: "Asia/Kolkata" });
+  const after = await row(reminder.id);
+  assert.equal(after.status, "queued");
+  assert.equal(new Date(after.item_at).getTime(), at(`${D(3)}T10:00`, "+05:30"), "the visit is at ten on the new clock");
+  assert.equal(new Date(after.send_at).getTime(), at(`${D(3)}T09:00`, "+05:30"));
+  assert.equal((await o.about(made.id)).find((n) => n.id === reminder.id).sendAt, `${D(3)}T09:00`);
+});
+
 test("reminder: a settings save or an edit never cuts short the wait of a reminder that failed a try", async () => {
   const o = await shop();
   await o.settings({ remindBefore: 60, notices: { booked: { on: false } } });
@@ -644,8 +658,23 @@ test("telegram: a customer who wrote to the workspace's bot gets the message the
     const a = await owner("Kamola Yusupova", "Guldasta");
     const w = `/w/${a.ws.id}`;
     ok(await a.b.call("POST", `${w}/products`, { add: "crm" }));
+    // How a message can reach a customer here, in one cheap answer for the Messages screen. The
+    // fake SMS provider of these tests reaches everyone with a phone, in every workspace.
+    const reach = async (b = a.b, at = w) => {
+      const r = ok(await b.call("GET", `${at}/crm/notices/reach`));
+      return { ...r, channels: [...r.channels].sort() };
+    };
+    assert.deepEqual(await reach(), { reach: "nobot", channels: ["sms"] }, "the AI agent, no bot yet");
+    const crmOnly = await crmOwner();
+    assert.deepEqual(await reach(crmOnly.b, `/w/${crmOnly.ws.id}`), { reach: "noagent", channels: ["sms"] });
     const agent = ok(await a.b.call("POST", `${w}/agents`, { name: "Support" }), 201);
     const channel = ok(await a.b.call("POST", `${w}/agents/${agent.id}/channels/telegram`, { bot_token: "99001:AAEhBOweik6ad9r_TestTokenForNotices01" }), 201);
+    assert.deepEqual(await reach(), { reach: "bot", channels: ["sms", "telegram"] });
+    const mate = await teammate(a, "agent");
+    assert.equal((await reach(mate.b)).reach, "bot", "the team may ask too");
+    await query("UPDATE agent_channels SET status = 'disabled' WHERE id = $1", [channel.id]);
+    assert.equal((await reach()).reach, "nobot", "a bot whose token was revoked reaches nobody");
+    await query("UPDATE agent_channels SET status = 'active' WHERE id = $1", [channel.id]);
     await query(
       `INSERT INTO conversations (workspace_id, agent_id, channel, channel_id, channel_chat_id, visitor, visitor_token_hash)
        VALUES ($1, $2, 'telegram', $3, '555001', $4, 'x')`,

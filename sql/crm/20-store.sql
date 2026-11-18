@@ -206,6 +206,10 @@ $$;
 
 -- The row is changed first and made only when there is none yet: an INSERT ... ON CONFLICT would
 -- test the checks against the bare change (a sale's minus) before it ever met the row.
+-- Stock that grows may not take its product's stock (all variants, all branches) past 2^53 - 1:
+-- the app is sent these numbers as JSON, which keeps no larger whole number exactly, so a count
+-- made from what it shows would write a wrong difference. Refused as "out of range" (22003), like
+-- a number past BIGINT. Only new lines are checked; rows already kept stay as they are.
 CREATE OR REPLACE FUNCTION crm_stock_apply() RETURNS trigger AS $$
 DECLARE
   held BOOLEAN := NEW.type IN ('reserve', 'release');
@@ -217,6 +221,13 @@ BEGIN
   IF NOT FOUND THEN
     INSERT INTO crm_stock (workspace_id, variant_id, branch_id, on_hand, reserved)
     VALUES (NEW.workspace_id, NEW.variant_id, NEW.branch_id, d_on_hand, d_reserved);
+  END IF;
+  IF d_on_hand > 0 AND (
+    SELECT sum(s.on_hand) FROM crm_variants v JOIN crm_stock s ON s.variant_id = v.id
+     WHERE v.workspace_id = NEW.workspace_id
+       AND v.product_id = (SELECT product_id FROM crm_variants WHERE workspace_id = NEW.workspace_id AND id = NEW.variant_id)
+  ) > 9007199254740991 THEN
+    RAISE EXCEPTION 'More stock than can be shown exactly.' USING ERRCODE = '22003';
   END IF;
   RETURN NULL;
 END;

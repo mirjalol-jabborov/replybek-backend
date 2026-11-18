@@ -9,7 +9,8 @@ import { crmOwner, teammate, browser, query, base } from "./helpers/setup.js";
 import { nowIn, addDays, dayOf } from "../src/crm/shared/time.js";
 import { slugProblem } from "../src/crm/public/rules.js";
 import { cancelProblem } from "../src/crm/shared/booking.js";
-import { deliveryTime } from "../src/crm/shared/delivery.js";
+import { deliveryTime, suggestDelivery } from "../src/crm/shared/delivery.js";
+import { PICTURES_PER_IP } from "../src/crm/public/page-routes.js";
 import { capped, LEFT_CAP } from "../src/crm/shared/store.js";
 import { forCustomer } from "../src/crm/shared/customer.js";
 
@@ -114,21 +115,47 @@ test("settings: publicPage is saved whole, checked, and the address belongs to o
   assert.equal((await x.pub("GET", "/")).body.name, x.ws.name);
 });
 
+test("settings: an address several businesses save at once goes to one, the others hear slug_taken", async () => {
+  const slug = `race-${++seq}-${process.pid}`;
+  const owners = await Promise.all([1, 2, 3, 4, 5, 6].map((n) => crmOwner(`Owner ${n}`, `Shop ${n}`)));
+  const answers = await Promise.all(owners.map((o) => o.b.call("PUT", `${o.crm}/settings`, { settings: { publicPage: { ...PAGE, slug } } })));
+  assert.deepEqual(answers.map((r) => r.status).sort(), [200, 409, 409, 409, 409, 409], JSON.stringify(answers.map((r) => r.body)));
+  for (const r of answers.filter((a) => a.status === 409)) assert.equal(r.body.code, "slug_taken");
+});
+
 /* ───── The front of the page ───── */
 
 test("GET /: what the page draws itself with, and nothing else", async () => {
   const x = await business();
   const front = ok(await x.pub("GET", "/"));
-  assert.deepEqual(keys(front), ["address", "booking", "description", "languages", "name", "pages", "phone", "shop", "today"]);
+  assert.deepEqual(keys(front), ["address", "booking", "description", "languages", "name", "now", "pages", "phone", "shop", "today"]);
   assert.deepEqual(front.pages, { booking: true, shop: true });
   assert.deepEqual(front.booking, { maxDays: 30, cancelUntil: 120, step: 15 });
-  assert.deepEqual(keys(front.shop), ["delivery", "deliveryMethods", "first", "paymentMethods"]);
+  assert.deepEqual(keys(front.shop), ["delivery", "deliveryMethods", "fields", "first", "firstTime", "paymentMethods"]);
   assert.deepEqual(keys(front.shop.delivery), ["closed", "daysOff", "maxDays", "prepMinutes", "sameDayUntil", "time", "windows"]);
   assert.deepEqual(front.shop.deliveryMethods.map(keys), [["address", "fee", "id", "name"], ["address", "fee", "id", "name"]]);
   assert.deepEqual(front.shop.paymentMethods.map((m) => m.id), ["cash", "click"]);
   assert.deepEqual(keys(front.shop.first), ["date", "slot", "time"]);
   assert.equal(front.today, today());
+  // The business's day and time now, on its own clock.
+  assert.match(front.now, /^\d{4}-\d\d-\d\dT\d\d:\d\d$/);
+  assert.equal(front.now.slice(0, 10), front.today);
   assert.equal(front.phone, "+998712000000");
+  // Windows and exact times both: the first window, and the first exact time too.
+  const rules = (await x.snap("settings")).settings;
+  assert.equal(rules.delivery.time, "both");
+  assert.deepEqual(front.shop.first, suggestDelivery(rules.delivery, front.now, rules.dayStart));
+  const exact = suggestDelivery(rules.delivery, front.now, rules.dayStart, { exact: true });
+  assert.deepEqual(front.shop.firstTime, { date: exact.date, time: exact.time });
+  assert.ok(front.shop.firstTime.time, "an exact time");
+  ok(await x.settings({ settings: { delivery: { ...rules.delivery, time: "windows" } } }));
+  assert.equal(ok(await x.pub("GET", "/")).shop.firstTime, null, "windows only: no exact time to offer");
+  ok(await x.settings({ settings: { delivery: { ...rules.delivery, time: "exact" } } }));
+  const onlyExact = ok(await x.pub("GET", "/")).shop;
+  assert.deepEqual(onlyExact.firstTime, { date: onlyExact.first.date, time: onlyExact.first.time });
+  ok(await x.settings({ settings: { delivery: rules.delivery } }));
+  // No order fields yet: nothing to ask.
+  assert.deepEqual(front.shop.fields, []);
 
   // A closed day's note is the business's own: the page gets the date only.
   const delivery = (await x.snap("settings")).settings.delivery;
@@ -320,6 +347,8 @@ test("booking fields the business needs: listed for the page, saved when given, 
   assert.equal((await x.pub("POST", "/bookings", visit(x, { start: `${D(1)}T12:00`, phone: "+998 90 111 22 35", fields: { allergy: 5 } }))).body.code, "bad_fields");
   const [given, left] = (await x.snap("appointments")).appointments;
   assert.deepEqual([given.fields, given.history], [{ allergy: "None" }, []]);
+  // Who made it: the customer, on the page.
+  assert.deepEqual(given.createdBy, { by: "", byId: null, customer: true, via: "page" });
   assert.deepEqual(left.fields, {});
   assert.deepEqual(left.history, [{ at: left.history[0].at, by: "", byId: null, type: "missing", fields: ["allergy"], customer: true, via: "page" }], "the team sees what to ask");
   // The team still has to fill them in itself.
@@ -478,15 +507,20 @@ test("ordering: the customer's delivery rules, the page's methods, in the first 
   assert.deepEqual([s.customers[0].name, s.customers[0].phone, s.customers[0].source], ["Madina", "+998934445566", "website"]);
 
   const seen = ok(await x.pub("GET", `/orders/${made.ref}?token=${made.token}`)).order;
-  assert.deepEqual(keys(seen), ["delivery", "lines", "number", "paid", "payment", "ref", "step", "totals"]);
-  assert.deepEqual(seen.step, { name: { en: "New", ru: "Новый", uz: "Yangi" }, kind: "open" });
+  assert.deepEqual(keys(seen), ["delivery", "lines", "number", "paid", "payment", "ref", "step", "steps", "totals"]);
+  assert.deepEqual(seen.step, { name: { en: "New", ru: "Новый", uz: "Yangi" }, kind: "open", position: 0 });
+  // The business's steps on the way, in order, for the page to show progress: never the cancelled one, never an id.
+  const flow = (await x.snap("orderStages")).orderStages.filter((st) => st.kind !== "cancelled");
+  assert.deepEqual(seen.steps, flow.map((st) => ({ name: st.name, kind: st.kind })));
   assert.deepEqual(seen.lines, [{ productId: p.id, variantId: p.variants[0].id, name: "Shampoo", variant: "", qty: 1, price: 40000, total: 40000 }]);
   assert.deepEqual(seen.delivery, { method: { id: "pickup", name: { en: "Pickup", ru: "Самовывоз", uz: "Olib ketish" } }, address: "", date: D(2), window: { from: "12:00", to: "15:00" }, time: "", fee: 0 });
   assert.deepEqual(seen.totals, { subtotal: 40000, discount: 0, fee: 0, total: 40000 });
   assert.equal(seen.number, o.number);
   // The team moves it: the customer sees the business's own step name.
   ok(await x.b.call("POST", `${x.crm}/orders/${o.id}/step`, { to: "packing" }));
-  assert.deepEqual(ok(await x.pub("GET", `/orders/${made.ref}?token=${made.token}`)).order.step, { name: { en: "Packing", ru: "Сборка", uz: "Yigʻilmoqda" }, kind: "reserved" });
+  assert.deepEqual(ok(await x.pub("GET", `/orders/${made.ref}?token=${made.token}`)).order.step, { name: { en: "Packing", ru: "Сборка", uz: "Yigʻilmoqda" }, kind: "reserved", position: flow.findIndex((st) => st.id === "packing") });
+  ok(await x.b.call("POST", `${x.crm}/orders/${o.id}/cancel`, {}));
+  assert.equal(ok(await x.pub("GET", `/orders/${made.ref}?token=${made.token}`)).order.step.position, null, "a cancelled order is on no step of the way");
   assert.equal((await x.pub("GET", `/orders/${made.ref}?token=nope`)).status, 404);
 
   const refused = async (over, code, status = 422) => {
@@ -512,6 +546,19 @@ test("ordering: the customer's delivery rules, the page's methods, in the first 
   const courier = ok(await x.pub("POST", "/orders", order(p, { phone: "+998 93 000 00 01", delivery: { method: "courier", address: "Chilonzor 5, kv 12", date: D(2), window: { from: "15:00", to: "18:00" } } }), browser()), 201);
   const cv = ok(await x.pub("GET", `/orders/${courier.ref}?token=${courier.token}`)).order;
   assert.deepEqual([cv.delivery.address, cv.delivery.fee, cv.totals.total], ["Chilonzor 5, kv 12", 30000, 70000]);
+});
+
+test("order fields the business needs: listed for the page, required ones bind, the team's own are left out", async () => {
+  const x = await business();
+  const p = await product(x);
+  ok(await x.settings({ fields: { order: [{ id: "recipient", name: "Recipient", type: "text", required: true }, { id: "wrap", name: "Gift wrap", type: "yesno" }, { id: "inside", name: "Packed by", type: "text" }] } }));
+  assert.deepEqual(ok(await x.pub("GET", "/")).shop.fields, [{ id: "recipient", name: "Recipient", type: "text" }], "only the ones it needs");
+  const r = await x.pub("POST", "/orders", order(p));
+  assert.deepEqual([r.status, codes(r.body.hard)], [422, ["field_required"]]);
+  assert.equal((await x.pub("POST", "/orders", order(p, { fields: { recipient: 5 } }))).body.code, "bad_fields");
+  ok(await x.pub("POST", "/orders", order(p, { fields: { recipient: "Madina opa", wrap: true, inside: "Free of charge" } })), 201);
+  const [made] = (await x.snap("orders")).orders;
+  assert.deepEqual(made.fields, { recipient: "Madina opa" });
 });
 
 test("the last item: of two customers at once, exactly one gets it; accepted orders and ones waiting both count", async () => {
@@ -613,6 +660,23 @@ test("pictures: an uploaded one is served to the page while a product on sale sh
   ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { onSale: false }));
   assert.equal((await x.pub("GET", `/images/${name}`)).status, 404);
   assert.equal((await x.pub("GET", "/images/..%2F..%2Fetc")).status, 404);
+});
+
+test("pictures have their own read limit: a page full of them never uses up the page's", async () => {
+  const x = await business();
+  const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+  const form = new FormData();
+  form.append("file", new Blob([png], { type: "image/png" }), "a.png");
+  const { image } = ok(await x.b.call("POST", `${x.crm}/products/images`, form), 201);
+  await product(x, { image });
+  const name = image.split("/").pop();
+  const v = browser();
+  for (let i = 0; i < PICTURES_PER_IP; i++) assert.equal((await x.pub("GET", `/images/${name}`, undefined, v)).status, 200, `picture ${i + 1}`);
+  assert.equal((await x.pub("GET", "/", undefined, v)).status, 200, "the page still reads");
+  assert.equal((await x.pub("GET", "/products", undefined, v)).status, 200);
+  const over = await x.pub("GET", `/images/${name}`, undefined, v);
+  assert.deepEqual([over.status, over.body.code], [429, "rate_limited"]);
+  assert.equal((await x.pub("GET", `/images/${name}`, undefined, browser())).status, 200, "another visitor is not held back");
 });
 
 /* ───── Tenancy, transport, limits ───── */

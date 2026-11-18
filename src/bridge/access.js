@@ -1,7 +1,9 @@
 // When the AI agent may work in the CRM: the workspace has both products, the business switched
 // the connection on in CRM settings (settings.aiConnected), and at least one module is on.
-// Writes also need settings.aiAct. Anything else: no CRM tools at all.
+// Writes also need settings.aiAct, and a CRM that isn't read-only (billed and not paid for: the
+// same decision as the team's writes). Anything else: no CRM tools at all.
 import { query } from "../core/db.js";
+import { writeRefusal } from "../core/billing/product-access.js";
 import { read } from "../crm/db.js";
 import { view } from "../crm/core/settings.js";
 
@@ -13,7 +15,7 @@ import { view } from "../crm/core/settings.js";
  */
 export async function crmAccess(agent, conversationId = null) {
   const { rows } = await query(
-    "SELECT w.name, w.products, c.channel, c.visitor FROM workspaces w LEFT JOIN conversations c ON c.id = $2 AND c.workspace_id = w.id WHERE w.id = $1",
+    "SELECT w.*, c.channel, c.visitor FROM workspaces w LEFT JOIN conversations c ON c.id = $2 AND c.workspace_id = w.id WHERE w.id = $1",
     [agent.workspace_id, conversationId]
   );
   const w = rows[0];
@@ -28,6 +30,6 @@ export async function crmAccess(agent, conversationId = null) {
     channel: w.channel || null,
     visitor: w.visitor || {},
     modules: on,
-    act: settings.aiAct !== false,
+    act: settings.aiAct !== false && !writeRefusal(w, "crm"),
   };
 }

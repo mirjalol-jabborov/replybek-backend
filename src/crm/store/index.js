@@ -14,7 +14,10 @@ export { productsForCustomers, findForCustomers, orderedByCustomerToday } from "
 export { uploadedName, shownToCustomers, sendImage } from "./images.js";
 // What moving goods between branches (../branches/transfer.js) writes with: the Store's own ledger steps.
 export { target, hasTarget, resolveVariants, lockStock, postMoves } from "./stock.js";
-export { storeChanges } from "./rows.js";
+export { storeChanges, listMovements } from "./rows.js";
+// What an Excel import of products (../exchange) checks and writes with: the product form's shape
+// and the note on opening stock.
+export { productCreateSchema, OPENING } from "./products.js";
 
 /* ───── What core asks a module ───── */
 

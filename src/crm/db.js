@@ -19,6 +19,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Whether a path parameter can be a row's id. Anything else reads as "not found" without asking the database. */
 export const isUuid = (id) => typeof id === "string" && UUID.test(id);
 
+/**
+ * Ends a LATERAL subquery that looks rows up for each row before it (an order's payments, a
+ * customer's earlier visits), so the work follows the rows asked for, not the history. Postgres
+ * folds a plain LATERAL subquery into a join, and may then answer it by reading the workspace's
+ * whole table (a hash join); one with LIMIT or OFFSET stays as it is and is run by its index.
+ * ONE: the row, or the first that fits. EACH: all of them.
+ */
+export const ONE = "LIMIT 1";
+export const EACH = "OFFSET 0";
+
 /** A client inside a transaction as the plain q(text, params) the readers take. */
 export const asQ = (c) => (text, params) => c.query(text, params);
 

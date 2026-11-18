@@ -27,10 +27,16 @@ export const lineTotal = (l) => int(l.qty) * int(l.price) - int(l.discount);
 /**
  * What an order comes to. lines: before any discount; subtotal: after the lines' discounts;
  * discount: the order's own, never more than the subtotal; total: what the customer owes in all;
- * paid: payments so far (a refund is a minus payment); balance: what is still owed (below zero
- * when more was paid than the order now costs).
+ * paid: what the business kept (payments less refunds; a refund is a minus payment); refunded:
+ * what was given back; balance: what is still owed (below zero when more was paid than the order
+ * now costs).
+ * `stages` (orderStages) tell a finished order: handing it over settled the bill, so money given
+ * back afterwards without the goods is a reduction, never a new debt. Its balance never rises
+ * because of a refund (it can only come back to zero from an overpayment). While an order is open,
+ * or once its goods came back, money given back is owed again. Without `stages` (a draft) an
+ * order counts as not finished.
  */
-export function totals(order) {
+export function totals(order, stages) {
   const list = order.lines || [];
   const lines = list.reduce((s, l) => s + int(l.qty) * int(l.price), 0);
   const lineDiscounts = list.reduce((s, l) => s + int(l.discount), 0);
@@ -38,11 +44,20 @@ export function totals(order) {
   const discount = Math.max(0, Math.min(int(order.discount), subtotal));
   const fee = int(order.delivery?.fee);
   const total = subtotal - discount + fee;
-  const paid = (order.payments || []).reduce((s, p) => s + int(p.amount), 0);
-  return { lines, lineDiscounts, subtotal, discount, fee, total, paid, balance: total - paid };
+  let paidIn = 0;
+  let refunded = 0;
+  for (const p of order.payments || []) {
+    const amount = int(p.amount);
+    if (amount < 0) refunded -= amount;
+    else paidIn += amount;
+  }
+  const paid = paidIn - refunded;
+  const finished = Boolean(stages) && !order.returned && kindOf(stages, order.status) === K.done;
+  const balance = finished ? Math.min(total - paid, Math.max(0, total - paidIn)) : total - paid;
+  return { lines, lineDiscounts, subtotal, discount, fee, total, paid, refunded, balance };
 }
-/** Paid in full: nothing is owed any more. */
-export const isPaid = (order) => totals(order).balance <= 0;
+/** Paid in full: nothing is owed any more. `stages` as for totals(). */
+export const isPaid = (order, stages) => totals(order, stages).balance <= 0;
 /** Lines plus fee less discounts: the sum shown everywhere an order's sum is shown. */
 export const orderTotal = (order) => totals(order).total;
 export const orderUnits = (order) => (order.lines || []).reduce((s, l) => s + l.qty, 0);
@@ -113,7 +128,7 @@ export function needsFor(stages, stageId) {
  */
 export function missingFor(stages, defs, order, stageId) {
   const needs = needsFor(stages, stageId);
-  const out = needs.paid && !(order.paid ?? isPaid(order)) ? [{ code: "needs_paid" }] : [];
+  const out = needs.paid && !(order.paid ?? isPaid(order, stages)) ? [{ code: "needs_paid" }] : [];
   if (needs.fields.length) for (const def of missingFields(defs, order.fields, needs.fields)) out.push({ code: "needs_field", field: def.id });
   return out;
 }
@@ -162,7 +177,8 @@ const perLine = (lines, type, sign) => (lines || []).filter((l) => l.qty > 0).ma
  *     stock: [{ variantId, onHand, reserved }],      signed changes to the counters
  *     movements: [{ variantId, type, qty }],         ledger lines, in the order to write them
  *     pay: n,                                        soʻm still owed that handing over settles (0 = nothing)
- *     history: { text, to?, toName?, note? } }
+ *     history: { text, to?, toName?, note? },
+ *     paid: { text: "paid", amount, method } | null } the history line of that payment, after the move's
  * Ledger types: reserve (+) and release (-) move the reserved count, one line per variant; sale (-)
  * and return (+) move what is on hand, one line per order line. A release is always written
  * before the sale it belongs to, so reserved never passes on hand on the way.
@@ -202,7 +218,7 @@ export function planMove({ stages, fields, order, stock }, to, { note } = {}) {
   if (into === K.done) {
     const short = wasHeld ? [] : shortages(stock, need);
     if (missing.length || short.length) return refuse(missing, short);
-    const balance = totals(order).balance;
+    const pay = order.payments ? Math.max(0, totals(order, stages).balance) : 0;
     return {
       ok: true,
       change: "sold",
@@ -210,8 +226,9 @@ export function planMove({ stages, fields, order, stock }, to, { note } = {}) {
       stock: entries(need).map(([variantId, qty]) => ({ variantId, onHand: -qty, reserved: wasHeld ? -qty : 0 })),
       movements: [...(wasHeld ? entries(need).map(([variantId, qty]) => ({ variantId, type: "release", qty: -qty })) : []), ...perLine(order.lines, "sale", -1)],
       // Handing the goods over closes the bill, as in the demo: what is still owed counts as paid now.
-      pay: order.payments ? Math.max(0, balance) : 0,
+      pay,
       history: moved,
+      paid: pay > 0 ? { text: "paid", amount: pay, method: order.payment ?? "" } : null,
     };
   }
   if (willHold && !wasHeld) {

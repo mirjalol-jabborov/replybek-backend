@@ -9,7 +9,7 @@ import { bad, refusal } from "../errors.js";
 import { mergeChanges } from "../changes.js";
 import { createOrder, listOrders, listProducts, productsForCustomers, uploadedName, shownToCustomers, sendImage } from "../store/index.js";
 import { findOrAddCustomer } from "../core/customers.js";
-import { capped, lineTotal, optionsText } from "../shared/store.js";
+import { capped, flowOf, lineTotal, optionsText } from "../shared/store.js";
 import { rulesOf as deliveryRules, deliveryTime, windowOf } from "../shared/delivery.js";
 import { stageOf } from "../shared/lists.js";
 import { openPart, pageNotFound, pageWrite } from "./pages.js";
@@ -70,7 +70,7 @@ export function listCategories(ws) {
  * how it takes times); then every refusal the Store gives, the stock last, so a request that meets
  * the stock check would really be placed and no refusal tells more about the stock than GET
  * products does. Answers { ref, token }.
- * body: { lines: [{ productId, variantId, qty }], name, phone (normalised), delivery, payment, note }.
+ * body: { lines: [{ productId, variantId, qty }], name, phone (normalised), delivery, payment, note, fields? }.
  */
 export async function placeOrder(ws, body) {
   return pageWrite(ws, async (c, cfg, q) => {
@@ -88,15 +88,22 @@ export async function placeOrder(ws, body) {
       delivery: { type: method.id, address: method.address ? body.delivery.address : "", date: body.delivery.date, slot: time.slot, time: time.time },
       payment: body.payment,
       note: body.note,
+      fields: body.fields,
     });
     const request = await recordRequest(q, cfg, "order", { orderId: made.id });
     return { changes: mergeChanges(made.changes, customer.added && { set: { customers: [customer.added] } }), ...request };
   });
 }
 
-/** An order as its customer sees it, with the business's own names for its step and methods. */
+/**
+ * An order as its customer sees it, with the business's own names for its step and methods.
+ * `steps`: the steps on its way, in order (never the cancelled one), and `step.position` the one
+ * it is at (null when it is cancelled, or in a step that is gone).
+ */
 function orderView(cfg, order, products, ref) {
   const stage = stageOf(cfg.data.orderStages, order.status);
+  const flow = flowOf(cfg.data.orderStages);
+  const at = flow.findIndex((s) => s.id === order.status);
   const nameIn = (list, id) => ({ id, name: list.find((x) => x.id === id)?.name || "" });
   const lines = order.lines.map((l) => {
     const p = products.find((x) => x.id === l.productId);
@@ -108,7 +115,8 @@ function orderView(cfg, order, products, ref) {
   return {
     ref,
     number: order.number,
-    step: { name: stage.name, kind: stage.kind },
+    step: { name: stage.name, kind: stage.kind, position: at >= 0 ? at : null },
+    steps: flow.map((s) => ({ name: s.name, kind: s.kind })),
     lines,
     delivery: { method: nameIn(cfg.data.deliveryMethods, d.type), address: d.address || "", date: d.date || "", window: windowOf(d.slot), time: d.time || "", fee: Number(d.fee) || 0 },
     payment: nameIn(cfg.data.paymentMethods, order.payment),

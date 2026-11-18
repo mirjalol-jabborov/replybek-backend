@@ -98,8 +98,11 @@ export async function uploadImage(workspace, file) {
   return { image: pathOf(workspace.id, name) };
 }
 
-/** Uploads a picture and makes it the product's. The picture it had, if it was uploaded, is removed. */
-export async function setProductImage(workspace, productId, file) {
+/**
+ * Uploads a picture and makes it the product's. The picture it had, if it was uploaded, is removed.
+ * `user`: who does it; the product in the answer has their branch's numbers when they are limited to one.
+ */
+export async function setProductImage(workspace, user, productId, file) {
   if (!isUuid(productId)) throw notFound("Product not found");
   const { image: path } = await uploadImage(workspace, file);
   try {
@@ -107,7 +110,7 @@ export async function setProductImage(workspace, productId, file) {
       const stored = (await c.query("SELECT image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
       if (!stored) throw notFound("Product not found");
       await c.query("UPDATE crm_products SET image = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, productId, path]);
-      return { changes: await storeChanges(q, cfg, { productIds: [productId] }), image: path, old: stored.image };
+      return { changes: await storeChanges(q, cfg, { productIds: [productId], branchId: user?.branchOnly }), image: path, old: stored.image };
     });
     const { old, ...body } = out;
     await dropUpload(workspace.id, old);

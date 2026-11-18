@@ -52,3 +52,21 @@ export function nowIn(timezone, date) {
   );
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
+
+// A place's zone as the IANA zone database names it ("Asia/Tashkent", "America/Argentina/Salta"),
+// or UTC: each part starts with a capital. Offsets, abbreviations and other spellings are not a business's clock.
+const ZONE = /^(Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)(\/[A-Z][A-Za-z0-9_+-]*){1,2}$|^UTC$/;
+/**
+ * Whether a business's time zone is written as the zone database writes it, and the clock knows it.
+ * The clock ignores letter case, so a name it spells otherwise only in case ("Asia/TASHKENT") is
+ * refused; one it spells otherwise in full is an old or new name of the zone (Asia/Kolkata, Asia/Calcutta).
+ */
+export function isZoneName(tz) {
+  if (typeof tz !== "string" || !ZONE.test(tz)) return false;
+  try {
+    const known = new Intl.DateTimeFormat("en", { timeZone: tz }).resolvedOptions().timeZone;
+    return known === tz || known.toLowerCase() !== tz.toLowerCase();
+  } catch {
+    return false;
+  }
+}

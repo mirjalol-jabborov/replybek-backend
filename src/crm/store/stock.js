@@ -142,7 +142,8 @@ export async function postMoves(c, cfg, user, moves, { branchId = cfg.branchId, 
     // The rules checked this under a lock, so the database's own refusal should never be reached.
     // If it is, nothing is saved and the person is told to look again.
     if (e.code === "23514" && /^crm_stock_/.test(e.constraint || "")) throw conflict("The stock changed a moment ago. Check the numbers and try again.", "stock_changed");
-    // A number past what the database holds (more than 9 * 10^18 units): refused, never a 500.
+    // A number past what the database holds, or stock that would take a product past what the app
+    // is sent exactly (2^53 - 1 units, sql/crm/20-store.sql): refused, never a 500.
     if (e.code === "22003") throw refusal([{ code: "qty_too_large" }], [], { message: "That is more stock than can be kept." });
     throw e;
   }
@@ -201,7 +202,9 @@ export function writeOff(workspace, user, { qty: n, reason, note = "", branchId:
 }
 
 export const countSchema = z
-  .object({ ...target, counted: z.number().int().min(0).max(1_000_000), note: noteShape.optional(), branchId: uuid.optional() })
+  // What is on the shelf: as much as JSON keeps exactly. The ledger refuses a count that would take
+  // the product as a whole past it (qty_too_large), as it refuses such a receipt.
+  .object({ ...target, counted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), note: noteShape.optional(), branchId: uuid.optional() })
   .strict()
   .refine(hasTarget, "Say which product.");
 

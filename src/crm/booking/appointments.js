@@ -59,12 +59,14 @@ export async function getAppointment(q, cfg, id, me) {
 const byCustomer = (who) => who?.by === "customer";
 
 /**
- * One line of a booking's history: what was done, when (the business's clock) and by whom. A
- * customer's own change says so (`customer: true`) and where they made it (`via`: "page", "ai").
+ * Who did something, as a booking keeps it: { by: name, byId }, and for a customer acting for
+ * themselves also `customer: true` and where (`via`: "page", "ai"). A booking keeps it as its
+ * `createdBy` too.
  */
-export const entry = (cfg, who, what) => ({
-  at: cfg.now, by: who?.user?.name || "", byId: who?.user?.id || null, ...what, ...(byCustomer(who) ? { customer: true, via: who.via } : {}),
-});
+export const whoOf = (who) => ({ by: who?.user?.name || "", byId: who?.user?.id || null, ...(byCustomer(who) ? { customer: true, via: who.via } : {}) });
+
+/** One line of a booking's history: what was done, when (the business's clock) and by whom (whoOf). */
+export const entry = (cfg, who, what) => ({ at: cfg.now, ...what, ...whoOf(who) });
 
 /**
  * The booking rules said no: 422 { code: "rules", hard, soft, override }. `override` says whether
@@ -173,13 +175,17 @@ export function needChangeable(cfg, a, who) {
   if (problem) throw refusal([problem], [], { message: "Only the team can change this booking now." });
 }
 
-/** Stores a new booking. The caller has checked it; the constraint still guards the time. */
-export function insertAppointment(c, cfg, a) {
+/**
+ * Stores a new booking. The caller has checked it; the constraint still guards the time. `who`:
+ * who made it (as for entry()), kept on it; null when nobody is known.
+ */
+export function insertAppointment(c, cfg, a, who) {
   return guarded(c, cfg, a, async () => {
+    const creator = who ? whoOf(who) : null;
     const { rows } = await c.query(
-      `INSERT INTO crm_appointments (workspace_id, branch_id, customer_id, staff_id, service_ids, start_at, duration, price, status, busy, source, note, fields, series_id, series_day, created_by, customer_made, history)
-       VALUES ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING ${APPT("$2")}`,
-      [cfg.workspaceId, cfg.timezone, cfg.branchId, a.customerId, a.staffId, a.serviceIds, a.start, a.duration, a.price, a.status, a.busy, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), a.seriesId || null, a.seriesDay || null, a.createdBy || null, Boolean(a.customerMade), JSON.stringify(a.history || [])]
+      `INSERT INTO crm_appointments (workspace_id, branch_id, customer_id, staff_id, service_ids, start_at, duration, price, status, busy, source, note, fields, series_id, series_day, created_by, customer_made, history, creator)
+       VALUES ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING ${APPT("$2")}`,
+      [cfg.workspaceId, cfg.timezone, cfg.branchId, a.customerId, a.staffId, a.serviceIds, a.start, a.duration, a.price, a.status, a.busy, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), a.seriesId || null, a.seriesDay || null, creator?.byId || null, byCustomer(who), JSON.stringify(a.history || []), creator && JSON.stringify(creator)]
     );
     return rows[0];
   });
@@ -222,8 +228,8 @@ export function bookAppointment(at, who, body) {
     const row = await insertAppointment(c, cfg, {
       customerId: body.customerId, staffId, serviceIds: body.serviceIds, start: body.start, duration, price: customer ? sum.price : body.price ?? sum.price,
       status: stage.id, busy: kindHolds(stage.kind), source: (customer ? who.source : body.source) || "", note: body.note ?? "", fields: fields.values,
-      createdBy: who.user?.id || null, customerMade: customer, history: fields.missing.length ? [entry(cfg, who, { type: "missing", fields: fields.missing })] : [],
-    });
+      history: fields.missing.length ? [entry(cfg, who, { type: "missing", fields: fields.missing })] : [],
+    }, who);
     return { changes: { set: { appointments: [row] } }, id: row.id, ...(soft.length ? { forced: soft } : {}) };
   }));
 }

@@ -34,8 +34,8 @@ export const daysQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-
 export const lookupQuery = z.object({ token: z.string().min(1).max(100) }).strict();
 export const tokenBody = z.object({ token: z.string().min(1).max(100) }).strict();
 
-// Values for the booking fields the business needs (GET services lists them): checked against
-// each field's type when the booking is made.
+// Values for the booking and order fields the business needs (GET services and GET / list them):
+// checked against each field's type when the booking or the order is made.
 const fields = z
   .record(z.union([z.string().max(500), z.number(), z.boolean(), z.null()]))
   .refine((v) => Object.keys(v).length <= 50, "Too many fields.")
@@ -78,6 +78,7 @@ export const orderBody = z
       .strict(),
     payment: z.string().min(1).max(40),
     note,
+    fields,
     url,
   })
   .strict();

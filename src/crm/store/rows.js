@@ -4,7 +4,7 @@
 // what a write answers with is read inside the same transaction that made the change.
 import { notFound } from "../../core/http.js";
 import { wall, isUuid } from "../db.js";
-import { totals, isPaid } from "../shared/store.js";
+import { totals } from "../shared/store.js";
 
 /* ───── Products ───── */
 
@@ -127,9 +127,9 @@ export async function listMovements(q, cfg, ids, branchId = null) {
 
 /**
  * An order as the pages read it, with its money added up: `totals` (see totals() in the shared
- * rules) and `paid`, true when nothing is owed any more.
+ * rules, which read the step's kind from `stages`) and `paid`, true when nothing is owed any more.
  */
-function orderRow(r) {
+function orderRow(r, stages) {
   const order = {
     id: r.id,
     number: Number(r.number),
@@ -148,7 +148,8 @@ function orderRow(r) {
     createdAt: r.createdAt,
     history: r.history,
   };
-  return { ...order, totals: totals(order), paid: isPaid(order) };
+  const sums = totals(order, stages);
+  return { ...order, totals: sums, paid: sums.balance <= 0 };
 }
 
 /**
@@ -181,7 +182,7 @@ export async function listOrders(q, cfg, where = {}, lock = "") {
       ORDER BY o.created_at DESC, o.number DESC ${lock ? `${lock} OF o` : ""}`,
     params
   );
-  return rows.map(orderRow);
+  return rows.map((r) => orderRow(r, cfg.data.orderStages));
 }
 
 /* ───── What every write of an order shares ───── */

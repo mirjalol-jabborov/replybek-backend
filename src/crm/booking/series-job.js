@@ -36,7 +36,12 @@ function extendBatch(workspaceId) {
   return write(workspaceId, async (c, cfg, q) => {
     const horizon = horizonOf(cfg);
     // One more than a batch, to know whether another one follows.
-    const { rows } = await q(`SELECT ${SERIES}, created_by FROM crm_series WHERE workspace_id = $1 AND ${RUNNING} AND through < $2::date ORDER BY created_at, id LIMIT ${BATCH + 1}`, [workspaceId, horizon]);
+    // Who made each series books its visits: their id and name (no one, when they left).
+    const { rows } = await q(
+      `SELECT ${SERIES}, (SELECT json_build_object('id', u.id, 'name', u.name) FROM users u WHERE u.id = crm_series.created_by) AS maker
+         FROM crm_series WHERE workspace_id = $1 AND ${RUNNING} AND through < $2::date ORDER BY created_at, id LIMIT ${BATCH + 1}`,
+      [workspaceId, horizon]
+    );
     const list = rows.slice(0, BATCH);
     if (!list.length) return { made: 0, more: false };
     const from = list.reduce((d, s) => (firstToBook(cfg, s) < d ? firstToBook(cfg, s) : d), horizon);
@@ -44,8 +49,8 @@ function extendBatch(workspaceId) {
     const have = await bookedDays(q, cfg, list);
     const appointments = [];
     const series = [];
-    for (const { created_by: createdBy, ...s } of list) {
-      const r = await extend(c, cfg, s, createdBy, { db, have: have[s.id] });
+    for (const { maker, ...s } of list) {
+      const r = await extend(c, cfg, s, maker && { user: maker }, { db, have: have[s.id] });
       appointments.push(...r.created);
       // A series that ran out of its count has nothing more to book: close it, so it stops coming up.
       const ended = s.count && seriesEnded(r.series, r.series.through);

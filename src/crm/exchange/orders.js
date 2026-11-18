@@ -1,8 +1,7 @@
 // Orders of a span of days (by the day they were made) as two sheets, for an export: the orders
 // with their money (the shared totals(), so the sums are the ones the order panels show) and
 // their lines.
-import { wall } from "../db.js";
-import { ONE } from "../reports/money.js";
+import { wall, ONE } from "../db.js";
 import { totals, lineTotal, optionsText } from "../shared/store.js";
 import { header, yesNo, L } from "./words.js";
 import { listName, fieldCell } from "./cells.js";
@@ -38,7 +37,7 @@ export async function ordersSheets(q, cfg, p, lang) {
   const lines = [];
   for (const o of rows) {
     const list = o.lines || [];
-    const t = totals({ lines: list, discount: o.discount, delivery: o.delivery, payments: o.payments || [] });
+    const t = totals({ status: o.status, returned: o.returned, lines: list, discount: o.discount, delivery: o.delivery, payments: o.payments || [] }, cfg.data.orderStages);
     orders.push([
       Number(o.number),
       o.created.replace("T", " "),

@@ -16,7 +16,7 @@ import { write, updateRow } from "../db.js";
 import { bad, conflict, refusal, refusalsFor, shareUsed } from "../errors.js";
 import { uuid, money, day } from "../shapes.js";
 import { findCustomer, cleanCustomer, insertCustomer, needSource } from "../core/customers.js";
-import { cleanFields, firstOf, hasId, isHm, same, PER_PHONE_PER_DAY } from "../shared/index.js";
+import { cleanFields, customerFields, firstOf, hasId, isHm, same, PER_PHONE_PER_DAY } from "../shared/index.js";
 import { K, canEditLines, planLines, requiredMissing, totals } from "../shared/store.js";
 import { checkDelivery, deliveryAllowed } from "../shared/delivery.js";
 import { addPayment, historyLine, lockOrder, storeChanges } from "./rows.js";
@@ -115,10 +115,14 @@ function cleanDelivery(cfg, sent, stored) {
   return { delivery: next, hard: [...hard, ...check.hard], soft: check.soft };
 }
 
-/** The order's custom fields to store, with a reason for each required one left empty. */
-function cleanOrderFields(cfg, sent, stored) {
+/**
+ * The order's custom fields to store, with a reason for each required one left empty. A customer
+ * acting for themselves (`customer`) fills only the ones a customer is asked for (customerFields):
+ * what they send for the team's own is left out.
+ */
+function cleanOrderFields(cfg, sent, stored, customer = false) {
   const defs = cfg.data.fields.order;
-  const { values, errors } = cleanFields(defs, sent, stored);
+  const { values, errors } = cleanFields(customer ? customerFields(defs) : defs, sent, stored);
   if (Object.keys(errors).length) throw bad("One of the order's fields has a value that doesn't fit it.", "bad_fields", { fields: errors });
   return { fields: values, hard: requiredMissing(defs, values) };
 }
@@ -147,7 +151,7 @@ export function createOrder(at, user, input) {
     // Filled from one branch, which holds and gives its goods. A customer's own order is the default branch's.
     const branchId = customer ? cfg.branchId : await needBranch(q, cfg, user, input.branchId, { work: true });
     const d = cleanDelivery(cfg, input.delivery || {});
-    const f = cleanOrderFields(cfg, input.fields || {});
+    const f = cleanOrderFields(cfg, input.fields || {}, undefined, customer);
     const l = customer ? await customerLines(c, cfg, input.lines) : await cleanLines(c, cfg, input.lines, [], branchId);
     const draft = { lines: l.lines, discount: (!customer && input.discount) || 0, delivery: d.delivery };
     checkDiscount(draft);
@@ -160,16 +164,18 @@ export function createOrder(at, user, input) {
     // A customer who came with the order is added only now, when nothing can refuse it any more.
     const added = comes ? await insertCustomer(c, cfg, { ...comes, source }) : null;
     const first = firstOf(stages, K.open) || stages[0];
+    // Paid in full on the spot: one payment of the total, and its line in the history.
+    const paidNow = !customer && input.paid ? totals(draft).total : 0;
+    const history = [historyLine(cfg, user, "created"), ...(paidNow > 0 ? [historyLine(cfg, user, "paid", { amount: paidNow, method: payment })] : [])];
     const number = (await c.query("UPDATE crm_settings SET order_seq = order_seq + 1 WHERE workspace_id = $1 RETURNING order_seq", [cfg.workspaceId])).rows[0].order_seq;
     const { rows } = await c.query(
       `INSERT INTO crm_orders (workspace_id, branch_id, number, customer_id, status, delivery, payment, discount, source, note, fields, history, created_by, customer_made)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
-      [cfg.workspaceId, branchId, number, added?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify([historyLine(cfg, user, "created")]), user?.id || null, customer]
+      [cfg.workspaceId, branchId, number, added?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify(history), user?.id || null, customer]
     );
     const orderId = rows[0].id;
     await writeLines(c, cfg, orderId, l.lines);
-    const total = totals(draft).total;
-    if (!customer && input.paid && total > 0) await addPayment(c, cfg, user, orderId, total, payment);
+    if (paidNow > 0) await addPayment(c, cfg, user, orderId, paidNow, payment);
     return { changes: await storeChanges(q, cfg, { orderId, more: added ? { customers: [added] } : undefined }), id: orderId };
   }));
 }

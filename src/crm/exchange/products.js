@@ -11,14 +11,10 @@ import { conflict } from "../errors.js";
 import { isUuid } from "../db.js";
 import { same } from "../shared/index.js";
 import { optionsText } from "../shared/store.js";
-import { listProducts } from "../store/index.js";
-import { productCreateSchema } from "../store/products.js";
-import { listMovements } from "../store/rows.js";
-import { postMoves } from "../store/stock.js";
+import { listProducts, listMovements, postMoves, productCreateSchema, OPENING } from "../store/index.js";
 import { HEADERS, header, yesNo, readYesNo } from "./words.js";
 import { findInList, listName, readNumber, shapeReason } from "./cells.js";
 
-const OPENING = { en: "Opening stock", ru: "Начальный остаток", uz: "Boshlangʻich qoldiq" };
 const EXPORTED = ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved"];
 const PRODUCT_KEYS = ["name", "category", "unit", "onSale"];
 const VARIANT_KEYS = ["sku", "price", "cost", "lowAt"];
@@ -143,8 +139,11 @@ export async function planProducts(q, cfg, table) {
   return plan;
 }
 
-/** Writes a plan: new products, their variants and opening stock, then every change, each in one statement. */
-export async function applyProducts(c, cfg, q, user, plan) {
+/**
+ * Writes a plan: new products, their variants and opening stock (a receipt at `branchId`), then
+ * every change, each in one statement.
+ */
+export async function applyProducts(c, cfg, q, user, plan, branchId) {
   const col = (list, f) => list.map(f);
   const adds = plan.add.map((a) => ({ ...a.values, productId: crypto.randomUUID(), variantId: crypto.randomUUID() }));
   try {
@@ -160,7 +159,7 @@ export async function applyProducts(c, cfg, q, user, plan) {
         [cfg.workspaceId, col(adds, (a) => a.variantId), col(adds, (a) => a.productId), col(adds, (a) => a.sku), col(adds, (a) => a.price), col(adds, (a) => a.cost), col(adds, (a) => a.lowAt)]
       );
     }
-    const moveIds = await postMoves(c, cfg, user, adds.filter((a) => a.opening > 0).map((a) => ({ variantId: a.variantId, type: "receipt", qty: a.opening })), { note: OPENING });
+    const moveIds = await postMoves(c, cfg, user, adds.filter((a) => a.opening > 0).map((a) => ({ variantId: a.variantId, type: "receipt", qty: a.opening })), { note: OPENING, branchId });
     const variants = plan.update.filter((u) => Object.keys(u.variant).length);
     if (variants.length) {
       await c.query(

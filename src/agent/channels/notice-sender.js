@@ -52,4 +52,10 @@ async function send(address, text) {
   }
 }
 
-registerSender("telegram", { reach, send });
+/** Whether the workspace has a connected bot: without one, nobody can be written to here. */
+async function ready(workspaceId) {
+  const { rows } = await query("SELECT 1 FROM agent_channels WHERE workspace_id = $1 AND type = 'telegram' AND status = 'active' LIMIT 1", [workspaceId]);
+  return rows.length > 0;
+}
+
+registerSender("telegram", { reach, send, ready });

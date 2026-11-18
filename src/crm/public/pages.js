@@ -3,11 +3,13 @@
 // probed.
 import { query } from "../../core/db.js";
 import { HttpError } from "../../core/http.js";
+import { writeRefusal } from "../../core/billing/product-access.js";
 import { read, write } from "../db.js";
 import { SLUG, slugProblem } from "./rules.js";
 import { pageOf } from "./settings.js";
 import { suggestDelivery, rulesOf as deliveryRules } from "../shared/delivery.js";
 import { rulesOf as bookingRules } from "../shared/booking.js";
+import { customerFields } from "../shared/fields.js";
 import { dayOf } from "../shared/time.js";
 
 export const pageNotFound = () => new HttpError(404, "Not found", { code: "not_found" });
@@ -22,10 +24,11 @@ export const pageWrite = async (ws, fn) => {
 };
 
 // The one query that can't start from a workspace: it finds the workspace (crm_settings_public_slug).
-const BY_SLUG = `SELECT s.workspace_id AS id, w.name, w.products FROM crm_settings s JOIN workspaces w ON w.id = s.workspace_id
+// The whole workspace row: its products and its billing decide what the page may do.
+const BY_SLUG = `SELECT w.* FROM crm_settings s JOIN workspaces w ON w.id = s.workspace_id
   WHERE (s.data->'settings'->'publicPage'->>'slug') = $1 AND (s.data->'settings'->'publicPage'->>'slug') <> ''`;
 
-/** The workspace that has this address: { id, name, products }, or null. `q`: inside a write, its client's. */
+/** The workspace that has this address (its row: id, name, products, billing), or null. `q`: inside a write, its client's. */
 export async function slugOwner(slug, q = query) {
   if (typeof slug !== "string" || !SLUG.test(slug)) return null;
   return (await q(BY_SLUG, [slug])).rows[0] || null;
@@ -62,11 +65,27 @@ export function openPart(cfg, part) {
   return page;
 }
 
+/**
+ * A page's writes (book, cancel, order) wait while the business's CRM is read-only (billed and not
+ * paid for): the same decision as the team's writes (writeRefusal). A customer is told only that
+ * it isn't available right now: 402 { code: "unavailable" }, nothing about the business's billing.
+ */
+export function needWritable(ws) {
+  if (writeRefusal(ws, "crm")) throw new HttpError(402, "This isn't available right now.", { code: "unavailable" });
+}
+
 /** The 404 unless this part of the page is open: run by the router before a route reads its input. */
 export const checkPart = (ws, part) => read(ws.id, async (q, cfg) => void openPart(cfg, part));
 
+/**
+ * The fields of a booking or an order the business needs a customer to fill ({ id, name, type,
+ * options? }): the page asks for them. The others are the team's own.
+ */
+export const fieldsToAsk = (defs) => customerFields(defs).map(({ id, name, type, options }) => ({ id, name, type, ...(options ? { options } : {}) }));
+
 /** GET /: what the page needs to draw itself. Nothing about the team, customers or stock. */
 export const showFront = (ws) => read(ws.id, async (q, cfg) => front(ws, cfg));
+const exactTime = ({ date, time }) => ({ date, time });
 function front(ws, cfg) {
   const page = openPart(cfg, "any");
   const { settings } = cfg.data;
@@ -77,6 +96,7 @@ function front(ws, cfg) {
     address: page.address,
     languages: page.languages,
     today: dayOf(cfg.now),
+    now: cfg.now,
     pages: page.on,
   };
   if (page.on.booking) {
@@ -91,6 +111,9 @@ function front(ws, cfg) {
       // The business's notes on closed days stay inside: the page shows the day as closed.
       delivery: { time: d.time, windows: d.windows, daysOff: d.daysOff, closed: d.closed.map((c) => c.date), sameDayUntil: d.sameDayUntil, prepMinutes: d.prepMinutes, maxDays: d.maxDays },
       first: suggestDelivery(settings.delivery, cfg.now, settings.dayStart),
+      // The first exact time, whenever the business takes exact times (with windows too, in "both").
+      firstTime: d.time === "windows" ? null : exactTime(suggestDelivery(settings.delivery, cfg.now, settings.dayStart, { exact: true })),
+      fields: fieldsToAsk(cfg.data.fields.order),
     };
   }
   return out;

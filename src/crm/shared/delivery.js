@@ -84,11 +84,12 @@ export function deliveryTime(rules, choice, now) {
 /**
  * The first delivery that keeps every rule, to start a new order with: the earliest allowed day,
  * and on it the first window (or exact time) that leaves enough time to prepare. Looks a week
- * ahead. `dayStart` is the business's opening time ("10:00" when not given).
+ * ahead. `dayStart` is the business's opening time ("10:00" when not given). `exact`: the first
+ * exact time even when the business takes windows too ("both").
  */
-export function suggestDelivery(settingsDelivery, now, dayStart = "10:00") {
+export function suggestDelivery(settingsDelivery, now, dayStart = "10:00", { exact: asked = false } = {}) {
   const rules = rulesOf(settingsDelivery);
-  const exact = !rules.windows.length || rules.time === "exact";
+  const exact = asked || !rules.windows.length || rules.time === "exact";
   const nowDay = now.slice(0, 10);
   const fine = (d) => {
     const c = checkDelivery(d, rules, now);

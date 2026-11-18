@@ -187,7 +187,7 @@ test("a booking the team makes: starts confirmed, takes length and price from it
   assert.equal(a.id, r.id);
   assert.deepEqual(
     { ...a, createdAt: "", branchId: "" },
-    { id: r.id, customerId: o.c1, staffId: o.p1, serviceIds: [o.s1, o.s2], start: `${D(2)}T14:20`, duration: 90, price: 140000, status: "confirmed", source: "phone", note: "First visit", paid: false, fields: {}, history: [], seriesId: null, seriesDay: null, branchId: "", createdAt: "" }
+    { id: r.id, customerId: o.c1, staffId: o.p1, serviceIds: [o.s1, o.s2], start: `${D(2)}T14:20`, duration: 90, price: 140000, status: "confirmed", source: "phone", note: "First visit", paid: false, fields: {}, history: [], seriesId: null, seriesDay: null, branchId: "", createdAt: "", createdBy: { by: o.user.name, byId: o.user.id } }
   );
   assert.match(a.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
   assert.deepEqual((await snap(o, "appointments")).appointments, [a]);
@@ -749,6 +749,8 @@ test("repeat bookings: the daily job books the days that come into view", async 
   const days = seriesDays({ startDay: D(1), every: 1, weekdays: [weekday(D(1))] }, D(1), D(60));
   assert.deepEqual(mine.map((a) => dayOf(a.start)), days.filter((d) => d !== D(43)));
   assert.ok(mine.length > before);
+  // Each visit, the job's too, says who made it: the person who made the series.
+  assert.deepEqual([...new Set(mine.map((a) => JSON.stringify(a.createdBy)))], [JSON.stringify({ by: o.user.name, byId: o.user.id })]);
   const row = s.series.find((x) => x.id === made.id);
   assert.deepEqual([row.through, row.skipped.map((x) => [x.day, codes(x.hard)])], [D(60), [[D(43), ["taken"]]]]);
   // The counted series got exactly its six visits and is closed.
@@ -758,6 +760,19 @@ test("repeat bookings: the daily job books the days that come into view", async 
   assert.equal(await extendAll(), 0);
   assert.equal((await query("SELECT count(*)::int AS n FROM jobs WHERE kind = 'crm_series_extend' AND status = 'queued' AND run_at > now()")).rows[0].n, 1);
   assert.equal((await snap(o)).appointments.length, s.appointments.length);
+});
+
+test("who made a booking: the team member by name, and a booking from before it was kept reads as unknown", async () => {
+  const o = await shop();
+  const mate = await teammate(o, "agent", "Dilshod Usmonov");
+  const a = ok(await o.book({ start: `${D(2)}T10:00` }, mate.b), 201).changes.set.appointments[0];
+  assert.deepEqual([a.createdBy, a.history], [{ by: "Dilshod Usmonov", byId: mate.user.id }, []]);
+  // Kept on the booking: it stays when someone else edits it.
+  const edited = ok(await o.b.call("PUT", `${o.crm}/appointments/${a.id}`, { note: "Window seat" })).changes.set.appointments[0];
+  assert.deepEqual(edited.createdBy, a.createdBy);
+  // A booking stored before this was kept has nobody on it: absent means unknown.
+  await query("UPDATE crm_appointments SET creator = NULL WHERE id = $1", [a.id]);
+  assert.equal((await snap(o, "appointments")).appointments.find((x) => x.id === a.id).createdBy, null);
 });
 
 test("repeat bookings: a specialist who only a series names can be deleted; its visits stay as ordinary bookings", async () => {

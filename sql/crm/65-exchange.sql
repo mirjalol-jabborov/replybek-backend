@@ -18,3 +18,5 @@ CREATE TABLE IF NOT EXISTS crm_imports (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS crm_imports_token ON crm_imports (workspace_id, token_hash);
 CREATE INDEX IF NOT EXISTS crm_imports_age ON crm_imports (workspace_id, expires_at);
+-- Where a products import's opening stock arrives (the branch it named, or the default one).
+ALTER TABLE crm_imports ADD COLUMN IF NOT EXISTS branch_id UUID;
