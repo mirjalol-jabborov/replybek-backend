@@ -3,11 +3,15 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { after, test } from "node:test";
 
-// A fake Google token endpoint: returns an ID token for whichever profile the test queued.
+// A fake Google token endpoint: returns an ID token for whichever profile the test queued, and keeps
+// the redirect_uri it was sent (Google refuses an exchange whose redirect_uri differs from the sign-in's).
 let profile = null;
+let exchangedFor = null;
 const google = http.createServer((req, res) => {
-  req.resume();
+  let body = "";
+  req.on("data", (c) => (body += c));
   req.on("end", () => {
+    exchangedFor = new URLSearchParams(body).get("redirect_uri");
     const claims = { iss: "https://accounts.google.com", aud: "test-client", exp: Math.floor(Date.now() / 1000) + 3600, ...profile };
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id_token: ["e30", Buffer.from(JSON.stringify(claims)).toString("base64url"), "sig"].join("."), access_token: "x" }));
@@ -31,7 +35,7 @@ async function signInWithGoogle(claims, query = "") {
   const back = await fetch(`${setup.base}/auth/google/callback?code=abc&state=${to.searchParams.get("state")}`, { redirect: "manual", headers: { Cookie: start.headers.get("set-cookie").split(";")[0] } });
   const cookie = back.headers.getSetCookie().find((c) => c.startsWith("nx_session=") && !c.startsWith("nx_session=;"))?.split(";")[0];
   const me = cookie ? await fetch(`${setup.base}/auth/me`, { headers: { Cookie: cookie } }).then((r) => r.json()) : null;
-  return { redirectUri: to.searchParams.get("redirect_uri"), location: back.headers.get("location"), me };
+  return { redirectUri: to.searchParams.get("redirect_uri"), exchangedFor, location: back.headers.get("location"), me };
 }
 
 test("every address in APP_ORIGIN may call the API with the cookie, and nobody else", async () => {
@@ -47,17 +51,20 @@ test("every address in APP_ORIGIN may call the API with the cookie, and nobody e
   // A write from another site is stopped at the preflight: no address to allow, so the browser never sends it.
   const preflight = await fetch(`${setup.base}/auth/register`, { method: "OPTIONS", headers: { Origin: "http://evil.test", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } });
   assert.equal(preflight.headers.get("access-control-allow-origin"), null);
-  assert.equal(process.env.APP_ORIGIN, "http://app.test", "links in emails and the Google callback keep one address: the first");
+  assert.equal(process.env.APP_ORIGIN, "http://app.test", "links in emails keep one address: the first");
 });
 
 test("Google sign-in returns to the address it started from, and a new account there gets that product", async () => {
   const dash = await signInWithGoogle({ sub: "o-1", email: "aziz@northstar.uz", email_verified: true, name: "Aziz Rahimov" });
   assert.equal(dash.redirectUri, "http://app.test/api/auth/google/callback");
   assert.equal(dash.location, "http://app.test/#/");
+  assert.equal(dash.exchangedFor, "http://app.test/api/auth/google/callback");
   assert.deepEqual(dash.me.workspaces[0].products, ["agent"]);
 
   const crm = await signInWithGoogle({ sub: "o-2", email: "kamola@guldasta.uz", email_verified: true, name: "Kamola Yusupova" }, "?return_to=http://crm.test&product=crm");
-  assert.equal(crm.redirectUri, "http://app.test/api/auth/google/callback", "one callback address for Google");
+  // Google returns to the callback on the CRM's own address, so the session cookie is set there.
+  assert.equal(crm.redirectUri, "http://crm.test/api/auth/google/callback");
+  assert.equal(crm.exchangedFor, "http://crm.test/api/auth/google/callback", "the code is exchanged with the same redirect_uri");
   assert.equal(crm.location, "http://crm.test/#/");
   assert.deepEqual(crm.me.workspaces[0].products, ["crm"]);
 
@@ -69,6 +76,7 @@ test("Google sign-in returns to the address it started from, and a new account t
   // An address that isn't ours is never a place to return to.
   const away = await signInWithGoogle({ sub: "o-1", email: "aziz@northstar.uz", email_verified: true, name: "Aziz Rahimov" }, "?return_to=http://evil.test&product=shop");
   assert.equal(away.location, "http://app.test/#/");
+  assert.equal(away.redirectUri, "http://app.test/api/auth/google/callback", "nor a callback to send Google to");
 });
 
 test("with COOKIE_DOMAIN the session cookie is shared by both addresses, and a host-only one left from before never gets in the way", async () => {
@@ -100,8 +108,7 @@ test("with COOKIE_DOMAIN the session cookie is shared by both addresses, and a h
     assert.deepEqual(out, ["nx_session=; Max-Age=0; Domain=replybek.test; Path=/; HttpOnly; SameSite=Lax", "nx_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"]);
     assert.equal(await me(live), 401);
 
-    // Google's round-trip cookie follows the same domain, so a sign-in started at the CRM's address
-    // reaches the callback at the dashboard's.
+    // Google's round-trip cookie carries the same Domain as the session cookie.
     const start = await fetch(`${setup.base}/auth/google?return_to=http://crm.test&product=crm`, { redirect: "manual" });
     assert.match(start.headers.get("set-cookie"), /^rb_google=[^;]+; Max-Age=600; Domain=replybek\.test; Path=\/; HttpOnly; SameSite=Lax$/);
   } finally {

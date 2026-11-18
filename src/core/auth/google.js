@@ -2,26 +2,38 @@ import crypto from "crypto";
 
 /**
  * "Continue with Google" (OAuth 2.0 authorization code flow with PKCE). Off unless GOOGLE_CLIENT_ID and
- * GOOGLE_CLIENT_SECRET are set. Google sends the browser back to GOOGLE_REDIRECT_URI, by default
- * {APP_ORIGIN}/api/auth/google/callback, so the session cookie lands on the dashboard's origin like a
- * normal sign-in. That exact URI must be listed in the Google Cloud OAuth client.
+ * GOOGLE_CLIENT_SECRET are set. Google sends the browser back to the callback on the address the
+ * sign-in started at (see redirectUri), so the session cookie lands there like a normal sign-in.
  */
 export const googleEnabled = () => Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
-export const redirectUri = () => process.env.GOOGLE_REDIRECT_URI || `${process.env.APP_ORIGIN || "http://localhost:5173"}/api/auth/google/callback`;
+import { appOrigins } from "./session.js";
+
+/**
+ * Where Google sends the browser back: the callback on the same address the sign-in started at
+ * (the dashboard, or the CRM), so the session cookie is set for that address. `back` is that
+ * address's place in APP_ORIGIN. GOOGLE_REDIRECT_URI, when set, replaces the dashboard's only.
+ * Every one of these must be listed in the Google Cloud OAuth client.
+ */
+export const redirectUri = (back = 0) => {
+  const origins = appOrigins();
+  const i = Number.isInteger(back) && back > 0 && back < origins.length ? back : 0;
+  if (i === 0 && process.env.GOOGLE_REDIRECT_URI) return process.env.GOOGLE_REDIRECT_URI;
+  return `${origins[i] || "http://localhost:5173"}/api/auth/google/callback`;
+};
 const AUTH_URL = () => process.env.GOOGLE_AUTH_URL || "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = () => process.env.GOOGLE_TOKEN_URL || "https://oauth2.googleapis.com/token";
 
 const b64url = (buf) => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 /** The Google sign-in URL, plus the state and PKCE verifier to keep in a short-lived cookie. */
-export function authorizationUrl() {
+export function authorizationUrl(back = 0) {
   const state = b64url(crypto.randomBytes(24));
   const verifier = b64url(crypto.randomBytes(48));
   const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
   const url = new URL(AUTH_URL());
   url.search = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(back),
     response_type: "code",
     scope: "openid email profile",
     state,
@@ -37,11 +49,11 @@ export function authorizationUrl() {
  * Google's token endpoint over TLS with our client secret, so its signature needn't be re-checked
  * (Google's guidance); its audience, issuer, expiry and email verification still are.
  */
-export async function exchangeCode(code, verifier) {
+export async function exchangeCode(code, verifier, back = 0) {
   const res = await fetch(TOKEN_URL(), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ code, code_verifier: verifier, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: redirectUri(), grant_type: "authorization_code" }),
+    body: new URLSearchParams({ code, code_verifier: verifier, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: redirectUri(back), grant_type: "authorization_code" }),
     signal: AbortSignal.timeout(10000),
   });
   const data = await res.json().catch(() => ({}));
