@@ -1,6 +1,7 @@
 // The Store module: products, the stock ledger and orders. What a module exports is described
 // in ../modules.js; the routes are in routes.js.
 import { asQ } from "../db.js";
+import { stageIds } from "../shared/index.js";
 import { listProducts, listMovements, listOrders } from "./rows.js";
 
 export { router } from "./routes.js";
@@ -58,6 +59,16 @@ export async function moveStage(c, cfg, list, from, to) {
   if (list !== "orderStages") return null;
   const { rows } = await c.query("UPDATE crm_orders SET status = $3, updated_at = now() WHERE workspace_id = $1 AND status = $2 RETURNING id", [cfg.workspaceId, from, to]);
   return rows.length ? { set: { orders: await listOrders(asQ(c), cfg, { ids: rows.map((r) => r.id) }) } } : null;
+}
+
+/** What still goes on at a branch: goods on its shelves (units on hand) and orders still open there. */
+export async function branchUses(c, cfg, branchId) {
+  const { rows } = await c.query(
+    `SELECT (SELECT COALESCE(sum(on_hand), 0)::float8 FROM crm_stock WHERE workspace_id = $1 AND branch_id = $2 AND on_hand > 0) AS stock,
+            (SELECT count(*)::int FROM crm_orders WHERE workspace_id = $1 AND branch_id = $2 AND status = ANY($3::text[])) AS orders`,
+    [cfg.workspaceId, branchId, stageIds(cfg.data.orderStages, "open", "reserved")]
+  );
+  return rows[0];
 }
 
 /** A customer with orders can't be deleted: the orders would lose who they were for. */

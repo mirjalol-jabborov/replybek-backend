@@ -5,7 +5,9 @@
 // low: variants in use whose available stock (on hand less held for orders) is at or below their
 //   low mark (shared isLow; a mark of 0 means out of stock).
 // still: variants with goods on hand and no goods movement in the span (receipts, sales, write-offs,
-//   returns, counts; holding goods for an order is not a movement).
+//   returns, counts; holding goods for an order is not a movement), among those that existed for the
+//   whole span: added (the variant's created_at: when the product, or that option of it, was made)
+//   before its first day on the business's clock.
 // Both lists are capped at LIST, their counts are not.
 import { read } from "../db.js";
 import { FROM, END } from "./money.js";
@@ -29,7 +31,8 @@ export function stockReport(workspaceId, input) {
           WHERE workspace_id = $1 AND type NOT IN ('reserve', 'release') AND at >= ${FROM} AND at < ${END} AND ($5::uuid IS NULL OR branch_id = $5)
        ), i AS (
          SELECT v.id, v.product_id, p.name, p.options, v.option_values AS values, v.sku, p.on_sale, v.cost, v.low_at, v.archived,
-                COALESCE(s.on_hand, 0) AS on_hand, COALESCE(s.reserved, 0) AS reserved, m.variant_id IS NOT NULL AS moved
+                COALESCE(s.on_hand, 0) AS on_hand, COALESCE(s.reserved, 0) AS reserved,
+                m.variant_id IS NULL AND v.created_at < ${FROM} AS sat
            FROM crm_variants v JOIN crm_products p ON p.workspace_id = $1 AND p.id = v.product_id
            LEFT JOIN s ON s.variant_id = v.id LEFT JOIN moved m ON m.variant_id = v.id
           WHERE v.workspace_id = $1
@@ -39,9 +42,9 @@ export function stockReport(workspaceId, input) {
               (SELECT count(*)::int FROM i WHERE NOT archived AND on_hand - reserved <= low_at) AS low_count,
               (SELECT COALESCE(json_agg(${ITEM} ORDER BY i.on_hand - i.reserved, i.name, i.id), '[]') FROM
                  (SELECT * FROM i WHERE NOT archived AND on_hand - reserved <= low_at ORDER BY on_hand - reserved, name, id LIMIT ${LIST}) i) AS low,
-              (SELECT count(*)::int FROM i WHERE on_hand > 0 AND NOT moved) AS still_count,
+              (SELECT count(*)::int FROM i WHERE on_hand > 0 AND sat) AS still_count,
               (SELECT COALESCE(json_agg(${ITEM} ORDER BY i.on_hand * i.cost DESC, i.name, i.id), '[]') FROM
-                 (SELECT * FROM i WHERE on_hand > 0 AND NOT moved ORDER BY on_hand * cost DESC, name, id LIMIT ${LIST}) i) AS still`,
+                 (SELECT * FROM i WHERE on_hand > 0 AND sat ORDER BY on_hand * cost DESC, name, id LIMIT ${LIST}) i) AS still`,
       [cfg.workspaceId, cfg.timezone, p.from, p.end, p.branch]
     );
     const r = rows[0];

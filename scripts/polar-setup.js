@@ -18,7 +18,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-import { PACKAGES } from "../src/core/billing/packages.js";
+import { PACKAGES, INTERVAL } from "../src/core/billing/packages.js";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const arg = (name) => {
@@ -80,19 +80,19 @@ for (const pkg of PACKAGES) {
       continue;
     }
     const prices = [{ amount_type: "fixed", price_amount: amount, price_currency: currency }];
-    let product = existing.find((p) => p.name === name && p.recurring_interval === "month");
+    let product = existing.find((p) => p.name === name && p.recurring_interval === INTERVAL);
     if (product) {
       const price = product.prices?.find((x) => x.amount_type === "fixed" && !x.is_archived);
       if (price && (price.price_amount !== amount || price.price_currency !== currency)) {
         // Listing only the new price archives the old one. Existing subscribers keep what they signed up at.
         await call("PATCH", `/products/${product.id}`, { prices });
-        console.log(`- ${name}: price changed from ${money(price.price_amount)} to ${money(amount)} a month (new buyers only)`);
+        console.log(`- ${name}: price changed from ${money(price.price_amount)} to ${money(amount)} a ${INTERVAL} (new buyers only)`);
       } else {
         console.log(`- ${name}: already there`);
       }
     } else {
-      product = await call("POST", "/products/", { name, recurring_interval: "month", prices });
-      console.log(`- ${name}: created, ${money(amount)} a month`);
+      product = await call("POST", "/products/", { name, recurring_interval: INTERVAL, prices });
+      console.log(`- ${name}: created, ${money(amount)} a ${INTERVAL}`);
     }
     values[key] = product.id;
   }

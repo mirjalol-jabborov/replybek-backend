@@ -1,6 +1,6 @@
 // Bookings of a span of days (by the day of the visit) as a sheet, for an export.
 import { wall, ONE } from "../db.js";
-import { header, yesNo, L } from "./words.js";
+import { header, yesNo, L } from "../shared/sheets.js";
 import { listName, fieldCell } from "./cells.js";
 
 const COLUMNS = ["start", "minutes", "customer", "phone", "specialist", "services", "step", "price", "paid", "source", "note"];

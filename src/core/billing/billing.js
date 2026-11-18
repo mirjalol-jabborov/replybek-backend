@@ -3,7 +3,8 @@ import { HttpError } from "../http.js";
 import { appOrigins } from "../auth/session.js";
 import { polarEnabled, createCheckout, changeProduct, cancelAtPeriodEnd, portalUrl, customerSubscriptions } from "./polar.js";
 import { logActivity } from "../activity/activity.js";
-import { assertPlanFits, isPaid, addProduct } from "../workspaces/workspaces.js";
+import { assertPlanFits, addProduct } from "../workspaces/workspaces.js";
+import { isPaid } from "./status.js";
 import { billed, checkoutTrialDays, offerFor, offerForPolarProduct, packageOf, packageOfWorkspace, polarProductFor, productsAfter } from "./packages.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -13,12 +14,26 @@ const unreachable = () => new HttpError(502, "Polar isn't reachable right now. T
 export const defaultPackage = (workspace) => packageOf(offerFor(workspace).package);
 
 /**
+ * Where Polar sends the owner back: the app address the caller names, which must be one of
+ * APP_ORIGIN's (the dashboard, the CRM; never any other address: 400 bad_origin), else the
+ * dashboard. The dashboard comes back to its billing (or onboarding) page; another app to its
+ * first page, which knows what to do with ?checkout=done. → { home, back } (back: the #/ path).
+ */
+function returnAddress(origin, returnTo = "billing") {
+  const home = origin ? origin.trim().replace(/\/+$/, "") : appOrigins()[0];
+  if (!appOrigins().includes(home)) throw new HttpError(400, "Unknown app address.", { code: "bad_origin" });
+  const back = home !== appOrigins()[0] ? "" : returnTo === "onboarding" ? "onboarding" : "settings/billing";
+  return { home, back };
+}
+
+/**
  * Moves the workspace to one package and tier. A running subscription (trial included) switches
  * product in place and returns { changed: true }: one subscription per workspace, so adding the
  * other product is a change of package. Otherwise it's a Polar checkout ({ url }), and the package
  * changes when Polar's webhook confirms it. Each product's trial is given once per workspace.
  */
 export async function startCheckout(workspace, { pkg, tier }, user, { returnTo = "billing", origin = null } = {}) {
+  const { home, back } = returnAddress(origin, returnTo);
   const free = pkg.products.find((p) => !billed(p));
   if (free) throw new HttpError(409, "This package isn't sold while its product is free.", { code: "product_free", product: free });
   if (!pkg.tiers.includes(tier)) throw new HttpError(400, "This package has no such tier.", { code: "bad_tier" });
@@ -41,8 +56,6 @@ export async function startCheckout(workspace, { pkg, tier }, user, { returnTo =
     return { changed: true };
   }
 
-  const home = origin || appOrigins()[0];
-  const back = home !== appOrigins()[0] ? "" : returnTo === "onboarding" ? "onboarding" : "settings/billing";
   let checkout;
   try {
     checkout = await createCheckout({
@@ -101,11 +114,12 @@ export async function syncSubscription(workspace, { actor = null } = {}) {
   return { changed, status: now.subscription_status || null, plan: now.plan, package: now.billing_package, products: now.products };
 }
 
-/** A signed-in link to Polar's customer portal: card, invoices, cancellation. */
-export async function billingPortal(workspace) {
+/** A signed-in link to Polar's customer portal: card, invoices, cancellation. `origin`: the app to come back to (see returnAddress). */
+export async function billingPortal(workspace, { origin = null } = {}) {
+  const { home, back } = returnAddress(origin);
   if (!workspace.polar_subscription_id) throw new HttpError(404, "There's no subscription to manage yet.", { code: "no_subscription" });
   try {
-    return { url: await portalUrl(workspace.id, `${appOrigins()[0]}/#/settings/billing`) };
+    return { url: await portalUrl(workspace.id, `${home}/#/${back}`) };
   } catch (e) {
     console.error(e.message);
     throw unreachable();
@@ -135,8 +149,21 @@ const SAVE = `UPDATE workspaces SET plan = $2, billing_package = $3, products = 
        subscription_status = $7, renews_at = $8, cancel_at_period_end = $9,
        past_due_since = CASE WHEN $7 = 'past_due' THEN COALESCE(past_due_since, now()) END,
        subscription_created_at = CASE WHEN $10 THEN COALESCE($11, subscription_created_at) ELSE $11 END,
-       subscription_modified_at = CASE WHEN $10 THEN COALESCE($12, subscription_modified_at) ELSE $12 END
+       subscription_modified_at = CASE WHEN $10 THEN COALESCE($12, subscription_modified_at) ELSE $12 END,
+       subscription_amount = $13, subscription_currency = $14, subscription_interval = $15, subscription_trial_end = $16
  WHERE id = $1`;
+
+const INTERVALS = new Set(["day", "week", "month", "year"]);
+/**
+ * What a subscription costs and when its trial ends, as Polar's picture says: [amount (smallest
+ * unit), currency, interval, trial end], each null when the picture doesn't carry it.
+ */
+const termsOf = (s) => [
+  Number.isSafeInteger(s.amount) && s.amount >= 0 ? s.amount : null,
+  typeof s.currency === "string" && /^[a-z]{3}$/i.test(s.currency) ? s.currency.toLowerCase() : null,
+  INTERVALS.has(s.recurring_interval) ? s.recurring_interval : null,
+  s.trial_end || null,
+];
 
 /**
  * Stores a subscription's state on its workspace, with what it gives: the plan (tier), the package
@@ -166,7 +193,7 @@ async function applySubscription(s, { actor = null, workspaceId: known = null } 
     const products = live ? productsAfter(ws.products, pkg, before) : ws.products;
     const tried = live ? [...new Set([...ws.trial_products, ...pkg.products])] : ws.trial_products;
     const renewsAt = (s.status === "trialing" && s.trial_end) || s.current_period_end || null;
-    await c.query(SAVE, [workspaceId, tier, pkg.key, products, tried, s.id, s.status, renewsAt, Boolean(s.cancel_at_period_end), current, s.created_at || null, s.modified_at || s.created_at || null]);
+    await c.query(SAVE, [workspaceId, tier, pkg.key, products, tried, s.id, s.status, renewsAt, Boolean(s.cancel_at_period_end), current, s.created_at || null, s.modified_at || s.created_at || null, ...termsOf(s)]);
     return { ws, current };
   });
   if (!applied) return;

@@ -1,9 +1,11 @@
 // The places a business works from: adding one, editing it, closing it, deleting one nothing
 // happened at. The default branch is always there: it can be renamed, never closed or removed.
-// A closed branch keeps everything it had (bookings, orders, stock) and takes no new work.
+// A branch closes once nothing goes on there any more; closed, it takes no new work and keeps its
+// history (and whatever comes back to it, such as returned goods).
 import { z } from "zod";
 import { notFound } from "../../core/http.js";
 import { write, insertRow, updateRow, isUuid } from "../db.js";
+import { branchUses } from "../modules.js";
 import { bad, conflict } from "../errors.js";
 import { uuid, weekHours, someKey } from "../shapes.js";
 import { normalPhone } from "../shared/phone.js";
@@ -70,14 +72,21 @@ export function createBranch(workspaceId, input) {
 }
 
 /**
- * Edits a branch. Closing one (`active: false`) keeps its rows: what is booked or ordered there
- * goes on, nothing new comes in. The default branch stays open.
+ * Edits a branch. Closing one (`active: false`) waits until nothing goes on there: goods on its
+ * shelves, bookings ahead, repeat bookings that go on, orders still open (each module says what is
+ * its own, branchUses in ../modules.js) and team members limited to it: 409 branch_busy with
+ * `busy: { stock?, appointments?, series?, orders?, members? }`, the kinds that have something
+ * (stock in units, the others counted). The default branch stays open. Reopening always works.
  */
 export function updateBranch(workspaceId, id, input) {
   return write(workspaceId, async (c, cfg, q) => {
     const stored = await getBranch(q, cfg, id);
     if (input.name === "" && !stored.default) throw bad("Give the branch a name.", "name_required");
     if (input.active === false && stored.default) throw conflict("The main branch can't be closed.", "default_branch");
+    if (input.active === false && stored.active) {
+      const busy = { ...(await branchUses(c, cfg, id)), ...(stored.members.length ? { members: stored.members.length } : {}) };
+      if (Object.keys(busy).length) throw conflict("Something still goes on at this branch. Move or finish it, then close the branch.", "branch_busy", { busy });
+    }
     await updateRow(c, cfg, "crm_branches", MAP, "id", id, clean(input));
     return { changes: { set: { branches: [await getBranch(q, cfg, id)] } } };
   });

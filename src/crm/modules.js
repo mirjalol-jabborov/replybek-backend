@@ -14,6 +14,8 @@
 //   moveStage(c, cfg, list, from, to)        → changes: re-point its rows from a removed step to another one
 //   customerUses(c, workspaceId, customerId) → { [key]: n }: its rows that belong to a customer
 //   customerHistory(ctx, customerId)         → { [key]: rows }: the same rows, for the customer's panel
+//   branchUses(c, cfg, branchId)             → { [key]: n }: its work still going on at a branch (closing
+//                                              the branch waits until there is none)
 //   settingsShape                            zod fields for settings keys of its own (PUT /settings checks them)
 //   checkSettings(c, cfg, next)              before settings are saved (next: the lists and settings to
 //                                              save): throws to refuse what only the database can tell
@@ -65,6 +67,13 @@ export async function moveStage(c, cfg, list, from, to) {
   const parts = [];
   for (const m of modules) if (m.moveStage) parts.push(await m.moveStage(c, cfg, list, from, to));
   return mergeChanges(...parts);
+}
+
+/** What still goes on at a branch: { stock: 12, appointments: 3, orders: 1 }. Empty when nothing does. */
+export async function branchUses(c, cfg, branchId) {
+  const total = {};
+  for (const m of modules) if (m.branchUses) add(total, await m.branchUses(c, cfg, branchId));
+  return total;
 }
 
 /** What still belongs to a customer: { appointments: 2, orders: 1 }. Empty when nothing does. */

@@ -209,8 +209,8 @@ const worksOn = (db, p, day) => {
 
 /**
  * Why a day has no free start times: one reason.
- *   no_services | day_passed | max_days { days } | nobody_does { staffId? } | closed { id, note }
- *   not_working { staffId?, weekday } | too_late { minutes } | full
+ *   no_services | day_passed | max_days { days } | nobody_does { staffId? } | branch_closed { branchId }
+ *   closed { id, note } | not_working { staffId?, weekday } | too_late { minutes } | full
  */
 export function whyNone(db, { staffId, serviceIds, day }, { now } = {}) {
   const rules = rulesOf(db);
@@ -219,6 +219,8 @@ export function whyNone(db, { staffId, serviceIds, day }, { now } = {}) {
   if (rules.maxDays && day > addDays(dayOf(now), rules.maxDays)) return { code: "max_days", days: rules.maxDays };
   const people = staffId ? eligible(db, serviceIds).filter((p) => p.id === staffId) : eligible(db, serviceIds);
   if (!people.length) return staffId ? { code: "nobody_does", staffId } : { code: "nobody_does" };
+  const places = people.map((p) => placeOf(db, p));
+  if (places.every((b) => b?.active === false)) return { code: "branch_closed", branchId: places[0].id };
   const shut = people.map((p) => closedAllDay(db, day, p.branchId));
   if (shut.every(Boolean)) return { code: "closed", id: shut[0].id, note: shut[0].note || "" };
   const working = people.filter((p) => worksOn(db, p, day));

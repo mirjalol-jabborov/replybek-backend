@@ -4,6 +4,8 @@
 // snapshot and in a customer's history too.
 import { APPT, SERIES, STAFF, SERVICE, TIME_OFF } from "./rows.js";
 import { linkOf } from "./staff.js";
+import { stageIds } from "../shared/index.js";
+import { OPEN_KINDS } from "../shared/booking-steps.js";
 import "./series-job.js"; // registers the daily job that books what comes into view
 
 export { router } from "./routes.js";
@@ -67,6 +69,21 @@ export async function moveStage(c, cfg, list, from, to) {
   if (list !== "apptStages") return null;
   const { rows } = await c.query(`UPDATE crm_appointments SET status = $3 WHERE workspace_id = $1 AND status = $2 RETURNING ${APPT("$4")}`, [cfg.workspaceId, from, to, cfg.timezone]);
   return rows.length ? { set: { appointments: rows } } : null;
+}
+
+/**
+ * What still goes on at a branch: open bookings (waiting, confirmed, in progress) that haven't
+ * ended, and repeat bookings with no last day or one today or later. A visit is at most a day
+ * long, so the bookings are read from a day before now on the branch's index.
+ */
+export async function branchUses(c, cfg, branchId) {
+  const { rows } = await c.query(
+    `SELECT (SELECT count(*)::int FROM crm_appointments WHERE workspace_id = $1 AND branch_id = $2 AND status = ANY($3::text[])
+                AND start_at >= $4::timestamp - interval '1 day' AND start_at + make_interval(mins => duration) > $4::timestamp) AS appointments,
+            (SELECT count(*)::int FROM crm_series WHERE workspace_id = $1 AND branch_id = $2 AND (until IS NULL OR until >= $4::timestamp::date)) AS series`,
+    [cfg.workspaceId, branchId, stageIds(cfg.data.apptStages, ...OPEN_KINDS), cfg.now]
+  );
+  return rows[0];
 }
 
 /**

@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { isDay } from "./shared/index.js";
 import { isMoment } from "./shared/time.js";
+import { fitsSpan } from "./shared/period.js";
 import { isUuid } from "./db.js";
 
 /** A row's id. */
@@ -19,6 +20,8 @@ export const hm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Write the time 
 /** The end of a working day may be midnight. */
 export const hmEnd = z.union([hm, z.literal("24:00")]);
 export const day = z.string().refine(isDay, "Write the day like 2026-11-17.");
+/** `.refine(...daySpan)` on { from, to } days: a report's or an export's span (400, issue params.code "bad_span"). */
+export const daySpan = [fitsSpan, { message: "From comes before to, at most two years apart.", params: { code: "bad_span" }, path: ["to"] }];
 /** Working hours for every weekday, 0 = Sunday: ["10:00", "20:00"], or null for a day off. */
 const dayHours = z.union([z.null(), z.tuple([hm, hmEnd]).refine(([from, to]) => from < to, "The working day must end after it starts.")]);
 export const weekHours = z.object({ 0: dayHours, 1: dayHours, 2: dayHours, 3: dayHours, 4: dayHours, 5: dayHours, 6: dayHours }).strict();

@@ -108,6 +108,13 @@ async function business() {
   return { ...o, call, snap, A, B, s1, pa, pb, c1, book, product, held, done, order };
 }
 
+/**
+ * Closes a branch that still has work there, as one closed before closing waited for none (or one
+ * goods came back to): the API refuses it now (branch_busy), and these tests are about what a
+ * closed branch does with what is still there.
+ */
+const closeWithWork = (o, id) => query("UPDATE crm_branches SET active = false WHERE workspace_id = $1 AND id = $2", [o.ws.id, id]);
+
 /** The cached numbers are the ledger added up, for every variant at every branch, and never out of bounds. */
 async function ledgerHolds(o) {
   const { rows } = await query(
@@ -175,6 +182,40 @@ test("branches: add, edit, close, delete; the default stays; admins only", async
   assert.equal((await o.call("DELETE", `/branches/${o.B}`, undefined, mate.b)).status, 403);
 });
 
+test("closing a branch waits until nothing goes on there, and says what is in the way; reopening always works", async () => {
+  const o = await business();
+  const mate = await teammate(o, "agent");
+  const p = await o.product();
+  const v = p.variants[0].id;
+  ok(await o.call("POST", "/stock/receive", { lines: [{ variantId: v, qty: 4 }], branchId: o.B }));
+  const visit = ok(await o.book({ staffId: o.pb }), 201).id;
+  const repeat = ok(await o.call("POST", "/series", { appointmentId: ok(await o.book({ staffId: o.pb, start: `${D(1)}T15:00` }), 201).id, every: 1 }), 201);
+  const order = ok(await o.order({ lines: [{ variantId: v, qty: 1 }], branchId: o.B }), 201).id;
+  ok(await o.call("PUT", `/branches/members/${mate.user.id}`, { branchId: o.B }));
+  // Bookings and orders that are over don't count: a visit yesterday, a cancelled order.
+  const old = ok(await o.book({ staffId: o.pb, start: `${D(3)}T09:00` }), 201).id;
+  await query("UPDATE crm_appointments SET start_at = $2 WHERE id = $1", [old, `${D(-1)}T09:00`]);
+  ok(await o.call("POST", `/orders/${ok(await o.order({ lines: [{ variantId: v, qty: 1 }], branchId: o.B }), 201).id}/cancel`, {}));
+
+  const busy = refused(await o.call("PUT", `/branches/${o.B}`, { active: false }), 409, "branch_busy").busy;
+  assert.deepEqual(busy, { stock: 4, appointments: 1 + repeat.created.length + 1, series: 1, orders: 1, members: 1 });
+  assert.equal((await o.snap("?only=branches")).branches.find((b) => b.id === o.B).active, true, "still open");
+  // Other edits of a busy branch go through.
+  ok(await o.call("PUT", `/branches/${o.B}`, { address: "Bunyodkor 3" }));
+
+  // Clear the way: goods moved, the order cancelled, the visits and the repeat booking stopped, the member let go.
+  ok(await o.call("POST", "/stock/transfer", { fromBranchId: o.B, toBranchId: o.A, lines: [{ variantId: v, qty: 4 }] }));
+  ok(await o.call("POST", `/orders/${order}/cancel`, {}));
+  ok(await o.call("POST", `/series/${repeat.id}/stop`, { from: D(0) }));
+  ok(await o.call("POST", `/appointments/${visit}/step`, { status: (await o.snap("?only=apptStages")).apptStages.find((s) => s.kind === "cancelled").id }));
+  assert.deepEqual(refused(await o.call("PUT", `/branches/${o.B}`, { active: false }), 409, "branch_busy").busy, { members: 1 });
+  ok(await o.call("PUT", `/branches/members/${mate.user.id}`, { branchId: null }));
+  assert.equal(ok(await o.call("PUT", `/branches/${o.B}`, { active: false })).changes.set.branches[0].active, false);
+  // Reopening always works, and closing again with nothing there too.
+  assert.equal(ok(await o.call("PUT", `/branches/${o.B}`, { active: true })).changes.set.branches[0].active, true);
+  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+});
+
 test("specialists: one branch each; bookings and time off carry it; a move reports the bookings ahead and moves none", async () => {
   const o = await business();
   const staff = (await o.snap("?only=staff")).staff;
@@ -200,7 +241,7 @@ test("specialists: one branch each; bookings and time off carry it; a move repor
   assert.equal(ok(await o.call("PUT", `/staff/${o.pb}`, { branchId: o.B })).ahead.count, 1);
 
   // A closed branch takes no new specialists; another workspace's branch is refused.
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   refused(await o.call("POST", "/staff", { name: "New", hours: ALL_DAY, branchId: o.B }), 409, "branch_closed");
   refused(await o.call("PUT", `/staff/${o.pa}`, { branchId: o.B }), 409, "branch_closed");
 });
@@ -236,10 +277,17 @@ test("booking rules: a branch's own hours and closed days, anyone at a branch, a
   assert.equal(ok(await o.call("PUT", `/time-off/${shut.id}`, { branchId: o.B })).changes.set.timeOff[0].branchId, o.B);
 
   // A closed branch: no new bookings there, named or "anyone".
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   assert.deepEqual(codes((await ask({ staffId: o.pb, start: `${D(3)}T12:00` })).hard), ["branch_closed"]);
   refused(await o.book({ staffId: null, branchId: o.B, start: `${D(3)}T12:00` }), 409, "branch_closed");
   assert.equal(ok(await o.book({ staffId: null, start: `${D(3)}T12:00` }), 201).changes.set.appointments[0].staffId, o.pa, "anyone anywhere skips it");
+  // Its free times say why there are none, by a code; a repeat booking can't start there.
+  for (const ask of [`branchId=${o.B}`, `staffId=${o.pb}`]) {
+    const none = ok(await o.call("GET", `/booking/slots?day=${D(3)}&serviceIds=${o.s1}&${ask}`));
+    assert.deepEqual([none.slots.length, none.none], [0, { code: "branch_closed", branchId: o.B }], ask);
+  }
+  refused(await o.call("POST", "/series", { appointmentId: atB.id, every: 1 }), 409, "branch_closed");
+  assert.equal((await query("SELECT count(*)::int AS n FROM crm_series WHERE workspace_id = $1", [o.ws.id])).rows[0].n, 0, "nothing was made");
 });
 
 test("stock per branch: receive, write off and count name a branch; the snapshot adds up and breaks down; ?branch= narrows", async () => {
@@ -275,7 +323,7 @@ test("stock per branch: receive, write off and count name a branch; the snapshot
   ok(await o.call("POST", "/stock/receive", { lines: [{ productId: plain.id, qty: 2 }], branchId: o.B }));
   refused(await o.call("PUT", `/products/${plain.id}`, { variants: [{ values: {}, price: 1 }] }), 409, "variant_has_stock");
   // A closed branch takes no goods in, and can still let them go.
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   refused(await o.call("POST", "/stock/receive", { lines: [{ variantId: v, qty: 1 }], branchId: o.B }), 409, "branch_closed");
   ok(await o.call("POST", "/stock/write-off", { variantId: v, qty: 1, reason: "lost", branchId: o.B }));
   ok(await o.call("POST", "/stock/count", { variantId: v, counted: 0, branchId: o.B }));
@@ -309,7 +357,7 @@ test("an order is filled from one branch: it holds and takes stock there, never 
   assert.deepEqual(back.changes.set.movements.map((m) => [m.type, m.branchId]), [["return", o.B]]);
   await ledgerHolds(o);
   // A closed branch takes no new orders; its orders go on.
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   refused(await o.order({ lines: [{ variantId: v, qty: 1 }], branchId: o.B }), 409, "branch_closed");
   const receipt = ok(await o.call("GET", `/orders/${atB.id}/receipt`));
   assert.deepEqual(receipt.business, { name: "Guldasta", branch: "Chilonzor", address: "Bunyodkor 1" });
@@ -338,7 +386,7 @@ test("moving goods: a pair of ledger lines, totals unchanged, never more than is
   refused(await move({ toBranchId: o.A }), 400, "same_branch");
   assert.equal((await move({ lines: [] })).status, 400);
   // To a closed branch: no; from it: yes.
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   refused(await move({ lines: [{ variantId: v, qty: 1 }] }), 409, "branch_closed");
   ok(await move({ fromBranchId: o.B, toBranchId: o.A, lines: [{ variantId: v, qty: 5 }] }));
   assert.deepEqual((await o.snap("?only=products")).products[0].branches, { [o.A]: { stock: 10, reserved: 2 }, [o.B]: { stock: 0, reserved: 0 } });
@@ -570,7 +618,7 @@ test("opening stock is a receipt: a closed branch takes none, also for a member 
   const o = await business();
   const mate = await teammate(o, "agent");
   ok(await o.call("PUT", `/branches/members/${mate.user.id}`, { branchId: o.B }));
-  ok(await o.call("PUT", `/branches/${o.B}`, { active: false }));
+  await closeWithWork(o, o.B);
   refused(await o.call("POST", "/products", { name: "Roses", price: 1000, opening: 5 }, mate.b), 409, "branch_closed");
   // A product with no stock is fine: products are the business's, not a branch's.
   const size = { id: "size", name: "Size", values: ["S", "M"] };

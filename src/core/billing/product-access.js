@@ -2,7 +2,7 @@
 // products: the AI agent's read-only lock (readOnlyUntilTrial) and the CRM's (requireProduct) ask
 // the same functions, and the workspace summary shows what they decide.
 import { HttpError } from "../http.js";
-import { billingAccess, graceEndsAt, overdue } from "../workspaces/workspaces.js";
+import { billingAccess, graceEndsAt, overdue, isPaid } from "./status.js";
 import { PRODUCTS } from "../workspaces/checks.js";
 import { billed, offerFor, packageOfWorkspace } from "./packages.js";
 
@@ -59,4 +59,22 @@ export function productsBilling(workspace) {
     result[product] = { on, access: on ? access : null, next, offer: next === "buy" || next === "start_trial" ? offer : null };
   }
   return result;
+}
+
+/**
+ * The running subscription (paid for, on trial, or past due) as Polar's last picture of it says:
+ * { status, interval, amount (the currency's smallest unit), currency, trial_ends_at (on trial only) },
+ * each null when that picture didn't carry it; null when none is running. Taxes, discounts and what
+ * the next invoice will really charge are Polar's, shown in its portal: they aren't kept here.
+ */
+export function runningSubscription(workspace) {
+  if (!workspace.polar_subscription_id || !isPaid(workspace.subscription_status)) return null;
+  const end = workspace.subscription_status === "trialing" && workspace.subscription_trial_end;
+  return {
+    status: workspace.subscription_status,
+    interval: workspace.subscription_interval || null,
+    amount: workspace.subscription_amount == null ? null : Number(workspace.subscription_amount),
+    currency: workspace.subscription_currency || null,
+    trial_ends_at: end ? new Date(end).toISOString() : null,
+  };
 }

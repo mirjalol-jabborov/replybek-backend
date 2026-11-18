@@ -1,8 +1,11 @@
 // Specialists: their finished visits, what those brought in, and how much of their working time
 // was booked. One query; the working time is worked out in SQL with time ranges.
 //
-// Working time: each day of the span, the specialist's hours for that weekday, less their breaks,
-// less time off (their own and the whole branch's). Only for specialists switched on.
+// Working time: each day of the span, the specialist's hours for that weekday cut to their branch's
+// own hours when it sets them (as shared/branches.js withinBranch cuts what can be booked), less
+// their breaks, less time off (their own and the whole branch's). Only days they were with the business: from
+// the day they were added (created_at) to the day they were switched off (inactive_since, kept by
+// sql/crm/60-reports.sql), both on the business's clock. Switched off before that day was kept: none.
 // Booked time: the part of that working time covered by their bookings that keep their time (every
 // kind of step except noshow and cancelled), so a visit booked outside the hours doesn't count and
 // the share never passes 1.
@@ -25,15 +28,21 @@ export function specialistsReport(workspaceId, input) {
     const p = await periodOf(q, cfg, input);
     const { rows } = await q(
       `WITH staff AS (
-         SELECT s.id, s.name, s.active, s.hours, s.breaks, s.branch_id, s.created_at FROM crm_staff s
+         -- hours saved as null are stored as JSON null: no own hours, the same as no value, as withinBranch reads it.
+         SELECT s.id, s.name, s.active, s.hours, s.breaks, s.branch_id, s.created_at, NULLIF(b.hours, 'null'::jsonb) AS branch_hours,
+                (s.created_at AT TIME ZONE $7)::date AS first_day, (s.inactive_since AT TIME ZONE $7)::date AS last_day
+           FROM crm_staff s JOIN crm_branches b ON b.workspace_id = s.workspace_id AND b.id = s.branch_id
           WHERE s.workspace_id = $1 AND ($4::uuid IS NULL OR s.branch_id = $4)
        ), work AS (
-         SELECT s.id AS staff_id, d.day, s.hours -> extract(dow FROM d.day)::int::text AS h
+         -- greatest() and least() pass over NULL: a branch without hours leaves the specialist's own.
+         SELECT s.id AS staff_id, d.day, greatest(h ->> 0, b ->> 0) AS open, least(h ->> 1, b ->> 1) AS close
            FROM staff s CROSS JOIN generate_series($2::date::timestamp, ($3::date - 1)::timestamp, interval '1 day') AS d(day)
-          WHERE s.active AND jsonb_typeof(s.hours -> extract(dow FROM d.day)::int::text) = 'array'
+          CROSS JOIN LATERAL (SELECT s.hours -> extract(dow FROM d.day)::int::text AS h, s.branch_hours -> extract(dow FROM d.day)::int::text AS b) x
+          WHERE d.day >= s.first_day AND (s.active OR d.day <= s.last_day) AND jsonb_typeof(h) = 'array'
+            AND (s.branch_hours IS NULL OR jsonb_typeof(b) = 'array')
        ), hours AS (
-         SELECT staff_id, range_agg(tsrange(day + (h ->> 0)::interval, day + (h ->> 1)::interval)) AS mr FROM work
-          WHERE (h ->> 0) < (h ->> 1) GROUP BY staff_id
+         SELECT staff_id, range_agg(tsrange(day + open::interval, day + close::interval)) AS mr FROM work
+          WHERE open < close GROUP BY staff_id
        ), breaks AS (
          SELECT w.staff_id, range_agg(tsrange(w.day + (b ->> 'from')::interval, w.day + (b ->> 'to')::interval)) AS mr
            FROM work w JOIN staff s ON s.id = w.staff_id CROSS JOIN jsonb_array_elements(s.breaks) AS b
@@ -60,7 +69,7 @@ export function specialistsReport(workspaceId, input) {
               ${MINUTES("f.mr")} AS "workMinutes", ${MINUTES("v.booked * f.mr")} AS "bookedMinutes"
          FROM staff s LEFT JOIN free f ON f.staff_id = s.id LEFT JOIN visits v ON v.staff_id = s.id
         ORDER BY s.created_at, s.id`,
-      [cfg.workspaceId, p.from, p.end, p.branch, apptSteps(cfg, "done"), apptSteps(cfg, ...HOLDING)]
+      [cfg.workspaceId, p.from, p.end, p.branch, apptSteps(cfg, "done"), apptSteps(cfg, ...HOLDING), cfg.timezone]
     );
     return { specialists: rows.map((r) => ({ ...r, bookedShare: share(r.bookedMinutes, r.workMinutes) })) };
   });
