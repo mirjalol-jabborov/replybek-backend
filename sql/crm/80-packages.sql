@@ -31,3 +31,13 @@ END $$;
 
 -- Which package a checkout was for. Checkouts from before packages were the AI agent's.
 ALTER TABLE billing_checkouts ADD COLUMN IF NOT EXISTS package TEXT NOT NULL DEFAULT 'agent';
+
+-- What the current subscription costs and when its trial ends, as Polar's own subscription says
+-- (its `amount` in the currency's smallest unit, `currency`, `recurring_interval`, `trial_end`), kept
+-- from every event and sync so the Plan screens can show them without asking Polar. Null when the
+-- picture didn't carry them (stored before they were kept). Not `trial_ends_at`: schema.sql drops
+-- that name, from an app-side trial that was tried once.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_amount BIGINT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_currency TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_interval TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS subscription_trial_end TIMESTAMPTZ;

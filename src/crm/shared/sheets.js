@@ -1,6 +1,8 @@
 // The words of the spreadsheets, in English, Russian and Uzbek: column headers, sheet names,
 // yes and no. An export speaks one language; an import reads a header in any of the three (and a
-// few other common ways of writing it), whatever its letter case.
+// few other common ways of writing it), whatever its letter case and however ʻ is written. They are
+// part of the file format, not of the app's wording: the server's export and import (src/crm/exchange)
+// and the app (to show which headers an import knows) read this one list.
 
 export const LANGUAGES = ["en", "ru", "uz"];
 

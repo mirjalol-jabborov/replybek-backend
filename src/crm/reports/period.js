@@ -1,21 +1,17 @@
 // What every report covers: days on the business's wall clock, `from` and `to` both included,
 // and optionally one branch. The SQL reads the half-open span [from, the day after to).
 import { z } from "zod";
-import { day, uuid } from "../shapes.js";
-import { addDays, daysBetween } from "../shared/time.js";
+import { day, uuid, daySpan } from "../shapes.js";
+import { addDays } from "../shared/time.js";
 import { stageIds } from "../shared/index.js";
 import { narrowTo } from "../branches/access.js";
 
-/** The longest span a report takes: two years. */
-export const MAX_DAYS = 731;
-
-const span = { message: "From comes before to, at most two years apart.", params: { code: "bad_span" }, path: ["to"] };
-const fits = (v) => v.from <= v.to && daysBetween(v.from, v.to) < MAX_DAYS;
+// The longest span is shared/period.js's MAX_DAYS (exports of bookings and orders take the same).
 const base = { from: day, to: day, branch: uuid.optional() };
 
-export const periodSchema = z.object(base).strict().refine(fits, span);
+export const periodSchema = z.object(base).strict().refine(...daySpan);
 /** Income also says how its rows are grouped: by day, week (Monday to Sunday) or month. */
-export const incomeSchema = z.object({ ...base, by: z.enum(["day", "week", "month"]).default("day") }).strict().refine(fits, span);
+export const incomeSchema = z.object({ ...base, by: z.enum(["day", "week", "month"]).default("day") }).strict().refine(...daySpan);
 
 /**
  * The period as the queries take it: { from, end (the day after `to`), branch | null }. A branch

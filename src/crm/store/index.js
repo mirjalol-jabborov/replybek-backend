@@ -78,6 +78,16 @@ export async function moveStage(c, cfg, list, from, to) {
   return rows.length ? { set: { orders: await listOrders(asQ(c), cfg, { ids: rows.map((r) => r.id) }) } } : null;
 }
 
+/** What still goes on at a branch: goods on its shelves (units on hand) and orders still open there. */
+export async function branchUses(c, cfg, branchId) {
+  const { rows } = await c.query(
+    `SELECT (SELECT COALESCE(sum(on_hand), 0)::float8 FROM crm_stock WHERE workspace_id = $1 AND branch_id = $2 AND on_hand > 0) AS stock,
+            (SELECT count(*)::int FROM crm_orders WHERE workspace_id = $1 AND branch_id = $2 AND status = ANY($3::text[])) AS orders`,
+    [cfg.workspaceId, branchId, stageIds(cfg.data.orderStages, "open", "reserved")]
+  );
+  return rows[0];
+}
+
 /** A customer with orders can't be deleted: the orders would lose who they were for. */
 export async function customerUses(c, workspaceId, customerId) {
   const { rows } = await c.query("SELECT count(*)::int AS n FROM crm_orders WHERE workspace_id = $1 AND customer_id = $2", [workspaceId, customerId]);

@@ -1,12 +1,12 @@
 // Exports: the workspace's customers, products (each variant with its stock), and the bookings and
 // orders of a span of days, as .xlsx files in one language. Read on one unchanging picture.
 import { z } from "zod";
-import { day, uuid } from "../shapes.js";
+import { day, uuid, daySpan } from "../shapes.js";
 import { addDays } from "../shared/time.js";
 import { read } from "../db.js";
 import { narrowTo } from "../branches/access.js";
 import { writeBook } from "./xlsx.js";
-import { LANGUAGES, sheetName } from "./words.js";
+import { LANGUAGES, sheetName } from "../shared/sheets.js";
 import { customersSheet } from "./customers.js";
 import { productsSheet } from "./products.js";
 import { bookingsSheet } from "./bookings.js";
@@ -14,10 +14,8 @@ import { ordersSheets } from "./orders.js";
 
 const lang = z.enum(LANGUAGES).optional();
 export const exportSchema = z.object({ lang }).strict();
-export const spanSchema = z
-  .object({ from: day, to: day, branch: uuid.optional(), lang })
-  .strict()
-  .refine((v) => v.from <= v.to, { message: "From comes before to.", params: { code: "bad_span" }, path: ["to"] });
+/** Bookings and orders: a span as a report's, at most two years (shared/period.js). */
+export const spanSchema = z.object({ from: day, to: day, branch: uuid.optional(), lang }).strict().refine(...daySpan);
 
 export const EXPORTS = ["customers", "products", "bookings", "orders"];
 

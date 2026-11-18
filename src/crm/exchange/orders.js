@@ -3,7 +3,7 @@
 // their lines.
 import { wall, ONE } from "../db.js";
 import { totals, lineTotal, optionsText } from "../shared/store.js";
-import { header, yesNo, L } from "./words.js";
+import { header, yesNo, L } from "../shared/sheets.js";
 import { listName, fieldCell } from "./cells.js";
 
 const ORDER = ["number", "created", "customer", "phone", "step", "items", "subtotal", "discount", "fee", "total", "paid", "balance", "payment", "delivery", "deliveryDay", "address", "source", "note", "returned"];

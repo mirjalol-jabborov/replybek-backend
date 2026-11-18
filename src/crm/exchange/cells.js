@@ -2,7 +2,9 @@
 // items found by their id or any of their names, field values by their type. An import checks
 // what comes out of here with the same rules the team's forms use.
 import { columnName } from "./xlsx.js";
-import { plain, spellings, readYesNo, yesNo, L } from "./words.js";
+import { same } from "../shared/index.js";
+import { addDays, fromMin } from "../shared/time.js";
+import { plain, spellings, readYesNo, yesNo, L } from "../shared/sheets.js";
 
 /**
  * The header row against the columns a kind knows ([{ key, words: [spellings] }]): which column is
@@ -28,10 +30,22 @@ export function recognise(rows, known) {
   };
 }
 
-/** An item of a settings list by its id or any of its names: its id, "" for an empty cell, undefined when none fits. `kept`: a stored id that stays valid. */
+/**
+ * Whether a row gives this column a value. A blank cell (empty, or only spaces) keeps what is
+ * stored: an import never clears a value (a new row gets what the form starts with).
+ */
+export const given = (values, key) => key in values && String(values[key]).trim() !== "";
+
+/**
+ * What a row changes, field by field, keyed and ordered as the file's columns: [{ key, from, to }].
+ * `before` and `after` are keyed by column; a key `after` doesn't have is not changed.
+ */
+export const changesOf = (columns, before, after) =>
+  columns.filter((c) => c.key in after && !same(after[c.key], before[c.key])).map((c) => ({ key: c.key, from: before[c.key] ?? null, to: after[c.key] ?? null }));
+
+/** An item of a settings list by its id or any of its names: its id, or undefined when none fits. `kept`: a stored id that stays valid. */
 export function findInList(list, text, kept) {
   const t = plain(text);
-  if (!t) return "";
   const hit = (list || []).find((x) => plain(x.id) === t || spellings(x.name).some((s) => plain(s) === t));
   if (hit) return hit.id;
   return kept && plain(kept) === t ? kept : undefined;
@@ -61,20 +75,29 @@ export const readNumber = (text) => {
 };
 
 const DMY = /^(\d{1,2})[./](\d{1,2})[./](\d{4})$/;
+// Excel keeps a date cell as the days since 1899-12-30 (9999-12-31 is the last it has) and a time
+// cell as the part of a day: the reader hands both over as the number's digits.
+const SERIAL = /^\d+(\.\d+)?$/;
+const LAST_SERIAL = 2958465;
 /**
- * A custom field's cell as the value a form would send: text, a number, "2026-11-17", "09:30",
- * one of the choices, true or false. An empty cell clears the field (null). A value that can't be
- * its type is passed on as it is, so the shared check refuses it.
+ * A custom field's cell (not blank: see given) as the value a form would send: text, a number,
+ * "2026-11-17", "09:30", one of the choices, true or false. Dates as 17.11.2026 or Excel's own date
+ * cells, times as 9:30 or Excel's own time cells. A value that can't be its type is passed on as it
+ * is, so the shared check refuses it.
  */
 export function readField(def, text) {
-  if (!text) return null;
   if (def.type === "number") return Number.isNaN(readNumber(text)) ? text : readNumber(text);
   if (def.type === "yesno") return readYesNo(text) ?? text;
   if (def.type === "date") {
     const m = DMY.exec(text);
-    return m ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : text;
+    if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+    return SERIAL.test(text) && Number(text) >= 1 && Number(text) <= LAST_SERIAL ? addDays("1899-12-30", Math.floor(Number(text))) : text;
   }
-  if (def.type === "time") return /^\d:\d\d$/.test(text) ? `0${text}` : text;
+  if (def.type === "time") {
+    if (/^\d:\d\d$/.test(text)) return `0${text}`;
+    const min = SERIAL.test(text) ? Math.round(Number(text) * 1440) : NaN;
+    return min >= 0 && min < 1440 ? fromMin(min) : text;
+  }
   if (def.type === "choice") return (def.options || []).find((o) => plain(o) === plain(text)) ?? text;
   return text;
 }

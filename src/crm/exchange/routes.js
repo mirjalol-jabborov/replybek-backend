@@ -10,7 +10,7 @@ import { validate } from "../../core/validate.js";
 import { requireRole } from "../../core/workspaces/access.js";
 import { exportSchema, spanSchema, exportBook, EXPORTS } from "./exports.js";
 import { acceptFile, previewImport, applyImport, applySchema, stockQuery, IMPORT_KINDS } from "./imports.js";
-import { LANGUAGES } from "./words.js";
+import { LANGUAGES } from "../shared/sheets.js";
 
 export const router = Router({ mergeParams: true });
 const admin = requireRole("admin");

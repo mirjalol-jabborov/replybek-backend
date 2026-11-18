@@ -53,6 +53,8 @@ async function build() {
   const breaks = [{ from: "13:00", to: "14:00" }];
   ids.p1 = (await post("/staff", { name: "Aziz", hours: WORK, breaks, serviceIds: [ids.s1, ids.s2] })).id;
   ids.p2 = (await post("/staff", { name: "Bek", hours: WORK, breaks, serviceIds: [ids.s1, ids.s2] })).id;
+  // Both have worked here since October (a specialist's working time starts the day they were added).
+  await query("UPDATE crm_staff SET created_at = '2026-10-01 09:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE id = ANY($1::uuid[])", [[ids.p1, ids.p2]]);
   const book = async (n, body, at) => {
     const id = (await post("/appointments", { start: `${D(n)}T${at.slice(11)}`, ...body })).id;
     await redate(id, at);
@@ -81,6 +83,8 @@ async function build() {
     variants: [{ values: { c: "Red" }, sku: "T-R", price: 30000, cost: 10000, opening: 50 }, { values: { c: "White" }, sku: "T-W", price: 40000, cost: 15000, opening: 50 }],
   })).changes.set.products[0];
   await post("/products", { name: "Vase", sku: "V-1", price: 20000, cost: 2000, opening: 5 });
+  // The shop has had them since October (goods sitting still count only for days a product existed).
+  await query("UPDATE crm_variants SET created_at = '2026-10-01 09:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE workspace_id = $1", [o.ws.id]);
   ids.roses = roses.id;
   ids.tulips = tulips.id;
   const [red, white] = tulips.variants;
@@ -180,6 +184,70 @@ test("services and specialists", async () => {
   assert.deepEqual([aziz.visits, aziz.paid, aziz.income, aziz.workMinutes, aziz.bookedMinutes, aziz.bookedShare], [2, 2, 185000, 960, 120, 0.125]);
   // Bek: away 2 hours, booked 30 (the missed visit frees its time), finished one visit that is not paid.
   assert.deepEqual([bek.visits, bek.paid, bek.income, bek.workMinutes, bek.bookedMinutes, bek.bookedShare], [1, 0, 0, 840, 30, 0.0357]);
+});
+
+test("a specialist's working time and goods sitting still count only for days they existed", async () => {
+  const w = await crmOwner("Young Owner", "Young Shop");
+  const add = async (path, body) => ok(await w.b.call("POST", w.crm + path, body), 201);
+  ok(await w.b.call("PUT", `${w.crm}/settings`, { modules: { booking: true, store: true } }));
+  const service = (await add("/services", { name: "Cut", duration: 30, price: 1000 })).id;
+  const staff = async (name, addedAt) => {
+    const id = (await add("/staff", { name, hours: WORK, breaks: [{ from: "13:00", to: "14:00" }], serviceIds: [service] })).id;
+    await query("UPDATE crm_staff SET created_at = $2::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE id = $1", [id, addedAt]);
+    return id;
+  };
+  const before = await staff("Before", "2026-10-01T09:00");
+  const late = await staff("Late", "2026-11-01T15:00"); // added on the span's second day: that day counts, the first doesn't
+  const after = await staff("After", "2026-11-05T09:00"); // added after the span: nothing
+  const gone = await staff("Gone", "2026-10-01T09:00");
+  const goneLongAgo = await staff("Gone long ago", "2026-10-01T09:00");
+  // Switched off: the day it happens is recorded, and their time counts up to that day.
+  ok(await w.b.call("PUT", `${w.crm}/staff/${gone}`, { active: false }));
+  ok(await w.b.call("PUT", `${w.crm}/staff/${goneLongAgo}`, { active: false }));
+  const { rows } = await query("SELECT id, inactive_since IS NOT NULL AS recorded FROM crm_staff WHERE id = ANY($1::uuid[]) ORDER BY name", [[gone, before]]);
+  assert.deepEqual(rows.map((r) => [r.id, r.recorded]), [[before, false], [gone, true]]);
+  await query("UPDATE crm_staff SET inactive_since = '2026-10-31 19:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE id = $1", [gone]);
+  // Switched off before the day was kept: no working time, as before.
+  await query("UPDATE crm_staff SET inactive_since = NULL WHERE id = $1", [goneLongAgo]);
+  const work = Object.fromEntries(ok(await w.b.call("GET", `${w.crm}/reports/specialists?${SPAN}`)).specialists.map((s) => [s.id, s.workMinutes]));
+  // A day is 09:00-18:00 less an hour's break: 480 minutes.
+  assert.deepEqual([work[before], work[late], work[after], work[gone], work[goneLongAgo]], [960, 480, 0, 480, 0]);
+  // Switched on again: every day counts again.
+  ok(await w.b.call("PUT", `${w.crm}/staff/${gone}`, { active: true }));
+  assert.equal(ok(await w.b.call("GET", `${w.crm}/reports/specialists?${SPAN}`)).specialists.find((s) => s.id === gone).workMinutes, 960);
+
+  // Goods: a vase stocked since October sat still; tulips added after the span did not exist in it.
+  const vase = (await add("/products", { name: "Vase", sku: "V", price: 1, cost: 1, opening: 2 })).changes.set.products[0];
+  await add("/products", { name: "Tulips", sku: "T", price: 1, cost: 1, opening: 3 });
+  await query("UPDATE crm_variants SET created_at = '2026-10-01 09:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE id = $1", [vase.variants[0].id]);
+  const still = ok(await w.b.call("GET", `${w.crm}/reports/stock?${SPAN}`)).still;
+  assert.deepEqual([still.count, still.items.map((i) => i.sku)], [1, ["V"]]);
+});
+
+test("a branch's own hours cut its specialists' working time, as they cut what can be booked", async () => {
+  const w = await crmOwner("Branch Owner", "Two Places");
+  const add = async (path, body) => ok(await w.b.call("POST", w.crm + path, body), 201);
+  ok(await w.b.call("PUT", `${w.crm}/settings`, { modules: { booking: true, store: false } }));
+  const service = (await add("/services", { name: "Cut", duration: 30, price: 1000 })).id;
+  // Oct 31 is a Saturday (6), Nov 1 a Sunday (0): the branch opens 10:00-14:00 on Saturdays, not at all on Sundays.
+  const hours = { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: ["10:00", "14:00"] };
+  const branch = (await add("/branches", { name: "Chilonzor", hours })).id;
+  const there = (await add("/staff", { name: "There", hours: WORK, breaks: [{ from: "13:00", to: "14:00" }], serviceIds: [service], branchId: branch })).id;
+  const here = (await add("/staff", { name: "Here", hours: WORK, serviceIds: [service] })).id;
+  await query("UPDATE crm_staff SET created_at = '2026-10-01 09:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE workspace_id = $1", [w.ws.id]);
+  const work = Object.fromEntries(ok(await w.b.call("GET", `${w.crm}/reports/specialists?${SPAN}`)).specialists.map((s) => [s.id, s.workMinutes]));
+  // There: Saturday 10:00-14:00 less the 13:00 break (180), Sunday closed. Here: the default branch sets no hours (2 x 540).
+  assert.deepEqual([work[there], work[here]], [180, 1080]);
+
+  // A branch saved without its own hours (the app sends hours: null), or whose hours were cleared:
+  // its specialists' own hours count, as for booking.
+  const plain = (await add("/branches", { name: "Yunusobod", hours: null })).id;
+  ok(await w.b.call("PUT", `${w.crm}/branches/${branch}`, { hours: null }));
+  const atPlain = (await add("/staff", { name: "Plain", hours: WORK, serviceIds: [service], branchId: plain })).id;
+  await query("UPDATE crm_staff SET created_at = '2026-10-01 09:00'::timestamp AT TIME ZONE 'Asia/Tashkent' WHERE workspace_id = $1", [w.ws.id]);
+  const again = Object.fromEntries(ok(await w.b.call("GET", `${w.crm}/reports/specialists?${SPAN}`)).specialists.map((s) => [s.id, s.workMinutes]));
+  // There: 2 x (540 less the hour's break); Plain: 2 x 540.
+  assert.deepEqual([again[there], again[atPlain], again[here]], [960, 1080, 1080]);
 });
 
 test("products: units, income after discounts, margin from cost, returns", async () => {

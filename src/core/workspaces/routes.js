@@ -10,7 +10,7 @@ import { addProductOrBuy } from "../billing/billing.js";
 // Adding a product sits above the trial lock, with the CRM (see app.js). Once the CRM is billed it
 // starts the checkout (or package change) that brings the product.
 export const products = Router({ mergeParams: true });
-products.post("/products", requireRole("owner"), validate(productAddSchema), wrap(async (req, res) => res.json(await addProductOrBuy(req.workspace, req.valid.add, req.user))));
+products.post("/products", requireRole("owner"), validate(productAddSchema), wrap(async (req, res) => res.json(await addProductOrBuy(req.workspace, req.valid.add, req.user, { origin: req.valid.origin }))));
 
 const router = Router({ mergeParams: true });
 const admin = requireRole("admin");

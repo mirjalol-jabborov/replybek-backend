@@ -9,6 +9,8 @@ import { crmOwner, teammate, base, query } from "./helpers/setup.js";
 import { addDays, dayOf, nowIn } from "../src/crm/shared/time.js";
 import { readSheet, writeBook } from "../src/crm/exchange/xlsx.js";
 import { readZip, writeZip } from "../src/crm/exchange/zip.js";
+import { HEADERS, plain } from "../src/crm/shared/sheets.js";
+import { MAX_DAYS, fitsSpan } from "../src/crm/shared/period.js";
 
 const ok = (r, status = 200) => {
   assert.equal(r.status, status, JSON.stringify(r.body));
@@ -123,7 +125,10 @@ test("customers: preview says what would happen and saves nothing; apply does ex
   assert.deepEqual(p.columns.map((c) => [c.column, c.key]), [["A", "name"], ["B", "phone"], ["C", "source"], ["D", "tags"], ["E", "note"], ["F", "field:bday"], ["G", "field:kids"], ["H", "field:size"], ["I", "id"]]);
   assert.deepEqual(p.ignored, [{ column: "J", header: "Colour of car" }]);
   assert.deepEqual(p.add, [{ row: 2, name: "Aziz New" }]);
-  assert.deepEqual(p.update.map((u) => [u.row, u.id, u.changes.sort()]), [[3, o.c1, ["fields", "note"]]]);
+  // Each changed field with what is stored and what the file brings, by its column's key, in the file's order.
+  // Jasur's empty Birthday and Size cells keep what is stored (the preview says so: blank "keep").
+  assert.deepEqual(p.update, [{ row: 3, id: o.c1, name: "Jasur Karimov", changes: [{ key: "note", from: "Line one\nline two", to: "Called" }, { key: "field:kids", from: 2, to: 3 }] }]);
+  assert.equal(p.blank, "keep");
   assert.equal(p.unchanged, 1);
   assert.deepEqual(reasons(p), [[4, "no_name"], [5, "bad_phone"], [6, "phone_taken"], [7, "duplicate"], [8, "bad_source"], [9, "bad_tag"], [10, "bad_fields"], [11, "too_long"], [12, "unknown_id"], [14, "bad_fields"]]);
   assert.deepEqual(p.skip.find((s) => s.row === 6), { row: 6, code: "phone_taken", customerId: o.c3 });
@@ -142,8 +147,8 @@ test("customers: preview says what would happen and saves nothing; apply does ex
   const aziz = after.find((c) => c.name === "Aziz New");
   assert.deepEqual([aziz.phone, aziz.source, aziz.tags, aziz.fields], ["+998901112233", "instagram", ["vip"], { bday: "2000-02-01", kids: 1, size: "S" }]);
   const jasur = after.find((c) => c.id === o.c1);
-  // An empty cell clears its field; the columns the file doesn't have stay as they were.
-  assert.deepEqual([jasur.note, jasur.fields, jasur.telegram], ["Called", { kids: 3, news: true }, "jasur_k"]);
+  // An empty cell keeps what is stored, as do the columns the file doesn't have.
+  assert.deepEqual([jasur.note, jasur.fields, jasur.telegram], ["Called", { bday: "1990-05-01", kids: 3, news: true, size: "M" }, "jasur_k"]);
   assert.deepEqual(done.changes.set.customers.map((c) => c.id).sort(), [aziz.id, o.c1].sort());
 
   // A preview works once.
@@ -172,7 +177,10 @@ test("products: preview, every skip reason, apply with opening stock", async () 
   ];
   const p = ok(await preview(o, "products", book(header, rows)));
   assert.deepEqual(p.add, [{ row: 2, name: "Vase", sku: "V-1" }]);
-  assert.deepEqual(p.update.map((u) => [u.row, u.productId, u.changes.sort()]), [[3, o.roses, ["price", "sku"]], [10, o.tulips, ["price"]]]);
+  assert.deepEqual(p.update.map((u) => [u.row, u.productId, u.changes]), [
+    [3, o.roses, [{ key: "sku", from: "R-1", to: "r-1" }, { key: "price", from: 100000, to: 110000 }]],
+    [10, o.tulips, [{ key: "price", from: 30000, to: 31000 }]],
+  ]);
   assert.deepEqual(reasons(p), [[4, "bad_unit"], [5, "bad_category"], [6, "bad_value"], [7, "options_new"], [8, "duplicate"], [9, "sku_taken"], [11, "product_conflict"], [12, "unknown_id"], [13, "no_name"], [14, "bad_value"]]);
   assert.deepEqual(p.skip.find((x) => x.row === 6), { row: 6, code: "bad_value", column: "price" });
   assert.deepEqual(p.skip.find((x) => x.row === 11), { row: 11, code: "product_conflict", first: 10 });
@@ -216,12 +224,74 @@ test("products: opening stock arrives at the branch the import names, as a recei
   const r = await send([["Cup", "C-1", "1"]], `?branchId=${crypto.randomUUID()}`);
   assert.deepEqual([r.status, r.body.code], [400, "bad_branch"]);
   const waiting = ok(await send([["Cup", "C-1", "1"]], `?branchId=${branch}`));
-  ok(await o.b.call("PUT", `${o.crm}/branches/${branch}`, { active: false }));
+  // Closed with the goods still there (the API waits for them to go: branch_busy), as a branch closed before that rule.
+  await query("UPDATE crm_branches SET active = false WHERE workspace_id = $1 AND id = $2", [o.ws.id, branch]);
   const closed = await send([["Plate", "P-1", "1"]], `?branchId=${branch}`);
   assert.deepEqual([closed.status, closed.body.code], [409, "branch_closed"]);
   const late = await apply(o, waiting.token);
   assert.deepEqual([late.status, late.body.code], [409, "branch_closed"]);
   assert.equal((await snap(o, "products")).products.some((x) => x.name === "Cup"), false, "nothing saved");
+});
+
+test("a blank cell keeps what is stored, in every column; nothing an import does clears a value", async () => {
+  const o = await shop();
+  const header = ["ID", "Name", "Phone", "Telegram", "Instagram", "Source", "Tags", "Note", "Birthday", "Kids", "Wants news", "Size"];
+  const p = ok(await preview(o, "customers", book(header, [[o.c1, "", "", "", "", "", "", "", "", "", "", ""], [o.c3, "", "", "", "insta2", "", "", "", "", "", "", ""]])));
+  assert.deepEqual([p.blank, p.unchanged, p.update], ["keep", 1, [{ row: 3, id: o.c3, name: "Dilnoza Aliyeva", changes: [{ key: "instagram", from: "dilnoza", to: "insta2" }] }]]);
+  ok(await apply(o, p.token));
+  const jasur = (await snap(o, "customers")).customers.find((c) => c.id === o.c1);
+  assert.deepEqual([jasur.name, jasur.phone, jasur.telegram, jasur.source, jasur.tags, jasur.note, jasur.fields], ["Jasur Karimov", "+998901234567", "jasur_k", "telegram", ["vip", "new"], "Line one\nline two", { bday: "1990-05-01", kids: 2, news: true, size: "M" }]);
+  // A cell that reads as nothing counts as blank: a Telegram cell of only "@" or a bare t.me link, a Tags cell of only commas.
+  for (const [telegram, tags] of [["@", ","], ["https://t.me/", " ; "]]) {
+    const r = ok(await preview(o, "customers", book(["ID", "Telegram", "Tags"], [[o.c1, telegram, tags]])));
+    assert.deepEqual([r.unchanged, r.update, r.skip], [1, [], []], telegram);
+  }
+  // Products: an empty SKU or category keeps them too.
+  const roses = (await snap(o, "products")).products.find((x) => x.id === o.roses);
+  const q = ok(await preview(o, "products", book(["Product", "SKU", "Category", "Price", "ID"], [["", "", "", "", roses.variants[0].id]])));
+  assert.deepEqual([q.blank, q.unchanged, q.update, q.skip], ["keep", 1, [], []]);
+});
+
+test("a date or a time typed as Excel's own (a number cell) reads as the day or the time it shows", async () => {
+  const o = await shop();
+  ok(await o.b.call("PUT", `${o.crm}/settings`, { fields: { customer: [{ id: "bday", name: "Birthday", type: "date" }, { id: "call", name: "Call at", type: "time" }, { id: "kids", name: "Kids", type: "number" }] } }));
+  // 32994 is 1990-05-01 and 46343 is 2026-11-17 in Excel's count of days; 0.40625 of a day is 09:45.
+  const p = ok(await preview(o, "customers", book(["Name", "Birthday", "Call at", "Kids"], [["Aziz", 32994, 0.40625, 3], ["Bek", 46343, "9:30", ""], ["Sardor", 3000000, 1.5, ""]])));
+  assert.deepEqual(reasons(p), [[4, "bad_fields"]], "past the end of Excel's calendar, or more than a day, is not a date or a time");
+  assert.deepEqual(p.skip[0].fields, { bday: "bad_value", call: "bad_value" });
+  ok(await apply(o, p.token));
+  const by = Object.fromEntries((await snap(o, "customers")).customers.map((c) => [c.name, c.fields]));
+  assert.deepEqual([by.Aziz, by.Bek], [{ bday: "1990-05-01", call: "09:45", kids: 3 }, { bday: "2026-11-17", call: "09:30" }]);
+});
+
+test("applying refuses a preview whose rows someone changed after it, even in a field the file leaves alone", async () => {
+  const o = await shop();
+  // Customers: the file changes Malika's note; meanwhile someone gives her a Telegram.
+  const notes = ok(await preview(o, "customers", book(["ID", "Note"], [[o.c2, "Prefers mornings"]])));
+  ok(await o.b.call("PUT", `${o.crm}/customers/${o.c2}`, { telegram: "@malika" }));
+  assert.deepEqual([(await apply(o, notes.token)).status, (await apply(o, notes.token)).body.code], [409, "preview_stale"]);
+  // The note the file brings is the one someone else typed meanwhile: the preview's "from" is no longer what is stored.
+  const again = ok(await preview(o, "customers", book(["ID", "Note"], [[o.c2, "Prefers mornings"]])));
+  ok(await o.b.call("PUT", `${o.crm}/customers/${o.c2}`, { note: "Evenings only" }));
+  assert.equal((await apply(o, again.token)).body.code, "preview_stale");
+  assert.equal((await snap(o, "customers")).customers.find((c) => c.id === o.c2).note, "Evenings only", "nothing saved");
+  // Products: the file changes the roses' cost; meanwhile someone changes their price.
+  const roses = (await snap(o, "products")).products.find((x) => x.id === o.roses);
+  const cost = ok(await preview(o, "products", book(["Cost", "ID"], [["65000", roses.variants[0].id]])));
+  assert.deepEqual(cost.update[0].changes, [{ key: "cost", from: 60000, to: 65000 }]);
+  ok(await o.b.call("PUT", `${o.crm}/products/${o.roses}`, { price: 120000 }));
+  assert.equal((await apply(o, cost.token)).body.code, "preview_stale");
+  // A variant edited by another import (only its "Low stock at"), or given a new cost by a receipt.
+  const v = roses.variants[0].id;
+  const byImport = ok(await preview(o, "products", book(["Price", "ID"], [["130000", v]])));
+  ok(await apply(o, ok(await preview(o, "products", book(["Low stock at", "ID"], [["7", v]]))).token));
+  assert.equal((await apply(o, byImport.token)).body.code, "preview_stale", "another import changed the variant");
+  const byReceipt = ok(await preview(o, "products", book(["Price", "ID"], [["130000", v]])));
+  ok(await o.b.call("POST", `${o.crm}/stock/receive`, { lines: [{ variantId: v, qty: 1, cost: 70000 }] }));
+  assert.equal((await apply(o, byReceipt.token)).body.code, "preview_stale", "a receipt set a new cost");
+  // Left alone, the same preview applies.
+  const fresh = ok(await preview(o, "products", book(["Cost", "ID"], [["65000", roses.variants[0].id]])));
+  assert.equal(ok(await apply(o, fresh.token)).updated, 1);
 });
 
 test("previews: another workspace's, another person's, expired and out of date are refused", async () => {
@@ -395,7 +465,7 @@ test("products: rows of one product's variants that change different product fie
   assert.deepEqual([tulips.unit, tulips.onSale], ["pcs", true]);
   // An empty unit or on-sale cell keeps the field, so the rows agree: the first changes the unit, the second takes the product off sale.
   const p = ok(await preview(o, "products", book(["SKU", "Unit", "On sale", "ID"], [["T-R", "kg", "", ""], ["", "", "No", tulips.variants[1].id]])));
-  assert.deepEqual(p.update.map((u) => [u.row, u.changes]), [[2, ["unit"]], [3, ["onSale"]]]);
+  assert.deepEqual(p.update.map((u) => [u.row, u.changes]), [[2, [{ key: "unit", from: "pcs", to: "kg" }]], [3, [{ key: "onSale", from: true, to: false }]]]);
   assert.deepEqual(p.skip, []);
   ok(await apply(o, p.token));
   const after = (await snap(o, "products")).products.find((x) => x.id === o.tulips);
@@ -429,6 +499,28 @@ test("export: bookings and orders of a span of days, with the order panels' sums
   assert.equal((await download(o, `orders.xlsx?from=${D(1)}&to=${D(2)}`)).rows.length, 1, "only the header outside the span");
   const backwards = await o.b.call("GET", `${o.crm}/export/orders.xlsx?from=${D(2)}&to=${D(1)}`);
   assert.deepEqual([backwards.status, backwards.body.issues[0].params.code], [400, "bad_span"]);
+  // The reports' limit, with the same code: the longest span is MAX_DAYS days, both ends included.
+  for (const what of ["orders", "bookings"]) {
+    const long = await o.b.call("GET", `${o.crm}/export/${what}.xlsx?from=${D(-MAX_DAYS)}&to=${D(0)}`);
+    assert.deepEqual([long.status, long.body.issues?.[0].params.code], [400, "bad_span"], what);
+    assert.equal((await download(o, `${what}.xlsx?from=${D(1 - MAX_DAYS)}&to=${D(0)}`)).status, 200, `${what}: ${MAX_DAYS} days fit`);
+    const report = await o.b.call("GET", `${o.crm}/reports/income?from=${D(-MAX_DAYS)}&to=${D(0)}`);
+    assert.deepEqual([report.status, report.body.issues[0].params.code], [400, "bad_span"]);
+  }
+  assert.ok(fitsSpan({ from: D(1 - MAX_DAYS), to: D(0) }) && !fitsSpan({ from: D(-MAX_DAYS), to: D(0) }) && !fitsSpan({ from: D(1), to: D(0) }));
+});
+
+test("the import's column words are the shared ones, the same an export writes", async () => {
+  const o = await shop();
+  for (const lang of ["en", "ru", "uz"]) {
+    const at = ["en", "ru", "uz"].indexOf(lang);
+    const products = await download(o, `products.xlsx?lang=${lang}`);
+    assert.deepEqual(products.rows[0], ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved", "id"].map((k) => HEADERS[k][at]));
+    // Each spelling the shared list has for a column is one the import reads as that column.
+    const p = ok(await preview(o, "products", book(HEADERS.sku.slice(at, at + 1).concat(HEADERS.price.at(-1)), [["R-1", "100000"]])));
+    assert.deepEqual(p.columns.map((c) => c.key), ["sku", "price"]);
+  }
+  assert.equal(plain("  Oʻlchov  BIRLIGI:"), "o'lchov birligi");
 });
 
 test("5,000 rows: previewed and applied in a fixed number of queries", async () => {

@@ -4,7 +4,8 @@
 //    number, the columns it recognised). Nothing is saved but the preview, kept with a token.
 // 2. apply: the token applies exactly that preview. It works once, for 30 minutes, only for the
 //    person who made it in the workspace it was made in. If the workspace changed meanwhile so the
-//    same file would now do something else, nothing is saved (409 preview_stale): preview again.
+//    same file would now do something else, or someone changed a row it would change (its stored
+//    values, or its last-changed stamp), nothing is saved (409 preview_stale): preview again.
 import crypto from "node:crypto";
 import multer from "multer";
 import { z } from "zod";
@@ -48,11 +49,14 @@ export function acceptFile(req, res, next) {
 
 const hash = (token) => crypto.createHash("sha256").update(token).digest("hex");
 
-/** What a preview answers: counts and rows, without the values it keeps for the write. */
+/**
+ * What a preview answers: counts and rows, without the values and stamps it keeps for the write.
+ * `blank: "keep"`: an empty cell keeps what is stored; an import never clears a value.
+ */
 function summary(kind, table, plan) {
   const add = plan.add.map((a) => ({ row: a.row, name: a.values.name, ...(kind === "products" ? { sku: a.values.sku } : {}) }));
-  const update = plan.update.map(({ row, name, values, variant, product, ...ids }) => ({ row, ...ids, name, changes: Object.keys({ ...values, ...product, ...variant }) }));
-  return { kind, rows: table.rows.length, columns: table.columns, ignored: table.ignored, add, update, unchanged: plan.unchanged.length, skip: plan.skip };
+  const update = plan.update.map(({ row, name, changes, values, variant, product, stamp, ...ids }) => ({ row, ...ids, name, changes }));
+  return { kind, rows: table.rows.length, columns: table.columns, ignored: table.ignored, blank: "keep", add, update, unchanged: plan.unchanged.length, skip: plan.skip };
 }
 
 /**

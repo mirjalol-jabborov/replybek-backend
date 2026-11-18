@@ -36,6 +36,7 @@ const fakePolar = http.createServer((req, res) => {
       return res.end(JSON.stringify(subscription({ id: sub[1], modified_at: stamp(), ...(input.product_id ? { product_id: input.product_id } : {}), ...(input.cancel_at_period_end ? { cancel_at_period_end: true } : {}) })));
     }
     if (req.method === "GET" && req.url.startsWith("/v1/products/")) return res.end(JSON.stringify({ items: polarProducts }));
+    if (req.method === "POST" && req.url === "/v1/customer-sessions/") return res.end(JSON.stringify({ customer_portal_url: "https://polar.sh/portal/pkg" }));
     if (req.method === "POST" && req.url === "/v1/products/") {
       const made = { id: `prod-made-${polarProducts.length + 1}`, ...input };
       polarProducts.push(made);
@@ -82,6 +83,10 @@ function subscription(over) {
 const lastCheckout = () => polarCalls.filter((c) => c.url === "/v1/checkouts/").at(-1);
 const billing = async (o) => (await o.b.call("GET", `/w/${o.ws.id}/billing/packages`)).body;
 const products = async (o) => (await query("SELECT products FROM workspaces WHERE id = $1", [o.ws.id])).rows[0].products;
+const ok = (r, status = 200) => {
+  assert.equal(r.status, status, JSON.stringify(r.body));
+  return r.body;
+};
 const addCustomer = (o, name = "Dilnoza Rahimova") => o.b.call("POST", `/w/${o.ws.id}/crm/customers`, { name });
 
 test("with the CRM's switch off the CRM is free and open, and products are added as before", async () => {
@@ -499,6 +504,52 @@ test("a paid CRM alone never gives the AI agent: added through POST /products it
   await query("UPDATE workspaces SET products = '{crm}' WHERE id = $1", [o.ws.id]);
   assert.deepEqual((await o.b.call("POST", `${w}/products`, { add: "agent" })).body, { products: ["crm", "agent"], changed: true });
   assert.equal((await query("SELECT billing_package FROM workspaces WHERE id = $1", [o.ws.id])).rows[0].billing_package, "both");
+});
+
+test("checkout, the portal and POST /products come back to the app that asked, never to another address", async () => {
+  crmBilled();
+  const o = await crmOwner();
+  const w = `/w/${o.ws.id}`;
+  const CRM_APP = "http://localhost:5192";
+  ok(await o.b.call("POST", `${w}/billing/checkout`, { package: "crm", tier: "growth", origin: CRM_APP }));
+  assert.deepEqual([lastCheckout().body.success_url, lastCheckout().body.return_url], [`${CRM_APP}/?checkout=done#/`, `${CRM_APP}/#/`]);
+  const bad = await o.b.call("POST", `${w}/billing/checkout`, { package: "crm", tier: "growth", origin: "https://evil.example" });
+  assert.deepEqual([bad.status, bad.body.code], [400, "bad_origin"]);
+  // Adding the AI agent from the CRM: its checkout comes back to the CRM too.
+  const added = ok(await o.b.call("POST", `${w}/products`, { add: "agent", origin: CRM_APP }));
+  assert.match(added.url, /^https:\/\/buy\.polar\.sh\//);
+  assert.equal(lastCheckout().body.success_url, `${CRM_APP}/?checkout=done#/`);
+  assert.deepEqual(lastCheckout().body.products, [OFFERS.both_growth]);
+  const strange = await o.b.call("POST", `${w}/products`, { add: "agent", origin: "https://evil.example" });
+  assert.deepEqual([strange.status, strange.body.code], [400, "bad_origin"]);
+  // The portal, once there is a subscription.
+  await deliver("subscription.active", subscription({ id: "sub_back", customer: { external_id: o.ws.id }, created_at: stamp() }));
+  assert.equal(ok(await o.b.call("POST", `${w}/billing/portal`, { origin: CRM_APP })).url, "https://polar.sh/portal/pkg");
+  assert.equal(polarCalls.filter((c) => c.url === "/v1/customer-sessions/").at(-1).body.return_url, `${CRM_APP}/#/`);
+});
+
+test("the packages answer says how often an offer is paid, and what the running subscription costs, from Polar's own data", async () => {
+  crmBilled();
+  const o = await crmOwner();
+  const { packages, subscription: none } = await billing(o);
+  assert.deepEqual(packages.map((p) => [p.key, p.interval]), [["agent", "month"], ["crm", "month"], ["both", "month"]]);
+  assert.equal(none, null, "no subscription yet");
+  // On trial: Polar's subscription carries its amount, currency, interval and the trial's end.
+  const trial = subscription({ id: "sub_terms", status: "trialing", amount: 1900, currency: "USD", recurring_interval: "month", trial_end: "2026-12-02T00:00:00.000Z", customer: { external_id: o.ws.id }, created_at: stamp() });
+  await deliver("subscription.created", trial);
+  assert.deepEqual((await billing(o)).subscription, { status: "trialing", interval: "month", amount: 1900, currency: "usd", trial_ends_at: "2026-12-02T00:00:00.000Z" });
+  // Paying: no trial end. A picture without those numbers (as stored before they were kept) says null, never a guess.
+  await deliver("subscription.active", { ...trial, status: "active", trial_end: null, modified_at: stamp() });
+  assert.deepEqual((await billing(o)).subscription, { status: "active", interval: "month", amount: 1900, currency: "usd", trial_ends_at: null });
+  const { amount, currency, recurring_interval, ...bare } = trial;
+  await deliver("subscription.updated", { ...bare, status: "active", trial_end: null, modified_at: stamp() });
+  assert.deepEqual((await billing(o)).subscription, { status: "active", interval: null, amount: null, currency: null, trial_ends_at: null });
+  // The workspace summary keeps the raw columns to itself.
+  const summary = (await o.b.call("GET", `/w/${o.ws.id}`)).body;
+  for (const key of ["subscription_amount", "subscription_currency", "subscription_interval", "subscription_trial_end"]) assert.equal(key in summary, false, key);
+  // Ended: no running subscription to describe.
+  await deliver("subscription.revoked", { ...bare, status: "canceled", trial_end: null, modified_at: stamp() });
+  assert.equal((await billing(o)).subscription, null);
 });
 
 test("the business's public pages: while its billed CRM is unpaid customers can look but not book, cancel or order", async () => {

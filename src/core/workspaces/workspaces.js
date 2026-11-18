@@ -2,6 +2,8 @@ import { query } from "../db.js";
 import { messagesUsed, logActivity } from "../activity/activity.js";
 import { HttpError } from "../http.js";
 import { polarEnabled } from "../billing/polar.js";
+import { billingAccess, graceEndsAt, overdue } from "../billing/status.js";
+import { trialDays } from "../billing/packages.js";
 import { productAccess, productsBilling } from "../billing/product-access.js";
 
 // `pages`: the most pages one website source imports.
@@ -10,36 +12,6 @@ export const PLANS = {
   growth: { messages: 10000, agents: 5, seats: 5, sources: 50, pages: 500 },
   business: { messages: 50000, agents: 20, seats: 15, sources: 250, pages: 5000 },
 };
-
-// Polar subscription statuses that still mean "paying customer". The rest (canceled, unpaid, incomplete…) don't.
-// A subscription cancelled at period end stays "active" until it ends.
-const PAID = new Set(["active", "trialing", "past_due"]);
-export const isPaid = (status) => PAID.has(status);
-
-// A failed renewal (past_due) keeps the workspace working this long while Polar retries the card.
-export const OVERDUE_GRACE_DAYS = 3;
-
-/** When a past_due workspace stops working, or null if it isn't past_due. */
-export function graceEndsAt(workspace) {
-  if (workspace.subscription_status !== "past_due" || !workspace.past_due_since) return null;
-  return new Date(new Date(workspace.past_due_since).getTime() + OVERDUE_GRACE_DAYS * 86400000);
-}
-
-/** Past due for longer than the grace period: treated as ended until the card is updated. */
-export const overdue = (workspace) => Boolean(graceEndsAt(workspace) && graceEndsAt(workspace) <= new Date());
-
-/**
- * "trial" (Polar's free trial, card on file), "paid", "none" (no trial started yet) or "ended"
- * (cancelled, or past due beyond the grace period); null while billing is off (no Polar token),
- * when everything is allowed.
- */
-export function billingAccess(workspace) {
-  if (!polarEnabled()) return null;
-  if (workspace.subscription_status === "trialing") return "trial";
-  if (overdue(workspace)) return "ended";
-  if (isPaid(workspace.subscription_status)) return "paid";
-  return workspace.polar_subscription_id ? "ended" : "none";
-}
 
 // Before the trial starts, the owner can still try their agent in the Playground (and onboarding):
 // a few answers, enough to see it work. AI costs money, so the rest waits for the card-backed trial.
@@ -70,8 +42,8 @@ export async function assertCanAnswer(workspaceId, { playground = false } = {}) 
       access === "ended"
         ? "Your subscription has ended. Choose a plan to keep your agents answering."
         : playground
-          ? `You've used your ${PREVIEW_MESSAGES} free test messages. Start your 7-day free trial to keep testing.`
-          : "Start your 7-day free trial to put your agent live.",
+          ? `You've used your ${PREVIEW_MESSAGES} free test messages. Start your ${trialDays("agent")}-day free trial to keep testing.`
+          : `Start your ${trialDays("agent")}-day free trial to put your agent live.`,
       { code: access === "ended" ? "subscription_ended" : "trial_required", reason: playground ? "preview_used" : "not_live" }
     );
   }
@@ -111,7 +83,8 @@ export async function workspaceSummary(workspace, role) {
       [workspace.id]
     ),
   ]);
-  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, past_due_since, billing_package, trial_products, subscription_created_at, subscription_modified_at, ...rest } = workspace;
+  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, past_due_since, billing_package, trial_products, subscription_created_at, subscription_modified_at,
+    subscription_amount, subscription_currency, subscription_interval, subscription_trial_end, ...rest } = workspace;
   const billing = {
     provider: polarEnabled() ? "polar" : null,
     access: billingAccess(workspace),
@@ -161,12 +134,12 @@ export async function assertPlanFits(workspace, plan) {
   const summary = await workspaceSummary(workspace, "owner");
   const limits = PLANS[plan];
   const over = ["messages", "agents", "seats", "sources"].filter((k) => summary.usage[k] > limits[k]);
-  if (over.length) throw new HttpError(409, `Your current usage is above the ${plan} plan's limits (${over.join(", ")}).`);
+  if (over.length) throw new HttpError(409, `Your current usage is above the ${plan} plan's limits (${over.join(", ")}).`, { code: "usage_above_tier", tier: plan, over });
 }
 
 /** Simulated plan change, used only while Polar isn't configured. With Polar, plans change through checkout. */
 export async function changePlan(workspace, plan, user) {
-  if (polarEnabled()) throw new HttpError(409, "Plans change through Polar checkout.");
+  if (polarEnabled()) throw new HttpError(409, "Plans change through Polar checkout.", { code: "checkout_required" });
   await assertPlanFits(workspace, plan);
   const { rows } = await query("UPDATE workspaces SET plan = $2 WHERE id = $1 RETURNING *", [workspace.id, plan]);
   await logActivity(workspace.id, user.id, "{actor} switched to the {plan} plan", { actor: user.name, plan }, { key: "Simulated, no payment" });

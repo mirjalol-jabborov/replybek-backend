@@ -9,10 +9,13 @@
 //   TRIAL_DAYS_AGENT, TRIAL_DAYS_CRM each product's free trial, 7 days unless set
 //   CRM_BILLING=on                   bills the CRM; until then it is free and open
 import { polarEnabled } from "./polar.js";
-import { isPaid } from "../workspaces/workspaces.js";
+import { isPaid } from "./status.js";
 
 // A tier is the workspace's plan (workspaces.plan); the AI agent's limits per tier are PLANS in workspaces.js.
 export const TIERS = ["starter", "growth", "business"];
+// How often every offer is paid: scripts/polar-setup.js makes each Polar product with this interval.
+// A product set up by hand in Polar with another one would not show here (that needs asking Polar).
+export const INTERVAL = "month";
 
 // `name` goes into the Polar product's name ("Replybek CRM Growth"); `env` lists the names its ids
 // are read from, first one first.
@@ -39,7 +42,7 @@ export function billed(product) {
 }
 
 /** The free trial a product gives, in days. */
-function trialDays(product) {
+export function trialDays(product) {
   const raw = process.env[PRODUCT_BILLING[product]?.trialEnv];
   return raw != null && /^\d+$/.test(raw.trim()) ? Number(raw) : 7;
 }
@@ -78,6 +81,7 @@ export const catalogue = () =>
     products: pkg.products,
     // A package with a product that is free right now isn't sold.
     sold: pkg.products.every(billed),
+    interval: INTERVAL,
     tiers: pkg.tiers.map((tier) => ({ tier, price: priceOf(pkg, tier), ready: Boolean(polarProductFor(pkg, tier)) })),
   }));
 

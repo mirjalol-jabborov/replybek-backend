@@ -12,7 +12,7 @@ import { check, isClean, totals, startStage, kindHolds, rulesOf, seriesDays } fr
 import { dayOf, hmOf, at, addDays, weekday } from "../shared/time.js";
 import { SERIES, APPT, loadRules } from "./rows.js";
 import { linkOf } from "./staff.js";
-import { ownBranch } from "../branches/access.js";
+import { needBranch, ownBranch } from "../branches/access.js";
 import { getAppointment, insertAppointment, saveAppointment, entry } from "./appointments.js";
 
 /* ───── Shapes ───── */
@@ -141,8 +141,9 @@ export function createSeries(workspaceId, who, body) {
     const me = await linkOf(q, workspaceId, who);
     const a = await getAppointment(q, cfg, body.appointmentId, me);
     // The series and its new visits are where the specialist works now, which may not be where this booking was made.
-    const branchId = (await q("SELECT branch_id FROM crm_staff WHERE workspace_id = $1 AND id = $2", [workspaceId, a.staffId])).rows[0]?.branch_id || a.branchId;
-    ownBranch({ branchOnly: me.branch }, branchId);
+    const at = (await q("SELECT branch_id FROM crm_staff WHERE workspace_id = $1 AND id = $2", [workspaceId, a.staffId])).rows[0]?.branch_id || a.branchId;
+    // New visits are new work there: a closed branch takes none (409 branch_closed).
+    const branchId = await needBranch(q, cfg, { branchOnly: me.branch }, at, { work: true });
     if (a.seriesId) throw new HttpError(409, "This booking already repeats.", { code: "in_series", seriesId: a.seriesId });
     if (!kindHolds(kindOf(cfg.data.apptStages, a.status))) throw new HttpError(409, "A cancelled or missed booking can't repeat. Restore it first.", { code: "booking_closed" });
     const first = dayOf(a.start);

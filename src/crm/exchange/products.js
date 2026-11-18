@@ -2,7 +2,8 @@
 // and the plan and write of an import.
 //
 // A row is matched to a variant by the ID column (an export carries it), else by SKU (any letter
-// case); a row that matches nothing is a new product without options. Values are checked as the
+// case); a row that matches nothing is a new product without options. A blank cell keeps what is
+// stored (an import never clears a value). Values are checked as the
 // product form checks them (Store's shape, units and categories that exist, a SKU nobody else has).
 // Stock is shown, but an import changes it only for a new product (its opening stock, a receipt in
 // the ledger): stock of a product that exists changes by receiving goods or counting them.
@@ -12,8 +13,8 @@ import { isUuid } from "../db.js";
 import { same } from "../shared/index.js";
 import { optionsText } from "../shared/store.js";
 import { listProducts, listMovements, postMoves, productCreateSchema, OPENING } from "../store/index.js";
-import { HEADERS, header, yesNo, readYesNo } from "./words.js";
-import { findInList, listName, readNumber, shapeReason } from "./cells.js";
+import { HEADERS, header, yesNo, readYesNo } from "../shared/sheets.js";
+import { given, changesOf, findInList, listName, readNumber, shapeReason } from "./cells.js";
 
 const EXPORTED = ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved"];
 const PRODUCT_KEYS = ["name", "category", "unit", "onSale"];
@@ -34,27 +35,26 @@ export async function productsSheet(q, cfg, lang) {
 }
 
 const shapeCheck = productCreateSchema.partial();
-const number = (text) => (text === "" ? undefined : readNumber(text));
 
-/** One row's cells as the product form would send them, or { skip: reason }. `stored`: the variant it matches. */
+/** One row's cells as the product form would send them, or { skip: reason }. Blank cells send nothing. `stored`: the variant it matches. */
 function sentOf(cfg, v, stored) {
   const sent = {};
-  if ("product" in v) sent.name = v.product;
-  if ("sku" in v) sent.sku = v.sku;
-  if ("category" in v) {
+  if (given(v, "product")) sent.name = v.product;
+  if (given(v, "sku")) sent.sku = v.sku;
+  if (given(v, "category")) {
     sent.category = findInList(cfg.data.productCategories, v.category, stored?.category);
     if (sent.category === undefined) return { skip: { code: "bad_category", value: v.category } };
   }
-  if ("unit" in v && v.unit) {
+  if (given(v, "unit")) {
     sent.unit = findInList(cfg.data.units, v.unit, stored?.unit);
     if (sent.unit === undefined) return { skip: { code: "bad_unit", value: v.unit } };
   }
-  for (const key of ["price", "cost", "lowAt"]) if (key in v && v[key] !== "") sent[key] = number(v[key]);
-  if ("onSale" in v && v.onSale !== "") {
+  for (const key of ["price", "cost", "lowAt"]) if (given(v, key)) sent[key] = readNumber(v[key]);
+  if (given(v, "onSale")) {
     sent.onSale = readYesNo(v.onSale);
     if (sent.onSale === undefined) return { skip: { code: "bad_value", column: "onSale" } };
   }
-  if (!stored && "stock" in v && v.stock !== "") sent.opening = number(v.stock);
+  if (!stored && given(v, "stock")) sent.opening = readNumber(v.stock);
   const shape = (stored ? shapeCheck : productCreateSchema).safeParse(sent);
   if (!shape.success) {
     // Named as the sheet names them: the product's name is the Product column, the opening stock the Stock column.
@@ -64,17 +64,23 @@ function sentOf(cfg, v, stored) {
   return { sent: shape.data };
 }
 
+// A variant and its product keyed as the file's columns: the product's name is the Product column.
+const byColumn = ({ name, ...x }) => (name === undefined ? x : { ...x, product: name });
+
 /**
  * What importing this table would do, against the products as they are now:
- * { add: [{ row, values }], update: [{ row, variantId, productId, name, variant: {changed}, product: {changed} }], unchanged: [row], skip: [{ row, code, ... }] }.
- * Reads the variants the file names in one query.
+ * { add: [{ row, values }], update: [{ row, variantId, productId, name, variant: {changed}, product: {changed},
+ *   changes: [{ key, from, to }], stamp }], unchanged: [row], skip: [{ row, code, ... }] }. `stamp`: when the product
+ * was last changed, and the variant's own stored values (a receipt's cost and another import change
+ * a variant without touching its product). Reads the variants the file names in one query.
  */
 export async function planProducts(q, cfg, table) {
   const ids = [...new Set(table.rows.map((r) => r.values.id).filter(isUuid))];
   const skus = [...new Set(table.rows.map((r) => (r.values.sku || "").toLowerCase()).filter(Boolean))];
   const { rows: known } = await q(
     `SELECT v.id, v.product_id AS "productId", v.sku, v.price::float8 AS price, v.cost::float8 AS cost, v.low_at AS "lowAt",
-            p.name, p.category, p.unit, p.on_sale AS "onSale"
+            p.name, p.category, p.unit, p.on_sale AS "onSale",
+            p.updated_at::text || ' ' || md5(row(v.sku, v.price, v.cost, v.low_at, v.option_values, v.position)::text) AS stamp
        FROM crm_variants v JOIN crm_products p ON p.workspace_id = v.workspace_id AND p.id = v.product_id
       WHERE v.workspace_id = $1 AND NOT v.archived AND (v.id = ANY($2::uuid[]) OR (lower(v.sku) = ANY($3::text[]) AND v.sku <> ''))`,
     [cfg.workspaceId, ids, skus]
@@ -133,8 +139,10 @@ export async function planProducts(q, cfg, table) {
     if (!first) productRows.set(stored.productId, { row: n, values: sent });
     seenVariant.set(stored.id, n);
     if (sku) seenSku.set(sku, n);
-    if (Object.keys(product).length || Object.keys(variant).length) plan.update.push({ row: n, variantId: stored.id, productId: stored.productId, name: stored.name, variant, product });
-    else plan.unchanged.push(n);
+    if (Object.keys(product).length || Object.keys(variant).length) {
+      const changes = changesOf(table.columns, byColumn(stored), byColumn({ ...product, ...variant }));
+      plan.update.push({ row: n, variantId: stored.id, productId: stored.productId, name: stored.name, variant, product, changes, stamp: stored.stamp });
+    } else plan.unchanged.push(n);
   }
   return plan;
 }
