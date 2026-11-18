@@ -13,6 +13,7 @@ import { deliveryTime, suggestDelivery } from "../src/crm/shared/delivery.js";
 import { PICTURES_PER_IP } from "../src/crm/public/page-routes.js";
 import { capped, LEFT_CAP } from "../src/crm/shared/store.js";
 import { forCustomer } from "../src/crm/shared/customer.js";
+import { openingOf } from "../src/crm/public/hours.js";
 
 const today = () => dayOf(nowIn("Asia/Tashkent", new Date()));
 const D = (n) => addDays(today(), n);
@@ -128,7 +129,9 @@ test("settings: an address several businesses save at once goes to one, the othe
 test("GET /: what the page draws itself with, and nothing else", async () => {
   const x = await business();
   const front = ok(await x.pub("GET", "/"));
-  assert.deepEqual(keys(front), ["address", "booking", "description", "languages", "name", "now", "pages", "phone", "shop", "today"]);
+  assert.deepEqual(keys(front), ["address", "booking", "cover", "description", "hours", "languages", "logo", "name", "now", "pages", "phone", "shop", "today"]);
+  assert.deepEqual([front.cover, front.logo], ["", ""], "no pictures uploaded yet");
+  assert.deepEqual(keys(front.hours), ["open", "opens", "until"]);
   assert.deepEqual(front.pages, { booking: true, shop: true });
   assert.deepEqual(front.booking, { maxDays: 30, cancelUntil: 120, step: 15 });
   assert.deepEqual(keys(front.shop), ["delivery", "deliveryMethods", "fields", "first", "firstTime", "paymentMethods"]);
@@ -677,6 +680,129 @@ test("pictures have their own read limit: a page full of them never uses up the 
   const over = await x.pub("GET", `/images/${name}`, undefined, v);
   assert.deepEqual([over.status, over.body.code], [429, "rate_limited"]);
   assert.equal((await x.pub("GET", `/images/${name}`, undefined, browser())).status, 200, "another visitor is not held back");
+});
+
+/* ───── Open now, and the page's own pictures ───── */
+
+test("open now: worked out from the business's hours on its own clock, less the days it is closed", () => {
+  const plain = { dayStart: "09:00", dayEnd: "21:00", branch: null, timeOff: [] };
+  // 2026-11-18 is a Wednesday.
+  assert.deepEqual(openingOf("2026-11-18T10:15", plain), { open: true, until: "21:00", opens: null });
+  assert.deepEqual(openingOf("2026-11-18T08:59", plain), { open: false, until: null, opens: { date: "2026-11-18", time: "09:00" } });
+  assert.deepEqual(openingOf("2026-11-18T21:00", plain), { open: false, until: null, opens: { date: "2026-11-19", time: "09:00" } });
+  // The default branch's own hours win: closed on Sundays, short on Saturdays.
+  const hours = { 0: null, 1: ["10:00", "19:00"], 2: ["10:00", "19:00"], 3: ["10:00", "19:00"], 4: ["10:00", "19:00"], 5: ["10:00", "19:00"], 6: ["10:00", "15:00"] };
+  const branch = { ...plain, branch: { id: "b1", hours, active: true } };
+  assert.deepEqual(openingOf("2026-11-18T09:30", branch).opens, { date: "2026-11-18", time: "10:00" });
+  assert.deepEqual(openingOf("2026-11-21T14:00", branch), { open: true, until: "15:00", opens: null });
+  assert.deepEqual(openingOf("2026-11-21T16:00", branch).opens, { date: "2026-11-23", time: "10:00" }, "Saturday evening: Monday, past the closed Sunday");
+  // A holiday for the whole business, and one for another branch that doesn't count.
+  const holiday = { ...plain, timeOff: [{ staffId: null, branchId: null, start: "2026-11-19T00:00", end: "2026-11-19T23:59" }] };
+  assert.deepEqual(openingOf("2026-11-18T22:00", holiday).opens, { date: "2026-11-20", time: "09:00" });
+  const elsewhere = { ...branch, timeOff: [{ staffId: null, branchId: "b2", start: "2026-11-18T00:00", end: "2026-11-18T23:59" }] };
+  assert.equal(openingOf("2026-11-18T12:00", elsewhere).open, true);
+  // Closed for a few hours in the middle of the day: open until it starts, and again after.
+  const lunch = { ...plain, timeOff: [{ staffId: null, branchId: null, start: "2026-11-18T13:00", end: "2026-11-18T13:59" }] };
+  assert.deepEqual(openingOf("2026-11-18T12:00", lunch), { open: true, until: "13:00", opens: null });
+  assert.deepEqual(openingOf("2026-11-18T13:30", lunch).opens, { date: "2026-11-18", time: "14:00" });
+  // Around the clock: open, with no closing time to say.
+  assert.deepEqual(openingOf("2026-11-18T03:00", { ...plain, dayStart: "00:00", dayEnd: "24:00" }), { open: true, until: null, opens: null });
+  // A closed default branch, or no working day ahead at all: closed, and nothing to promise.
+  assert.deepEqual(openingOf("2026-11-18T12:00", { ...branch, branch: { id: "b1", hours, active: false } }), { open: false, until: null, opens: null });
+  assert.deepEqual(openingOf("2026-11-18T12:00", { ...branch, branch: { id: "b1", hours: Object.fromEntries(Object.keys(hours).map((d) => [d, null])), active: true } }).opens, null);
+});
+
+test("GET /: open now comes from the server, and a business holiday today closes the page's day", async () => {
+  const x = await business();
+  const front = ok(await x.pub("GET", "/"));
+  const settings = (await x.snap("settings")).settings;
+  assert.deepEqual(front.hours, openingOf(front.now, { dayStart: settings.dayStart, dayEnd: settings.dayEnd, branch: null, timeOff: [] }));
+  // Open around the clock, then a holiday today and tomorrow for the whole business.
+  ok(await x.settings({ settings: { dayStart: "00:00", dayEnd: "24:00" } }));
+  assert.deepEqual(ok(await x.pub("GET", "/")).hours, { open: true, until: null, opens: null });
+  await x.post("/time-off", { start: `${D(0)}T00:00`, end: `${D(1)}T23:59`, note: "Holiday" });
+  assert.deepEqual(ok(await x.pub("GET", "/")).hours, { open: false, until: null, opens: { date: D(2), time: "00:00" } });
+  // The holiday's note is the business's own: it never reaches the page.
+  assert.ok(!JSON.stringify(ok(await x.pub("GET", "/"))).includes("Holiday"));
+});
+
+const PNG = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+const JPG = Buffer.from("ffd8ffe000104a46494600010100000100010000", "hex");
+const fileForm = (buffer, type = "image/png", name = "a.png") => {
+  const form = new FormData();
+  form.append("file", new Blob([buffer], { type }), name);
+  return form;
+};
+
+test("page pictures: admins upload a cover and a logo; the page shows them while it is on, and only the current ones", async () => {
+  const x = await business();
+  const upload = (kind, form, b = x.b) => b.call("POST", `${x.crm}/public/images/${kind}`, form);
+  const cover = ok(await upload("cover", fileForm(PNG)), 201);
+  assert.deepEqual(keys(cover), ["changes", "pageImages", "rev"]);
+  assert.match(cover.pageImages.cover, /^cover-[0-9a-f-]{36}\.png$/);
+  assert.equal(cover.changes.top.settings.pageImages.cover, cover.pageImages.cover, "the settings as the app keeps them");
+  const logo = ok(await upload("logo", fileForm(JPG, "image/jpeg", "l.jpg")), 201);
+  assert.match(logo.pageImages.logo, /^logo-[0-9a-f-]{36}\.jpg$/);
+  assert.equal(logo.pageImages.cover, cover.pageImages.cover);
+  assert.deepEqual((await x.snap("settings")).settings.pageImages, logo.pageImages);
+
+  // The page: their addresses on the page's own API, served with the product pictures' headers.
+  const front = ok(await x.pub("GET", "/"));
+  assert.equal(front.cover, `/public/crm/${x.slug}/page-images/${cover.pageImages.cover}`);
+  assert.equal(front.logo, `/public/crm/${x.slug}/page-images/${logo.pageImages.logo}`);
+  assert.ok(!front.cover.includes(x.ws.id), "no workspace id in the address");
+  const got = await x.pub("GET", `/page-images/${cover.pageImages.cover}`);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get("content-type"), "image/png");
+  assert.equal(got.headers.get("x-content-type-options"), "nosniff");
+  assert.match(got.headers.get("cache-control"), /^private, /);
+  assert.equal((await x.pub("GET", `/page-images/${logo.pageImages.logo}`)).headers.get("content-type"), "image/jpeg");
+
+  // Saving the tab's text fields keeps them; PUT /settings can't set them.
+  ok(await x.settings({ settings: { publicPage: { ...PAGE, slug: x.slug, address: "Tashkent, Navoi 2" } } }));
+  assert.equal(ok(await x.pub("GET", "/")).cover, front.cover);
+  const sneak = await x.settings({ settings: { pageImages: { cover: "", logo: "" } } });
+  assert.equal(sneak.status, 400);
+
+  // A new cover replaces the old one: the old address answers the page's 404.
+  const next = ok(await upload("cover", fileForm(JPG, "image/jpeg", "c.jpg")), 201);
+  assert.notEqual(next.pageImages.cover, cover.pageImages.cover);
+  assert.equal((await x.pub("GET", `/page-images/${cover.pageImages.cover}`)).status, 404);
+  assert.equal((await x.pub("GET", `/page-images/${next.pageImages.cover}`)).status, 200);
+
+  // Removed: gone from the page and from its API.
+  const removed = ok(await x.b.call("DELETE", `${x.crm}/public/images/cover`));
+  assert.equal(removed.pageImages.cover, "");
+  assert.equal(removed.pageImages.logo, logo.pageImages.logo);
+  assert.equal(ok(await x.pub("GET", "/")).cover, "");
+  assert.equal((await x.pub("GET", `/page-images/${next.pageImages.cover}`)).status, 404);
+  // A product picture's path, a made-up name, a path outside: the same 404.
+  for (const bad of ["x.png", "..%2F..%2Fetc", `cover-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}.png`]) assert.equal((await x.pub("GET", `/page-images/${bad}`)).status, 404, bad);
+
+  // Both pages off: the picture is no longer shown, with the same 404 as an unknown address.
+  ok(await x.settings({ settings: { publicPage: { ...PAGE, slug: x.slug, booking: false, shop: false } } }));
+  assert.deepEqual((await x.pub("GET", `/page-images/${logo.pageImages.logo}`)).body, { message: "Not found", code: "not_found" });
+  // The settings tab still shows it to the workspace's people for its preview; nobody else.
+  const preview = await x.b.call("GET", `${x.crm}/public/images/${logo.pageImages.logo}`);
+  assert.deepEqual([preview.status, preview.headers.get("content-type")], [200, "image/jpeg"]);
+  assert.equal((await browser().call("GET", `${x.crm}/public/images/${logo.pageImages.logo}`)).status, 401);
+  assert.equal((await x.b.call("GET", `${x.crm}/public/images/${next.pageImages.cover}`)).status, 404, "a removed one is gone for the tab too");
+});
+
+test("page pictures: only admins, only pictures, up to 5 MB, and only a cover or a logo", async () => {
+  const x = await business();
+  const agent = await teammate(x, "agent");
+  const upload = (kind, form, b = x.b) => b.call("POST", `${x.crm}/public/images/${kind}`, form);
+  assert.equal((await upload("cover", fileForm(PNG), agent.b)).status, 403);
+  assert.equal((await agent.b.call("DELETE", `${x.crm}/public/images/cover`)).status, 403);
+  const text = await upload("cover", fileForm(Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'></svg>"), "image/svg+xml", "a.svg"));
+  assert.deepEqual([text.status, text.body.code], [415, "bad_image"]);
+  const none = await x.b.call("POST", `${x.crm}/public/images/cover`, new FormData());
+  assert.deepEqual([none.status, none.body.code], [400, "bad_image"]);
+  const big = await upload("logo", fileForm(Buffer.concat([JPG, Buffer.alloc(5 * 1024 * 1024)]), "image/jpeg", "big.jpg"));
+  assert.deepEqual([big.status, big.body.code], [413, "image_too_large"]);
+  assert.equal((await upload("banner", fileForm(PNG))).status, 404);
+  assert.deepEqual((await x.snap("settings")).settings.pageImages ?? { cover: "", logo: "" }, { cover: "", logo: "" }, "nothing was kept");
 });
 
 /* ───── Tenancy, transport, limits ───── */

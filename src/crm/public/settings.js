@@ -58,6 +58,12 @@ export function pageOf(cfg) {
   };
 }
 
+/** The page's own pictures as stored (settings.pageImages, written only by images.js): { cover, logo }, each a file name or "". */
+export const imagesOf = (cfg) => ({ cover: "", logo: "", ...(cfg.data.settings.pageImages || {}) });
+
+/** Where the page loads one of them from (the API base goes in front), or "" when it has none. */
+export const imageUrl = (slug, name) => (name ? `/public/crm/${slug}/page-images/${name}` : "");
+
 /**
  * Who makes a booking or an order on a page, to the modules: a customer acting for themselves,
  * from the workspace's "website" source while it has one, held to the daily share.

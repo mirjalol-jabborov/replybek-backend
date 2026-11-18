@@ -6,7 +6,8 @@ import { HttpError } from "../../core/http.js";
 import { writeRefusal } from "../../core/billing/product-access.js";
 import { read, write } from "../db.js";
 import { SLUG, slugProblem } from "./rules.js";
-import { pageOf } from "./settings.js";
+import { pageOf, imagesOf, imageUrl } from "./settings.js";
+import { hoursOf, openingOf } from "./hours.js";
 import { suggestDelivery, rulesOf as deliveryRules } from "../shared/delivery.js";
 import { rulesOf as bookingRules } from "../shared/booking.js";
 import { customerFields } from "../shared/fields.js";
@@ -84,11 +85,12 @@ export const checkPart = (ws, part) => read(ws.id, async (q, cfg) => void openPa
 export const fieldsToAsk = (defs) => customerFields(defs).map(({ id, name, type, options }) => ({ id, name, type, ...(options ? { options } : {}) }));
 
 /** GET /: what the page needs to draw itself. Nothing about the team, customers or stock. */
-export const showFront = (ws) => read(ws.id, async (q, cfg) => front(ws, cfg));
+export const showFront = (ws) => read(ws.id, async (q, cfg) => front(ws, cfg, q));
 const exactTime = ({ date, time }) => ({ date, time });
-function front(ws, cfg) {
+async function front(ws, cfg, q) {
   const page = openPart(cfg, "any");
   const { settings } = cfg.data;
+  const images = imagesOf(cfg);
   const out = {
     name: ws.name,
     description: page.description,
@@ -98,6 +100,11 @@ function front(ws, cfg) {
     today: dayOf(cfg.now),
     now: cfg.now,
     pages: page.on,
+    // The page's own pictures, on its API: "" when it has none.
+    cover: imageUrl(page.slug, images.cover),
+    logo: imageUrl(page.slug, images.logo),
+    // Open now and until when, or when it opens next (hours.js): only times, nothing of the team.
+    hours: openingOf(cfg.now, await hoursOf(q, cfg)),
   };
   if (page.on.booking) {
     const r = bookingRules({ settings });

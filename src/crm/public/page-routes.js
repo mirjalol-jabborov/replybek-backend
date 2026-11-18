@@ -14,6 +14,7 @@ import { decoy } from "./requests.js";
 import { slotsQuery, daysQuery, lookupQuery, tokenBody, bookingBody, orderBody } from "./checks.js";
 import { listServices, listSlots, listDays, bookVisit, showBooking, cancelVisit } from "./booking.js";
 import { listCatalogue, listCategories, sendPicture, placeOrder, showOrder } from "./shop.js";
+import { sendPageImage } from "./images.js";
 
 export const router = Router({ mergeParams: true });
 
@@ -42,7 +43,8 @@ const limits = {
   writesPerIP: rateLimit({ windowMs: 10 * 60 * 1000, max: 10, key: clientIP, message: "Too many tries from this network. Try again later.", code }),
   writesPerPage: rateLimit({ windowMs: 10 * 60 * 1000, max: 100, key: slugOf, message: "Too many tries. Try again later.", code }),
 };
-const kindOf = (req) => (!READS.includes(req.method) ? "writes" : req.path.startsWith("/images/") ? "pictures" : "reads");
+const PICTURES = /^\/(images|page-images)\//;
+const kindOf = (req) => (!READS.includes(req.method) ? "writes" : PICTURES.test(req.path) ? "pictures" : "reads");
 router.use((req, res, next) => limits[`${kindOf(req)}PerIP`](req, res, next));
 router.use((req, res, next) => limits[`${kindOf(req)}PerPage`](req, res, next));
 
@@ -74,6 +76,8 @@ const answer = (fn, status = 200) => wrap(async (req, res) => res.status(status)
 const human = (fn) => (req) => (req.valid.url ? decoy() : fn(req));
 
 router.get("/", front, answer((req) => showFront(ws(req))));
+// The page's own cover and logo (images.js): while any part of the page is on.
+router.get("/page-images/:name", front, wrap((req, res) => sendPageImage(res, ws(req), req.params.name)));
 
 router.get("/services", booking, answer((req) => listServices(ws(req))));
 router.get("/slots", booking, validate(slotsQuery, "query"), answer((req) => listSlots(ws(req), req.valid)));
