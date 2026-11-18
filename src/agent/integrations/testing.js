@@ -1,13 +1,13 @@
 import { query } from "../../core/db.js";
 import { HttpError, notFound } from "../../core/http.js";
 import { sign, verify, decrypt } from "../../core/secrets.js";
-import { resolveInputs } from "./config.js";
+import { resolveInputs } from "./definitions.js";
+import { loadIntegration } from "./integrations.js";
 import {
-  loadIntegration,
   request,
   readResponse,
   send,
-} from "./integrations.js";
+} from "./requests.js";
 
 const identical = (a, b) =>
   JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));

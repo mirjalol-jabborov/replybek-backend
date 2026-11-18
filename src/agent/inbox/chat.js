@@ -1,6 +1,8 @@
 import { query, tx } from "../../core/db.js";
 import { answerQuestion, describeOutcome } from "../answers/answer.js";
-import { decideAction, disconnect, actionIntegrationMode, agentHasInPageTools } from "../integrations/integrations.js";
+import { decideAction, actionIntegrationMode } from "../integrations/confirmations.js";
+import { disconnect } from "../integrations/connections.js";
+import { agentHasInPageTools } from "../integrations/tools.js";
 import { addMessage, addMessageWithFile } from "./conversations.js";
 import { ATTACHMENTS_SQL, checkFile, readForAI, saveReading, fileContext, filesForAI } from "./attachments.js";
 import { assertCanAnswer } from "../../core/workspaces/workspaces.js";

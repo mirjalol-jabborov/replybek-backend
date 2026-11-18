@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { completeConnect } from "./integrations.js";
+import { completeConnect } from "./connections.js";
 import { afterConnect } from "../channels/widget.js";
 
 /**
