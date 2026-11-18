@@ -34,14 +34,14 @@ const GOOGLE_COOKIE = "rb_google";
 // when the sign-in page named it (?return_to=https://crm.replybek.uz). Only addresses in APP_ORIGIN count.
 const appUrl = (error, origin) => `${origin || process.env.APP_ORIGIN || "http://localhost:5173"}/${error ? `?auth_error=${encodeURIComponent(error)}` : ""}#/`;
 const returnIndex = (asked) => Math.max(0, appOrigins().indexOf(String(asked || "").replace(/\/+$/, "")));
-// Same options as the session cookie, Domain included: a sign-in started at the CRM's address comes
-// back through the dashboard's callback, and the cookie has to reach it there.
+// Same options as the session cookie. Google returns to the callback on the address the sign-in
+// started at (redirectUri), so this cookie is read back on the same address.
 const googleCookie = (value, maxAge) => serialize(GOOGLE_COOKIE, value, cookieOptions(maxAge));
 
 router.get("/google", limiter, (req, res) => {
   const back = returnIndex(req.query.return_to);
   if (!googleEnabled()) return res.redirect(appUrl("Google sign-in isn't set up yet.", appOrigins()[back]));
-  const { url, state, verifier } = authorizationUrl();
+  const { url, state, verifier } = authorizationUrl(back);
   // The cookie also remembers where to return and which product a new account is for (?product=crm).
   res.setHeader("Set-Cookie", googleCookie(`${state}.${verifier}.${back}.${req.query.product === "crm" ? "crm" : "agent"}`, 600));
   res.redirect(url);
@@ -56,7 +56,7 @@ router.get("/google/callback", limiter, wrap(async (req, res) => {
     return res.setHeader("Set-Cookie", clear).redirect(appUrl("That Google sign-in link expired. Try again.", home));
   }
   try {
-    const { user } = await googleSignIn(await exchangeCode(req.query.code, verifier), product === "crm" ? "crm" : "agent");
+    const { user } = await googleSignIn(await exchangeCode(req.query.code, verifier, Number(back) || 0), product === "crm" ? "crm" : "agent");
     await startSession(res, user.id);
     res.append("Set-Cookie", clear);
     res.redirect(appUrl(null, home));
