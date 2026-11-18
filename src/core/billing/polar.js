@@ -2,14 +2,11 @@ import crypto from "crypto";
 
 /**
  * Polar billing. Off unless POLAR_ACCESS_TOKEN is set; then plans change only through Polar.
- * Each of our plans maps to one Polar product: POLAR_PRODUCT_STARTER, POLAR_PRODUCT_GROWTH, POLAR_PRODUCT_BUSINESS.
+ * Each offer (a package in a tier) maps to one Polar product: see packages.js.
  */
-const PLAN_IDS = ["starter", "growth", "business"];
 const apiBase = () => (process.env.POLAR_API_URL || "https://api.polar.sh/v1").replace(/\/$/, "");
 
 export const polarEnabled = () => Boolean(process.env.POLAR_ACCESS_TOKEN);
-export const polarProductId = (plan) => process.env[`POLAR_PRODUCT_${plan.toUpperCase()}`] || null;
-export const planForPolarProduct = (productId) => PLAN_IDS.find((p) => productId && polarProductId(p) === productId) || null;
 
 async function call(method, path, body) {
   const res = await fetch(apiBase() + path, {
@@ -48,7 +45,6 @@ export async function createCheckout({ productId, externalCustomerId, email, met
   return { id: c.id, url: c.url };
 }
 
-/** Moves a running subscription to another product; Polar prorates by the organization's default. */
 /**
  * Every subscription Polar holds for one workspace (the workspace is the Polar customer), newest
  * first. This is how a subscription can be found again when its webhook never arrived.
@@ -59,6 +55,7 @@ export async function customerSubscriptions(externalCustomerId) {
   return items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 }
 
+/** Moves a running subscription to another product; Polar prorates by the organization's default. */
 export const changeProduct = (id, productId) => call("PATCH", `/subscriptions/${encodeURIComponent(id)}`, { product_id: productId });
 
 /** Stops renewals; the customer keeps what they already paid for until the period ends. */

@@ -2,6 +2,7 @@ import { query } from "../db.js";
 import { messagesUsed, logActivity } from "../activity/activity.js";
 import { HttpError } from "../http.js";
 import { polarEnabled } from "../billing/polar.js";
+import { productAccess, productsBilling } from "../billing/product-access.js";
 
 // `pages`: the most pages one website source imports.
 export const PLANS = {
@@ -54,10 +55,11 @@ export function allowanceResets(now = new Date()) {
  * allowance before that), and only up to the plan's AI messages this month.
  */
 export async function assertCanAnswer(workspaceId, { playground = false } = {}) {
-  const { rows } = await query("SELECT plan, subscription_status, polar_subscription_id, past_due_since FROM workspaces WHERE id = $1", [workspaceId]);
+  const { rows } = await query("SELECT plan, products, billing_package, subscription_status, polar_subscription_id, past_due_since FROM workspaces WHERE id = $1", [workspaceId]);
   if (!rows[0]) return;
   const used = await messagesUsed(workspaceId);
-  const access = billingAccess(rows[0]);
+  // The AI agent's own access: a paid package that doesn't give it (the CRM alone) doesn't count.
+  const access = productAccess(rows[0], "agent");
   if (access === "none" || access === "ended") {
     if (access === "none" && playground && used < PREVIEW_MESSAGES) return;
     if (overdue(rows[0])) {
@@ -109,7 +111,7 @@ export async function workspaceSummary(workspace, role) {
       [workspace.id]
     ),
   ]);
-  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, past_due_since, ...rest } = workspace;
+  const { polar_subscription_id, subscription_status, renews_at, cancel_at_period_end, past_due_since, billing_package, trial_products, subscription_created_at, subscription_modified_at, ...rest } = workspace;
   const billing = {
     provider: polarEnabled() ? "polar" : null,
     access: billingAccess(workspace),
@@ -121,6 +123,9 @@ export async function workspaceSummary(workspace, role) {
     grace_ends_at: graceEndsAt(workspace)?.toISOString() || null,
     // The owner opens Polar's customer portal through POST /billing/portal.
     can_manage: role === "owner" && Boolean(polar_subscription_id),
+    // The package of the subscription ("agent", "crm", "both"), and per product what the workspace may do (product-access.js).
+    package: polar_subscription_id ? billing_package || "agent" : null,
+    products: productsBilling(workspace),
   };
   return { ...rest, role, limits: PLANS[workspace.plan], usage: { messages: used, ...counts.rows[0] }, billing };
 }

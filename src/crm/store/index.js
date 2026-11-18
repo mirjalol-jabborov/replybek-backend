@@ -12,14 +12,19 @@ export { createOrder } from "./orders.js";
 export { listProducts, listOrders } from "./rows.js";
 export { productsForCustomers, findForCustomers, orderedByCustomerToday } from "./for-customers.js";
 export { uploadedName, shownToCustomers, sendImage } from "./images.js";
+// What moving goods between branches (../branches/transfer.js) writes with: the Store's own ledger steps.
+export { target, hasTarget, resolveVariants, lockStock, postMoves } from "./stock.js";
+export { storeChanges } from "./rows.js";
 
 /* ───── What core asks a module ───── */
 
-export async function snapshot({ q, cfg, want }) {
+// `branchId`: narrowed to one branch (?branch=, or a team member limited to one): its orders, its
+// ledger lines, and each product's stock there.
+export async function snapshot({ q, cfg, want, branchId }) {
   const out = {};
-  if (want("products")) out.products = await listProducts(q, cfg);
-  if (want("movements")) out.movements = await listMovements(q, cfg);
-  if (want("orders")) out.orders = await listOrders(q, cfg);
+  if (want("products")) out.products = await listProducts(q, cfg, undefined, branchId);
+  if (want("movements")) out.movements = await listMovements(q, cfg, undefined, branchId);
+  if (want("orders")) out.orders = await listOrders(q, cfg, { branchId });
   return out;
 }
 
@@ -59,6 +64,6 @@ export async function customerUses(c, workspaceId, customerId) {
 }
 
 /** A customer's orders, newest first, for their panel. */
-export async function customerHistory({ q, cfg }, customerId) {
-  return { orders: await listOrders(q, cfg, { customerId }) };
+export async function customerHistory({ q, cfg, branchId }, customerId) {
+  return { orders: await listOrders(q, cfg, { customerId, branchId }) };
 }

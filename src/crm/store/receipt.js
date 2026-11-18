@@ -15,7 +15,8 @@ export function receipt(ctx, id) {
   const { workspace } = ctx;
   return read(workspace.id, async (q, cfg) => {
     const [order] = isUuid(id) ? await listOrders(q, cfg, { ids: [id] }) : [];
-    if (!order) throw notFound("Order not found");
+    // A team member limited to one branch reads only its orders (ctx.branchId).
+    if (!order || (ctx.branchId && order.branchId !== ctx.branchId)) throw notFound("Order not found");
     const customer = await findCustomer(q, cfg, { id: order.customerId });
     const branch = await branchOf(q, cfg, order.branchId);
     const { rows: goods } = await q(

@@ -7,6 +7,7 @@
 // Steps of a booking are the workspace's own list (db.apptStages); the code only looks at what a
 // step means (its kind): see booking-steps.js, which this file passes on.
 import { holdsTime, isOpen } from "./booking-steps.js";
+import { placeOf, withinBranch, offFor } from "./branches.js";
 import { dayOf, hmOf, at, toMin, fromMin, addDays, weekday, weekStart, absMin, daysBetween } from "./time.js";
 
 export * from "./booking-steps.js";
@@ -30,10 +31,13 @@ export function customerCatalogue(db) {
   return { services, staff };
 }
 
-/** Working hours of a person on a day, as minutes [from, to], or null on a day off. */
-export function hoursOn(person, day) {
+/**
+ * Working hours of a person on a day, as minutes [from, to], or null on a day off. With `db`, cut
+ * to their branch's own hours when it sets them (see shared/branches.js).
+ */
+export function hoursOn(person, day, db) {
   const h = person?.hours?.[weekday(day)];
-  return h ? [toMin(h[0]), toMin(h[1])] : null;
+  return h ? withinBranch([toMin(h[0]), toMin(h[1])], placeOf(db, person), day) : null;
 }
 
 /** Total duration and price of a set of services. */
@@ -50,20 +54,23 @@ export function bufferOf(db, serviceIds) {
 
 /** A time-off entry as an absolute span [from, to). Its end is the last minute it covers ("23:59"). */
 export const offSpan = (o) => [absMin(o.start), absMin(o.end) + 1];
-/** Time off that touches this day for this person (or for everyone), as minutes of that day [from, to). */
-export function offOn(db, staffId, day) {
+/**
+ * Time off that touches this day for this person (or for everyone), as minutes of that day [from, to).
+ * Closed days count for the person's branch (`branchId`, theirs by default); with none, for everyone.
+ */
+export function offOn(db, staffId, day, branchId = (db.staff || []).find((p) => p.id === staffId)?.branchId) {
   const d0 = absMin(at(day, "00:00"));
   return (db.timeOff || [])
-    .filter((o) => !o.staffId || o.staffId === staffId)
+    .filter((o) => offFor(o, staffId, branchId))
     .map((o) => {
       const [a, b] = offSpan(o);
       return { o, from: Math.max(0, a - d0), to: Math.min(1440, b - d0) };
     })
     .filter((x) => x.to > x.from);
 }
-/** The whole business is closed all of this day (a holiday, a team day). Returns the entry or null. */
-export function closedAllDay(db, day) {
-  return offOn(db, null, day).find((x) => !x.o.staffId && x.from === 0 && x.to === 1440)?.o || null;
+/** The whole business (or this branch) is closed all of this day (a holiday, a team day). Returns the entry or null. */
+export function closedAllDay(db, day, branchId = null) {
+  return offOn(db, null, day, branchId).find((x) => !x.o.staffId && x.from === 0 && x.to === 1440)?.o || null;
 }
 
 /* ───────── The rules engine ───────── */
@@ -73,6 +80,7 @@ export function closedAllDay(db, day) {
  * hard: nobody can book it.
  *   no_staff                                  no such specialist
  *   staff_off        { staffId }              the specialist is switched off
+ *   branch_closed    { branchId }             the specialist's branch is closed
  *   service_not_done { staffId, serviceId }   the specialist doesn't do this service
  *   day_passed                                a day before today
  *   bad_duration                              the end is not after the start
@@ -82,11 +90,11 @@ export function closedAllDay(db, day) {
  *   time_passed                               earlier today
  *   min_notice       { minutes }              less than rules.minNotice before the start
  *   max_days         { days }                 further ahead than rules.maxDays
- *   day_off          { staffId, weekday }     the specialist doesn't work that weekday
- *   outside_hours    { staffId, from, to }    outside their working hours
+ *   day_off          { staffId, weekday }     the specialist (or their branch) doesn't work that weekday
+ *   outside_hours    { staffId, from, to }    outside their working hours (cut to their branch's own)
  *   break            { staffId, from, to }    runs into a break
  *   away             { staffId, id, start, end, note }   the specialist's time off
- *   closed           { id, start, end, note }            the whole business is closed
+ *   closed           { id, start, end, note }            the whole business (or their branch) is closed
  *   buffer_before    { minutes, until }       inside the free time kept after the visit before it
  *   buffer_after     { minutes, next }        leaves less than its own free time before the next one
  *   off_grid         { step }                 customers only: not on the start-time grid
@@ -109,6 +117,8 @@ export function check(db, draft, { by = "team", now } = {}) {
 
   // Hard: nobody can do it.
   if (!person.active) hard.push({ code: "staff_off", staffId });
+  const place = placeOf(db, person);
+  if (place?.active === false) hard.push({ code: "branch_closed", branchId: place.id });
   const missing = (draft.serviceIds || []).find((id) => !(person.serviceIds || []).includes(id));
   if (missing) hard.push({ code: "service_not_done", staffId, serviceId: missing });
   if (day < today) hard.push({ code: "day_passed" });
@@ -122,14 +132,14 @@ export function check(db, draft, { by = "team", now } = {}) {
   if (day === today && S < N) soft.push({ code: "time_passed" });
   else if (day >= today && rules.minNotice && S < N + rules.minNotice) soft.push({ code: "min_notice", minutes: rules.minNotice });
   if (rules.maxDays && day > addDays(today, rules.maxDays)) soft.push({ code: "max_days", days: rules.maxDays });
-  const hours = hoursOn(person, day);
+  const hours = hoursOn(person, day, db);
   if (!hours) soft.push({ code: "day_off", staffId, weekday: weekday(day) });
   else if (s < hours[0] || e > hours[1]) soft.push({ code: "outside_hours", staffId, from: fromMin(hours[0]), to: fromMin(hours[1]) });
   for (const b of person.breaks || []) {
     if (b.from && b.to && s < toMin(b.to) && e > toMin(b.from)) soft.push({ code: "break", staffId, from: b.from, to: b.to });
   }
   for (const o of db.timeOff || []) {
-    if (o.staffId && o.staffId !== staffId) continue;
+    if (!offFor(o, staffId, person.branchId)) continue;
     const [a, b] = offSpan(o);
     if (S < b && S + draft.duration > a) {
       const span = { id: o.id, start: o.start, end: o.end, note: o.note || "" };
@@ -182,7 +192,7 @@ export function freeStarts(db, { staffId, serviceIds, day, duration, ignoreId },
   const people = staffId ? eligible(db, serviceIds).filter((p) => p.id === staffId) : eligible(db, serviceIds);
   const found = new Map();
   for (const p of people) {
-    const h = hoursOn(p, day);
+    const h = hoursOn(p, day, db);
     if (!h) continue;
     for (let m = Math.ceil(h[0] / step) * step; m + duration <= h[1]; m += step) {
       if (found.has(m)) continue;
@@ -193,7 +203,7 @@ export function freeStarts(db, { staffId, serviceIds, day, duration, ignoreId },
 }
 
 const worksOn = (db, p, day) => {
-  const h = hoursOn(p, day);
+  const h = hoursOn(p, day, db);
   return Boolean(h) && !offOn(db, p.id, day).some((x) => x.from <= h[0] && x.to >= h[1]);
 };
 
@@ -209,12 +219,12 @@ export function whyNone(db, { staffId, serviceIds, day }, { now } = {}) {
   if (rules.maxDays && day > addDays(dayOf(now), rules.maxDays)) return { code: "max_days", days: rules.maxDays };
   const people = staffId ? eligible(db, serviceIds).filter((p) => p.id === staffId) : eligible(db, serviceIds);
   if (!people.length) return staffId ? { code: "nobody_does", staffId } : { code: "nobody_does" };
-  const closed = closedAllDay(db, day);
-  if (closed) return { code: "closed", id: closed.id, note: closed.note || "" };
+  const shut = people.map((p) => closedAllDay(db, day, p.branchId));
+  if (shut.every(Boolean)) return { code: "closed", id: shut[0].id, note: shut[0].note || "" };
   const working = people.filter((p) => worksOn(db, p, day));
   if (!working.length) return people.length === 1 ? { code: "not_working", staffId: people[0].id, weekday: weekday(day) } : { code: "not_working", weekday: weekday(day) };
   if (day === dayOf(now) && rules.minNotice) {
-    const latest = Math.max(...working.map((p) => hoursOn(p, day)[1]));
+    const latest = Math.max(...working.map((p) => hoursOn(p, day, db)[1]));
     if (absMin(at(day, "00:00")) + latest <= absMin(now) + rules.minNotice) return { code: "too_late", minutes: rules.minNotice };
   }
   return { code: "full" };
@@ -229,9 +239,10 @@ export function dayBlock(db, { staffId, serviceIds }, day, { now } = {}) {
   const rules = rulesOf(db);
   if (day < dayOf(now)) return { code: "day_passed", hard: true };
   if (rules.maxDays && day > addDays(dayOf(now), rules.maxDays)) return { code: "max_days", days: rules.maxDays, hard: false };
-  const closed = closedAllDay(db, day);
-  if (closed) return { code: "closed", id: closed.id, note: closed.note || "", hard: false };
   const people = staffId ? (db.staff || []).filter((p) => p.id === staffId) : eligible(db, serviceIds || []);
+  // Closed for everyone who could take it (the whole business, when nobody could).
+  const shut = people.length ? people.map((p) => closedAllDay(db, day, p.branchId)) : [closedAllDay(db, day)];
+  if (shut.every(Boolean)) return { code: "closed", id: shut[0].id, note: shut[0].note || "", hard: false };
   if (!people.length) return null;
   if (!people.some((p) => worksOn(db, p, day))) return staffId ? { code: "not_working", staffId, hard: false } : { code: "not_working", hard: false };
   return null;
@@ -242,7 +253,7 @@ export const upcoming = (db, now) => (db.appointments || []).filter((a) => isOpe
 /** Open bookings that sit inside a time-off entry, for one person or everyone. */
 export function bookingsInside(db, o) {
   const [a, b] = offSpan(o);
-  return (db.appointments || []).filter((x) => isOpen(db, x) && (!o.staffId || x.staffId === o.staffId) && absMin(x.start) < b && absMin(x.start) + x.duration > a);
+  return (db.appointments || []).filter((x) => isOpen(db, x) && offFor(o, x.staffId, x.branchId) && absMin(x.start) < b && absMin(x.start) + x.duration > a);
 }
 
 /* ───────── Repeat bookings ───────── */

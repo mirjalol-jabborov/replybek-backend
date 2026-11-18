@@ -5,6 +5,7 @@ import { wall, isUuid } from "../db.js";
 import { stageIds } from "../shared/index.js";
 import { OPEN_KINDS } from "../shared/booking.js";
 import { addDays } from "../shared/time.js";
+import { branchRules } from "../branches/access.js";
 
 const moment = (col) => `to_char(${col}, 'YYYY-MM-DD"T"HH24:MI')`;
 const day = (col) => `to_char(${col}, 'YYYY-MM-DD')`;
@@ -29,8 +30,8 @@ export async function one(q, cfg, table, cols, id, what) {
 }
 
 /**
- * The data the rules read, fresh: the team, services, time off, and the bookings that start
- * between two days (both included). The shape check() and freeStarts() take.
+ * The data the rules read, fresh: the team, services, time off, the bookings that start
+ * between two days (both included), and the branches' own hours. The shape check() and freeStarts() take.
  */
 export async function loadRules(q, cfg, from, to) {
   const w = cfg.workspaceId;
@@ -40,7 +41,8 @@ export async function loadRules(q, cfg, from, to) {
   const services = await rows(`SELECT ${SERVICE} FROM crm_services WHERE workspace_id = $1 ORDER BY created_at, id`, [w]);
   const timeOff = await rows(`SELECT ${TIME_OFF} FROM crm_time_off WHERE workspace_id = $1 AND end_at >= $2::date AND start_at < $3::date ORDER BY start_at, id`, [w, from, addDays(to, 1)]);
   const appointments = await rows(`SELECT ${APPT("$4")} FROM crm_appointments WHERE workspace_id = $1 AND start_at >= $2::date AND start_at < $3::date ORDER BY start_at, id`, [w, from, addDays(to, 1), cfg.timezone]);
-  return { settings: cfg.data.settings, apptStages: cfg.data.apptStages, staff, services, timeOff, appointments };
+  const branches = await branchRules(q, cfg);
+  return { settings: cfg.data.settings, apptStages: cfg.data.apptStages, staff, services, timeOff, appointments, branches };
 }
 
 /**

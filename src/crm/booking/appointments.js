@@ -21,6 +21,8 @@ import { findCustomer, needSource } from "../core/customers.js";
 import { cleanFields, customerFields, missingFields, same, stageIds, PER_PHONE_PER_DAY } from "../shared/index.js";
 import { check, verdict, assign, totals, startStage, kindHolds, holdsTime, cancelProblem } from "../shared/booking.js";
 import { dayOf, fromMin, toMin } from "../shared/time.js";
+import { poolOf } from "../shared/branches.js";
+import { needBranch, ownBranch } from "../branches/access.js";
 import { APPT, loadRules } from "./rows.js";
 import { linkOf } from "./staff.js";
 
@@ -39,17 +41,18 @@ const shape = {
   // Book over the business's own rules (soft reasons). Works only when rules.override is on.
   force: z.boolean(),
 };
-export const createSchema = z.object(shape).partial().required({ customerId: true, serviceIds: true, start: true }).strict();
+// branchId: where "anyone" is looked for (a named specialist books where they work).
+export const createSchema = z.object({ ...shape, branchId: uuid }).partial().required({ customerId: true, serviceIds: true, start: true }).strict();
 export const editSchema = z.object(shape).partial().strict().refine((v) => Object.keys(v).some((k) => k !== "force"), "Nothing to change.");
 export const moveSchema = z.object({ start: shape.start, staffId: uuid, force: z.boolean() }).partial().strict().refine((v) => v.start || v.staffId, "Say where the booking goes.");
 export const paySchema = z.object({ paid: z.boolean() }).strict();
 
 /* ───── Shared pieces ───── */
 
-/** A booking of this workspace that this person may see, or 404. */
+/** A booking of this workspace that this person may see (their own, their branch's), or 404. */
 export async function getAppointment(q, cfg, id, me) {
   const { rows } = isUuid(id) ? await q(`SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id, cfg.timezone]) : { rows: [] };
-  if (!rows[0] || (me?.only && rows[0].staffId !== me.only)) throw notFound("Booking not found");
+  if (!rows[0] || (me?.only && rows[0].staffId !== me.only) || (me?.branch && rows[0].branchId !== me.branch)) throw notFound("Booking not found");
   return rows[0];
 }
 
@@ -139,21 +142,27 @@ export async function bookedByCustomerToday(q, cfg, customerId) {
   );
   return rows[0].n;
 }
-/** Someone who works only with their own bookings books only for themselves. */
-function ownOnly(me, staffId) {
+/**
+ * Someone who works only with their own bookings books only for themselves; someone limited to a
+ * branch, only with its specialists.
+ */
+function ownOnly(me, staffId, db) {
   if (me.only && staffId !== me.only) throw forbidden("You can book only for yourself.");
+  const at = db.staff.find((p) => p.id === staffId)?.branchId;
+  if (at) ownBranch({ branchOnly: me.branch }, at);
 }
 
 /**
  * Decides who takes a visit and whether it may be booked. Throws the 422 refusal, or returns
- * { staffId, soft } (soft: the rule reasons that were passed with force).
+ * { staffId, soft } (soft: the rule reasons that were passed with force). `pool`: the branch
+ * "anyone" is looked for in (null: every branch).
  */
-function decide(cfg, db, draft, me, force, who = null) {
+function decide(cfg, db, draft, me, force, who = null, pool = null) {
   const by = byCustomer(who) ? "customer" : "team";
   const opts = { by, now: cfg.now };
   const asked = draft.staffId || me.only;
-  if (asked) ownOnly(me, asked);
-  const { staffId, result } = asked ? { staffId: asked, result: check(db, { ...draft, staffId: asked }, opts) } : assign(db, draft, opts);
+  if (asked) ownOnly(me, asked, db);
+  const { staffId, result } = asked ? { staffId: asked, result: check(db, { ...draft, staffId: asked }, opts) } : assign(poolOf(db, pool), draft, opts);
   if (verdict(db, result, { by, force: by === "team" && force }) !== "ok") throw refuse(cfg, result);
   return { staffId, soft: result.soft };
 }
@@ -204,7 +213,9 @@ export function bookAppointment(at, who, body) {
     const sum = totals(db, body.serviceIds);
     const duration = customer ? sum.duration : body.duration ?? sum.duration;
     const draft = { staffId: body.staffId || null, serviceIds: body.serviceIds, start: body.start, duration };
-    const { staffId, soft } = decide(cfg, db, draft, me, body.force, who);
+    // "Anyone" at the branch sent (or the person's own); a named specialist books where they work.
+    const pool = body.branchId || me.branch ? await needBranch(q, cfg, who, body.branchId, { work: true }) : null;
+    const { staffId, soft } = decide(cfg, db, draft, me, body.force, who, pool);
     const fields = fieldsOf(cfg, body.fields, {}, who);
     const stage = startStage(cfg.data.apptStages, customer ? "customer" : "team");
     if (!stage) throw new HttpError(409, "The bookings board has no steps. Add one in CRM settings.", { code: "no_steps" });
@@ -258,12 +269,13 @@ export function editAppointment(at, who, id, sent) {
     let soft = [];
     if (timeChanged) {
       const draft = { staffId: anyone ? null : body.staffId || a.staffId, serviceIds: services || a.serviceIds, start, duration, ignoreId: a.id };
-      if (holdsTime(db, a)) ({ staffId, soft } = decide(cfg, db, draft, me, body.force, who));
+      // "Anyone" stays at the booking's branch.
+      if (holdsTime(db, a)) ({ staffId, soft } = decide(cfg, db, draft, me, body.force, who, a.branchId));
       else {
         // A cancelled or missed booking holds no time, so the rules wait until it is brought back.
         // Only a visit no booking can be (none, or running into the next day) is refused now.
         staffId = draft.staffId || a.staffId;
-        ownOnly(me, staffId);
+        ownOnly(me, staffId, db);
         if (!db.staff.some((p) => p.id === staffId)) throw new HttpError(400, "This specialist no longer exists.", { code: "bad_staff" });
         const hard = check(db, { ...draft, staffId }, { by: "team", now: cfg.now }).hard.filter((r) => r.code === "bad_duration" || r.code === "ends_next_day");
         if (hard.length) throw refuse(cfg, { hard, soft: [] });

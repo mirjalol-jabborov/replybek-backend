@@ -1,6 +1,6 @@
 import { query } from "../db.js";
 import { notFound, forbidden, HttpError } from "../http.js";
-import { billingAccess, overdue } from "./workspaces.js";
+import { writeRefusal } from "../billing/product-access.js";
 
 const RANK = { agent: 1, admin: 2, owner: 3 };
 
@@ -31,12 +31,25 @@ export async function requireWorkspace(req, res, next) {
 export const requireRole = (role) => (req, res, next) => (RANK[req.role] >= RANK[role] ? next() : next(forbidden("Only workspace admins can do this.")));
 
 const PRODUCT = { agent: "the AI agent", crm: "the CRM" };
+const READS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// Products whose read-only lock is this guard, with the paths under the product that stay open
+// while it is locked (a check that saves nothing). The AI agent's lock is readOnlyUntilTrial below,
+// because it also covers the routes every workspace has.
+const LOCKED_HERE = { crm: [/^\/booking\/check$/] };
+
 /**
  * For routes that belong to one product. A workspace has the AI agent, the CRM or both
- * (workspaces.products); a workspace without the product gets 404 { code: "product_off" }.
+ * (workspaces.products); a workspace without the product gets 404 { code: "product_off" }, and
+ * its data stays for when the product comes back. While the product is billed, reads always
+ * work and writes need its trial or a paid package that gives it (402, see writeRefusal).
  */
-export const requireProduct = (product) => (req, res, next) =>
-  req.workspace.products?.includes(product) ? next() : next(new HttpError(404, `This workspace doesn't have ${PRODUCT[product]}.`, { code: "product_off", product }));
+export const requireProduct = (product) => (req, res, next) => {
+  if (!req.workspace.products?.includes(product)) return next(new HttpError(404, `This workspace doesn't have ${PRODUCT[product]}.`, { code: "product_off", product }));
+  const open = LOCKED_HERE[product];
+  if (!open || READS.has(req.method) || open.some((re) => re.test(req.path))) return next();
+  next(writeRefusal(req.workspace, product) || undefined);
+};
 
 // What exists only with the AI agent: agents (with their knowledge, channels and playground),
 // the inbox and its files, integrations, analytics and the agent's onboarding. The rest of
@@ -56,15 +69,12 @@ const OPEN_WHILE_LOCKED = [/^\/plan$/, /^\/billing\//, /^\/onboarding\//, /^\/ag
  * Before the free trial starts (or once the subscription has ended) the workspace is read-only:
  * everything can be viewed, nothing added or changed. Onboarding is the exception, since it builds
  * the first agent before the trial; the dashboard keeps such workspaces in onboarding until it's done.
+ * The AI agent's routes follow the AI agent's access; the routes every workspace has follow its
+ * subscription, whatever the package.
  */
 export function readOnlyUntilTrial(req, res, next) {
-  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
-  const access = billingAccess(req.workspace);
-  if (access !== "none" && access !== "ended") return next();
+  if (READS.has(req.method)) return next();
   if (!req.workspace.settings?.onboarded) return next();
   if (OPEN_WHILE_LOCKED.some((re) => re.test(req.path))) return next();
-  if (overdue(req.workspace)) {
-    return next(new HttpError(402, "Your last payment didn't go through. Update your card on Polar to make changes.", { code: "subscription_ended", overdue: true, reason: "read_only" }));
-  }
-  next(new HttpError(402, access === "ended" ? "Your subscription has ended. Choose a plan to make changes." : "Start your 7-day free trial to make changes.", { code: access === "ended" ? "subscription_ended" : "trial_required", reason: "read_only" }));
+  next(writeRefusal(req.workspace, AGENT_ONLY.test(req.path) ? "agent" : null) || undefined);
 }

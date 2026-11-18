@@ -23,6 +23,7 @@ import { addPayment, historyLine, lockOrder, storeChanges } from "./rows.js";
 import { hasTarget, postMoves, target } from "./stock.js";
 import { sameLines, cleanLines, customerLines, writeLines } from "./order-lines.js";
 import { shortForCustomers, orderedByCustomerToday } from "./for-customers.js";
+import { needBranch } from "../branches/access.js";
 
 /* ───── Shapes ───── */
 
@@ -67,6 +68,7 @@ export const orderCreateSchema = z
     // A customer who is not in the list yet comes with the order.
     customer: z.object({ name: z.string().trim().min(1, "Add the customer's name.").max(120), phone: z.string().trim().max(40).optional() }).strict(),
     paid: z.boolean(), // paid in full on the spot, by the order's payment method
+    branchId: uuid, // the branch it is filled from: the default one (or the person's own) when left out
   })
   .partial()
   .required({ lines: true })
@@ -142,9 +144,11 @@ export function createOrder(at, user, input) {
     const payment = methodOf(cfg, input.payment || cfg.data.paymentMethods[0]?.id || "");
     // A customer who comes with the order is checked the way the Customers page checks one: { name, phone }.
     const comes = input.customerId ? await needCustomer(q, cfg, input.customerId) : await cleanCustomer(q, cfg, { name: input.customer.name, phone: input.customer.phone || "" });
+    // Filled from one branch, which holds and gives its goods. A customer's own order is the default branch's.
+    const branchId = customer ? cfg.branchId : await needBranch(q, cfg, user, input.branchId, { work: true });
     const d = cleanDelivery(cfg, input.delivery || {});
     const f = cleanOrderFields(cfg, input.fields || {});
-    const l = customer ? await customerLines(c, cfg, input.lines) : await cleanLines(c, cfg, input.lines);
+    const l = customer ? await customerLines(c, cfg, input.lines) : await cleanLines(c, cfg, input.lines, [], branchId);
     const draft = { lines: l.lines, discount: (!customer && input.discount) || 0, delivery: d.delivery };
     checkDiscount(draft);
     const hard = [...l.hard, ...d.hard, ...f.hard];
@@ -160,7 +164,7 @@ export function createOrder(at, user, input) {
     const { rows } = await c.query(
       `INSERT INTO crm_orders (workspace_id, branch_id, number, customer_id, status, delivery, payment, discount, source, note, fields, history, created_by, customer_made)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
-      [cfg.workspaceId, cfg.branchId, number, added?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify([historyLine(cfg, user, "created")]), user?.id || null, customer]
+      [cfg.workspaceId, branchId, number, added?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify([historyLine(cfg, user, "created")]), user?.id || null, customer]
     );
     const orderId = rows[0].id;
     await writeLines(c, cfg, orderId, l.lines);
@@ -176,7 +180,7 @@ export function createOrder(at, user, input) {
  */
 export function updateOrder(workspace, user, id, input) {
   return write(workspace.id, async (c, cfg, q) => {
-    const order = await lockOrder(q, cfg, id);
+    const order = await lockOrder(q, cfg, id, user?.branchOnly);
     const stages = cfg.data.orderStages;
     const set = {};
     const history = [];
@@ -249,7 +253,7 @@ export function updateOrder(workspace, user, id, input) {
     }
     if (history.length) set.history = [...order.history, ...history];
     if (Object.keys(set).length) await updateRow(c, cfg, "crm_orders", MAP, "id", order.id, set);
-    return { changes: await storeChanges(q, cfg, { orderId: order.id, variantIds: plan ? plan.movements.map((m) => m.variantId) : [], moveIds }), id: order.id };
+    return { changes: await storeChanges(q, cfg, { orderId: order.id, variantIds: plan ? plan.movements.map((m) => m.variantId) : [], moveIds, branchId: user?.branchOnly }), id: order.id };
   });
 }
 

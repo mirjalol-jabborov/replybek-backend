@@ -4,11 +4,13 @@ import { validate } from "../validate.js";
 import { productAddSchema, workspaceUpdateSchema } from "./checks.js";
 import { requireRole } from "./access.js";
 import { stream } from "../events.js";
-import { workspaceSummary, updateWorkspace, listMembers, addProduct } from "./workspaces.js";
+import { workspaceSummary, updateWorkspace, listMembers } from "./workspaces.js";
+import { addProductOrBuy } from "../billing/billing.js";
 
-// Adding a product sits above the trial lock, with the CRM (see app.js).
+// Adding a product sits above the trial lock, with the CRM (see app.js). Once the CRM is billed it
+// starts the checkout (or package change) that brings the product.
 export const products = Router({ mergeParams: true });
-products.post("/products", requireRole("owner"), validate(productAddSchema), wrap(async (req, res) => res.json(await addProduct(req.workspace, req.valid.add))));
+products.post("/products", requireRole("owner"), validate(productAddSchema), wrap(async (req, res) => res.json(await addProductOrBuy(req.workspace, req.valid.add, req.user))));
 
 const router = Router({ mergeParams: true });
 const admin = requireRole("admin");

@@ -16,34 +16,39 @@ import * as booking from "./booking/index.js";
 import * as store from "./store/index.js";
 import * as notices from "./notices/index.js";
 import * as publicPages from "./public/index.js";
+import * as reports from "./reports/index.js";
+import * as exchange from "./exchange/index.js";
 import { router as core } from "./core/index.js";
 import { view } from "./core/settings.js";
 import { listCustomers } from "./core/customers.js";
-import { listBranches } from "./core/branches.js";
+import * as branches from "./branches/index.js";
 
-modules.push(booking, store, notices, publicPages);
+modules.push(booking, store, notices, publicPages, reports, exchange, branches);
 
 const router = Router({ mergeParams: true });
 
 // req.ctx(): what a module's snapshot and history hooks get (read() adds q and cfg). Nothing is
 // read here: the workspace's CRM is read by the read or write that needs it, made on its first use.
+// branchOnly: the branch a team member is limited to (set by branches.scope); branchId: the branch
+// the rows are narrowed to (theirs, or the snapshot's ?branch=).
 router.use((req, res, next) => {
-  req.ctx = (extra) => ({ workspace: req.workspace, role: req.role, user: req.user, want: () => true, ...extra });
+  req.ctx = (extra) => ({ workspace: req.workspace, role: req.role, user: req.user, want: () => true, branchOnly: req.branchOnly, branchId: req.branchOnly, ...extra });
   next();
 });
+router.use(branches.scope);
 
 // Who is looking, and the workspace around the rows. Always small, so every full snapshot has them.
-const ABOUT = ["id", "name", "role", "me", "packages", "branches"];
+const ABOUT = ["id", "name", "role", "me", "packages"];
 const KEYS = () => new Set(["rev", ...ABOUT, ...TOP_KEYS, "customers", ...modules.flatMap((m) => m.keys)]);
 
 /**
  * The workspace as the app's `db`. One unchanging picture: every part is read in the same
- * transaction, so `rev` and the rows belong together.
+ * transaction, so `rev` and the rows belong together. ?branch=<id> narrows the rows to one branch.
  */
 function snapshot(req, only) {
   return read(req.workspace.id, async (q, cfg) => {
     const want = (key) => !only || only.has(key);
-    const ctx = req.ctx({ q, cfg, want });
+    const ctx = req.ctx({ q, cfg, want, branchId: await branches.narrowTo(q, cfg, req.query.branch, req.branchOnly) });
     const out = { rev: cfg.rev };
     if (want("id")) out.id = req.workspace.id;
     if (want("name")) out.name = req.workspace.name;
@@ -56,7 +61,6 @@ function snapshot(req, only) {
     }
     const lists = view(cfg.data, req.workspace);
     for (const key of TOP_KEYS) if (want(key)) out[key] = lists[key];
-    if (want("branches")) out.branches = await listBranches(q, cfg);
     if (want("customers")) out.customers = await listCustomers(q, cfg);
     for (const m of modules) {
       const mine = m.keys.filter(want);

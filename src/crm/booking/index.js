@@ -28,21 +28,25 @@ export async function me(ctx) {
   return { staffId: (await linkFor(ctx)).staffId };
 }
 
-/** The module's part of the snapshot: one query per key asked for. */
+/**
+ * The module's part of the snapshot: one query per key asked for. `ctx.branchId`: narrowed to one
+ * branch (?branch=, or a team member limited to one): its team, time off, bookings and series.
+ */
 export async function snapshot(ctx) {
   const { q, cfg, want } = ctx;
   const w = cfg.workspaceId;
+  const b = ctx.branchId || null;
   const out = {};
   const rows = async (key, text, params) => {
     if (want(key)) out[key] = (await q(text, params)).rows;
   };
-  await rows("staff", `SELECT ${STAFF} FROM crm_staff WHERE workspace_id = $1 ORDER BY created_at, id`, [w]);
+  await rows("staff", `SELECT ${STAFF} FROM crm_staff WHERE workspace_id = $1 AND ($2::uuid IS NULL OR branch_id = $2) ORDER BY created_at, id`, [w, b]);
   await rows("services", `SELECT ${SERVICE} FROM crm_services WHERE workspace_id = $1 ORDER BY created_at, id`, [w]);
-  await rows("timeOff", `SELECT ${TIME_OFF} FROM crm_time_off WHERE workspace_id = $1 ORDER BY start_at, id`, [w]);
+  await rows("timeOff", `SELECT ${TIME_OFF} FROM crm_time_off WHERE workspace_id = $1 AND ($2::uuid IS NULL OR branch_id = $2) ORDER BY start_at, id`, [w, b]);
   if (want("appointments") || want("series")) {
     const { only } = await linkFor(ctx);
-    await rows("appointments", `SELECT ${APPT("$2")} FROM crm_appointments WHERE workspace_id = $1 AND ($3::uuid IS NULL OR staff_id = $3) ORDER BY start_at, id`, [w, cfg.timezone, only]);
-    await rows("series", `SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND ($2::uuid IS NULL OR staff_id = $2) ORDER BY created_at, id`, [w, only]);
+    await rows("appointments", `SELECT ${APPT("$2")} FROM crm_appointments WHERE workspace_id = $1 AND ($3::uuid IS NULL OR staff_id = $3) AND ($4::uuid IS NULL OR branch_id = $4) ORDER BY start_at, id`, [w, cfg.timezone, only, b]);
+    await rows("series", `SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND ($2::uuid IS NULL OR staff_id = $2) AND ($3::uuid IS NULL OR branch_id = $3) ORDER BY created_at, id`, [w, only, b]);
   }
   return out;
 }
@@ -78,12 +82,13 @@ export async function customerUses(c, workspaceId, customerId) {
   return rows[0];
 }
 
-/** A customer's bookings for their panel, newest first. */
+/** A customer's bookings for their panel, newest first (one branch's, for a team member limited to it). */
 export async function customerHistory(ctx, customerId) {
   const { only } = await linkFor(ctx);
   const { rows } = await ctx.q(
-    `SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND customer_id = $2 AND ($4::uuid IS NULL OR staff_id = $4) ORDER BY start_at DESC, id`,
-    [ctx.cfg.workspaceId, customerId, ctx.cfg.timezone, only]
+    `SELECT ${APPT("$3")} FROM crm_appointments WHERE workspace_id = $1 AND customer_id = $2 AND ($4::uuid IS NULL OR staff_id = $4) AND ($5::uuid IS NULL OR branch_id = $5)
+      ORDER BY start_at DESC, id`,
+    [ctx.cfg.workspaceId, customerId, ctx.cfg.timezone, only, ctx.branchId || null]
   );
   return { appointments: rows };
 }

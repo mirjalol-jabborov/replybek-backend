@@ -369,3 +369,28 @@ test("the read-only lock never blocks the one call that can lift it", async () =
   // The read-only lock must not block the one call that can lift it.
   assert.equal((await b.call("POST", `${w}/billing/sync`)).status, 200);
 });
+
+test("checkout also takes a package and tier; the AI agent's package reads its Polar products from the older names", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  const r = await b.call("POST", `${w}/billing/checkout`, { package: "agent", tier: "starter" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(lastCheckout().body.products, [PRODUCTS.starter]);
+  assert.deepEqual(lastCheckout().body.metadata, { workspace_id: ws.id, plan: "starter", package: "agent" });
+  // While the CRM is free, a package with it isn't sold.
+  const both = await b.call("POST", `${w}/billing/checkout`, { package: "both", tier: "starter" });
+  assert.deepEqual([both.status, both.body.code, both.body.product], [409, "product_free", "crm"]);
+});
+
+test("an older picture of the subscription arriving late changes nothing", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  const sub = subscription({ id: "sub_late", product_id: PRODUCTS.growth, customer: { external_id: ws.id }, created_at: "2026-11-01T00:00:00.000000Z", modified_at: "2026-11-10T10:00:00.000002Z" });
+  await deliver("subscription.updated", sub);
+  // Polar stamps changes in microseconds; this one is one microsecond older.
+  await deliver("subscription.updated", { ...sub, product_id: PRODUCTS.business, status: "past_due", modified_at: "2026-11-10T10:00:00.000001Z" });
+  const s = (await b.call("GET", w)).body;
+  assert.equal(s.plan, "growth");
+  assert.equal(s.billing.status, "active");
+  assert.equal(s.billing.grace_ends_at, null);
+});

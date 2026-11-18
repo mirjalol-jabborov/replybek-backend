@@ -46,15 +46,15 @@ export async function applyMove(c, cfg, user, order, to, text) {
 /** Moves a locked order and answers with what changed. */
 async function moveAndAnswer(c, cfg, q, user, order, to, text) {
   const { change, ...moved } = await applyMove(c, cfg, user, order, to, text);
-  return { changes: await storeChanges(q, cfg, { orderId: order.id, ...moved }), id: order.id, change };
+  return { changes: await storeChanges(q, cfg, { orderId: order.id, ...moved, branchId: user?.branchOnly }), id: order.id, change };
 }
 
 /** Moves an order to another step. A finished order moves only to the cancelled step: that is a return. */
 export function moveOrder(workspace, user, id, { to, note: text }) {
-  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id), to, text));
+  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id, user?.branchOnly), to, text));
 }
 
 /** Calls an order off: to the workspace's cancelled step. A finished order's goods come back. */
 export function cancelOrder(workspace, user, id, { note: text } = {}) {
-  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id), cancelledStep(cfg), text));
+  return write(workspace.id, async (c, cfg, q) => moveAndAnswer(c, cfg, q, user, await lockOrder(q, cfg, id, user?.branchOnly), cancelledStep(cfg), text));
 }

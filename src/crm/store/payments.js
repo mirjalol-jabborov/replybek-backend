@@ -23,7 +23,7 @@ const addHistory = (c, cfg, orderId, line) =>
 /** Money came in: all that is owed, or a part of it. Never more than is owed, never for a cancelled order. */
 export function payOrder(workspace, user, id, input) {
   return write(workspace.id, async (c, cfg, q) => {
-    const order = await lockOrder(q, cfg, id);
+    const order = await lockOrder(q, cfg, id, user?.branchOnly);
     if (kindOf(cfg.data.orderStages, order.status) === K.cancelled) throw conflict("This order is cancelled.", "order_cancelled");
     const { balance } = order.totals;
     if (balance <= 0) throw conflict("This order is already paid.", "already_paid");

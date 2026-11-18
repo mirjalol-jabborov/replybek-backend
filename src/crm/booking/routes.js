@@ -18,7 +18,8 @@ import * as free from "./free-times.js";
 
 export const router = Router({ mergeParams: true });
 const admin = requireRole("admin");
-const who = (req) => ({ user: req.user, role: req.role });
+// branchOnly: the branch a team member is limited to (../branches/access.js).
+const who = (req) => ({ user: req.user, role: req.role, branchOnly: req.branchOnly });
 const wid = (req) => req.workspace.id;
 /** A route that answers with what the entity file returns. */
 const route = (fn, status = 200) => wrap(async (req, res) => res.status(status).json(await fn(req)));

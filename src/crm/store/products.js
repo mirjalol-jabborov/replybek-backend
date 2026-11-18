@@ -4,7 +4,8 @@
 // or send `variants`.
 import { z } from "zod";
 import { notFound } from "../../core/http.js";
-import { write, isUuid, updateRow } from "../db.js";
+import { write, isUuid, updateRow, asQ } from "../db.js";
+import { needBranch } from "../branches/access.js";
 import { bad, conflict } from "../errors.js";
 import { uuid, listId as id, money, text, someKey } from "../shapes.js";
 import { hasId } from "../shared/index.js";
@@ -112,7 +113,11 @@ async function addVariants(c, cfg, user, productId, list) {
   );
   const idAt = Object.fromEntries(rows.map((r) => [r.position, r.id]));
   const opening = list.filter((x) => x.opening > 0).map((x) => ({ variantId: idAt[x.position], type: "receipt", qty: x.opening }));
-  return postMoves(c, cfg, user, opening, { note: OPENING });
+  if (!opening.length) return [];
+  // A receipt like any other: at the default branch, or at the one a team member limited to a
+  // branch works at, which must be open (409 branch_closed).
+  const branchId = await needBranch(asQ(c), cfg, user, undefined, { work: true });
+  return postMoves(c, cfg, user, opening, { note: OPENING, branchId });
 }
 
 /** Saves what was sent for variants the product keeps, in one statement. What isn't sent stays. */
@@ -128,8 +133,8 @@ async function saveVariants(c, cfg, list) {
   );
 }
 
-/** The changes a product write answers with: the product, and the receipts of any opening stock. */
-const answer = async (q, cfg, productId, moveIds) => ({ changes: await storeChanges(q, cfg, { productIds: [productId], moveIds }), id: productId });
+/** The changes a product write answers with: the product (its stock at `branchId` only, when given), and the receipts of any opening stock. */
+const answer = async (q, cfg, productId, moveIds, branchId) => ({ changes: await storeChanges(q, cfg, { productIds: [productId], moveIds, branchId }), id: productId });
 
 /* ───── Writes ───── */
 
@@ -149,7 +154,7 @@ export function createProduct(workspace, user, input) {
       [cfg.workspaceId, v.name, v.category || "", v.unit, v.image || "", v.onSale ?? true, JSON.stringify(options)]
     );
     const productId = rows[0].id;
-    return answer(q, cfg, productId, await addVariants(c, cfg, user, productId, placed(variants)));
+    return answer(q, cfg, productId, await addVariants(c, cfg, user, productId, placed(variants)), user?.branchOnly);
   });
 }
 
@@ -178,7 +183,8 @@ export async function updateProduct(workspace, user, productId, input) {
       await checkSkus(c, cfg, merged, productId);
       const gone = had.filter((h) => !variants.some((x) => x.id === h.id)).map((h) => h.id);
       if (gone.length) {
-        const stock = await lockStock(c, cfg, gone);
+        // Stock at any branch keeps the variant.
+        const stock = await lockStock(c, cfg, gone, null);
         const full = gone.find((g) => stock[g].stock > 0 || stock[g].reserved > 0);
         if (full) throw conflict(`${stock[full].name} still has stock. Write it off or sell it first.`, "variant_has_stock", { variantId: full, stock: stock[full].stock, reserved: stock[full].reserved });
         const { rows: used } = await c.query(
@@ -214,7 +220,7 @@ export async function updateProduct(workspace, user, productId, input) {
 
     await updateRow(c, cfg, "crm_products", PRODUCT, "id", productId, v);
     const old = v.image !== undefined && v.image !== stored.image ? stored.image : "";
-    return { ...(await answer(q, cfg, productId, moveIds)), old };
+    return { ...(await answer(q, cfg, productId, moveIds, user?.branchOnly)), old };
   });
   // A picture uploaded for this product and no longer shown by any goes too (after the commit: files are not part of it).
   await dropUpload(workspace.id, old);

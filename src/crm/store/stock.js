@@ -10,6 +10,7 @@ import { uuid, money, label } from "../shapes.js";
 import { same } from "../shared/index.js";
 import { planWriteOff, planCount, optionsText } from "../shared/store.js";
 import { storeChanges } from "./rows.js";
+import { needBranch } from "../branches/access.js";
 
 /** What a line of stock or of an order points at: a variant, or a product that has just one. */
 export const target = { variantId: uuid.optional(), productId: uuid.optional() };
@@ -44,10 +45,10 @@ export async function resolveVariants(c, cfg, items) {
 }
 
 /**
- * Locks these variants and reads their stock in the branch: { [variantId]: { variantId, productId,
- * name, onSale, archived, price, cost, stock, reserved } }. Holding the lock until the transaction
- * ends is what makes "is there enough?" still true when the ledger line is written.
- * A variant of another workspace, or one that doesn't exist, is refused as not found.
+ * Locks these variants and reads their stock in the branch (`branchId` null: in all branches added
+ * up): { [variantId]: { variantId, productId, name, onSale, archived, price, cost, stock, reserved } }.
+ * Holding the lock until the transaction ends is what makes "is there enough?" still true when the
+ * ledger line is written. A variant of another workspace, or one that doesn't exist, is refused as not found.
  */
 export async function lockStock(c, cfg, variantIds, branchId = cfg.branchId) {
   const ids = [...new Set(variantIds)];
@@ -56,7 +57,8 @@ export async function lockStock(c, cfg, variantIds, branchId = cfg.branchId) {
             v.price, v.cost, COALESCE(s.on_hand, 0) AS stock, COALESCE(s.reserved, 0) AS reserved
        FROM crm_variants v
        JOIN crm_products p ON p.id = v.product_id
-       LEFT JOIN crm_stock s ON s.variant_id = v.id AND s.branch_id = $3
+       LEFT JOIN LATERAL (SELECT sum(on_hand) AS on_hand, sum(reserved) AS reserved FROM crm_stock
+                           WHERE variant_id = v.id AND ($3::uuid IS NULL OR branch_id = $3)) s ON true
       WHERE v.workspace_id = $1 AND v.id = ANY($2::uuid[])
       ORDER BY v.id FOR UPDATE OF v`,
     [cfg.workspaceId, ids, branchId]
@@ -112,8 +114,9 @@ export async function reviveReturned(c, cfg, variantIds) {
 }
 
 /**
- * Writes ledger lines, in the order given: [{ variantId, type, qty, note?, reason?, orderId? }].
- * The database moves the counters. Returns the new lines' ids.
+ * Writes ledger lines, in the order given: [{ variantId, type, qty, note?, reason?, orderId?,
+ * branchId?, otherBranchId? }] (a line's own branch, else `branchId`; `otherBranchId`: where goods
+ * moved between branches came from or went to). The database moves the counters. Returns the new lines' ids.
  */
 export async function postMoves(c, cfg, user, moves, { branchId = cfg.branchId, orderId = null, note = "", reason = "" } = {}) {
   if (!moves.length) return [];
@@ -122,14 +125,16 @@ export async function postMoves(c, cfg, user, moves, { branchId = cfg.branchId, 
     // One statement for all the lines. They go in, and the trigger adds them up, in the order given:
     // seq follows that order, so a release still comes before the sale it belongs to.
     const { rows } = await c.query(
-      `INSERT INTO crm_stock_moves (workspace_id, variant_id, branch_id, type, qty, by_id, by_name, note, reason, order_id)
-       SELECT $1, m.variant_id, $2, m.type, m.qty, $3, $4, m.note, m.reason, m.order_id
-         FROM unnest($5::uuid[], $6::text[], $7::bigint[], $8::jsonb[], $9::text[], $10::uuid[]) WITH ORDINALITY AS m(variant_id, type, qty, note, reason, order_id, n)
+      `INSERT INTO crm_stock_moves (workspace_id, variant_id, branch_id, type, qty, by_id, by_name, note, reason, order_id, other_branch_id)
+       SELECT $1, m.variant_id, m.branch_id, m.type, m.qty, $2, $3, m.note, m.reason, m.order_id, m.other_branch_id
+         FROM unnest($4::uuid[], $5::text[], $6::bigint[], $7::jsonb[], $8::text[], $9::uuid[], $10::uuid[], $11::uuid[])
+              WITH ORDINALITY AS m(variant_id, type, qty, note, reason, order_id, branch_id, other_branch_id, n)
         ORDER BY m.n
        RETURNING id, seq`,
       [
-        cfg.workspaceId, branchId, user?.id || null, user?.name || "",
+        cfg.workspaceId, user?.id || null, user?.name || "",
         col((m) => m.variantId), col((m) => m.type), col((m) => m.qty), col((m) => JSON.stringify(m.note ?? note)), col((m) => m.reason ?? reason), col((m) => m.orderId ?? orderId),
+        col((m) => m.branchId ?? branchId), col((m) => m.otherBranchId ?? null),
       ]
     );
     return rows.sort((a, b) => Number(a.seq) - Number(b.seq)).map((r) => r.id);
@@ -149,22 +154,24 @@ export const receiveSchema = z
   .object({
     lines: z.array(z.object({ ...target, qty, cost: money.optional() }).strict().refine(hasTarget, "Say which product.")).min(1, "Add at least one product.").max(200),
     note: noteShape.optional(),
+    branchId: uuid.optional(), // where: the default branch (or the person's own) when left out
   })
   .strict();
 
-/** Stock arrives. A cost given becomes the variant's cost from now on. */
-export function receive(workspace, user, { lines, note = "" }) {
+/** Stock arrives at a branch (not a closed one). A cost given becomes the variant's cost from now on. */
+export function receive(workspace, user, { lines, note = "", branchId: sent }) {
   return write(workspace.id, async (c, cfg, q) => {
+    const branchId = await needBranch(q, cfg, user, sent, { work: true });
     const ids = await resolveVariants(c, cfg, lines);
-    refuseArchived(await lockStock(c, cfg, ids), ids);
+    refuseArchived(await lockStock(c, cfg, ids, branchId), ids);
     const costs = lines.map((l, i) => [ids[i], l.cost]).filter(([, cost]) => cost > 0);
     if (costs.length) {
       // The last cost given for a variant wins, as if the lines were entered one after another.
       const last = Object.fromEntries(costs);
       await c.query("UPDATE crm_variants v SET cost = x.cost FROM unnest($2::uuid[], $3::bigint[]) AS x(id, cost) WHERE v.workspace_id = $1 AND v.id = x.id", [cfg.workspaceId, Object.keys(last), Object.values(last)]);
     }
-    const moveIds = await postMoves(c, cfg, user, lines.map((l, i) => ({ variantId: ids[i], type: "receipt", qty: l.qty })), { note });
-    return { changes: await storeChanges(q, cfg, { variantIds: ids, moveIds }) };
+    const moveIds = await postMoves(c, cfg, user, lines.map((l, i) => ({ variantId: ids[i], type: "receipt", qty: l.qty })), { note, branchId });
+    return { changes: await storeChanges(q, cfg, { variantIds: ids, moveIds, branchId: user?.branchOnly }) };
   });
 }
 
@@ -175,37 +182,40 @@ export const writeOffSchema = z
     // Why: an id the app knows ("damaged", "expired", "lost", "other"). The words are the app's.
     reason: z.string().trim().regex(/^[A-Za-z0-9_-]{1,40}$/, "Say why the goods are written off."),
     note: noteShape.optional(),
+    branchId: uuid.optional(),
   })
   .strict()
   .refine(hasTarget, "Say which product.");
 
-/** Goods that can't be sold leave the shelf. Not more than is available: held goods belong to orders. */
-export function writeOff(workspace, user, { qty: n, reason, note = "", ...which }) {
+/** Goods that can't be sold leave a branch's shelf. Not more than is available there: held goods belong to orders. */
+export function writeOff(workspace, user, { qty: n, reason, note = "", branchId: sent, ...which }) {
   return write(workspace.id, async (c, cfg, q) => {
+    const branchId = await needBranch(q, cfg, user, sent);
     const [variantId] = await resolveVariants(c, cfg, [which]);
-    const stock = await lockStock(c, cfg, [variantId]);
+    const stock = await lockStock(c, cfg, [variantId], branchId);
     const plan = planWriteOff(stock[variantId], n);
     if (!plan.ok) throw refusal(plan.missing);
-    const moveIds = await postMoves(c, cfg, user, plan.movements, { note, reason });
-    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds }) };
+    const moveIds = await postMoves(c, cfg, user, plan.movements, { note, reason, branchId });
+    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds, branchId: user?.branchOnly }) };
   });
 }
 
 export const countSchema = z
-  .object({ ...target, counted: z.number().int().min(0).max(1_000_000), note: noteShape.optional() })
+  .object({ ...target, counted: z.number().int().min(0).max(1_000_000), note: noteShape.optional(), branchId: uuid.optional() })
   .strict()
   .refine(hasTarget, "Say which product.");
 
-/** A stock count: on hand becomes what was counted, and the ledger keeps the difference. */
-export function count(workspace, user, { counted, note = "", ...which }) {
+/** A stock count at a branch: on hand there becomes what was counted, and the ledger keeps the difference. */
+export function count(workspace, user, { counted, note = "", branchId: sent, ...which }) {
   return write(workspace.id, async (c, cfg, q) => {
+    const branchId = await needBranch(q, cfg, user, sent);
     const [variantId] = await resolveVariants(c, cfg, [which]);
-    const stock = await lockStock(c, cfg, [variantId]);
+    const stock = await lockStock(c, cfg, [variantId], branchId);
     // A variant put away can be counted down (goods that came back and left again), never up.
     if (counted > stock[variantId].stock) refuseArchived(stock, [variantId]);
     const plan = planCount(stock[variantId], counted);
     if (!plan.ok) throw refusal(plan.missing);
-    const moveIds = await postMoves(c, cfg, user, plan.movements, { note });
-    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds }), diff: plan.diff };
+    const moveIds = await postMoves(c, cfg, user, plan.movements, { note, branchId });
+    return { changes: await storeChanges(q, cfg, { variantIds: [variantId], moveIds, branchId: user?.branchOnly }), diff: plan.diff };
   });
 }

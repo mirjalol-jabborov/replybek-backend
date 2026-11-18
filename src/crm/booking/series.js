@@ -12,6 +12,7 @@ import { check, isClean, totals, startStage, kindHolds, rulesOf, seriesDays } fr
 import { dayOf, hmOf, at, addDays, weekday } from "../shared/time.js";
 import { SERIES, APPT, loadRules } from "./rows.js";
 import { linkOf } from "./staff.js";
+import { ownBranch } from "../branches/access.js";
 import { getAppointment, insertAppointment, saveAppointment, entry } from "./appointments.js";
 
 /* ───── Shapes ───── */
@@ -55,12 +56,13 @@ const KEEP_SKIPPED = 60;
 const FOLLOWS = ["pending", "booked"];
 const follows = (cfg, v) => FOLLOWS.includes(kindOf(cfg.data.apptStages, v.status)) && v.seriesDay >= dayOf(cfg.now);
 // A visit someone moved "only this one" to another specialist is that person's now: a team
-// member who works only with their own bookings leaves it as it is.
-const theirs = (me, v) => Boolean(me.only) && v.staffId !== me.only;
+// member who works only with their own bookings leaves it as it is, and one limited to a branch
+// leaves a visit at another branch as it is.
+const theirs = (me, v) => (Boolean(me.only) && v.staffId !== me.only) || (Boolean(me.branch) && v.branchId !== me.branch);
 
 async function getSeries(q, cfg, id, me) {
   const { rows } = isUuid(id) ? await q(`SELECT ${SERIES} FROM crm_series WHERE workspace_id = $1 AND id = $2`, [cfg.workspaceId, id]) : { rows: [] };
-  if (!rows[0] || (me?.only && rows[0].staffId !== me.only)) throw notFound("Repeat booking not found");
+  if (!rows[0] || (me?.only && rows[0].staffId !== me.only) || (me?.branch && rows[0].branchId !== me.branch)) throw notFound("Repeat booking not found");
   return rows[0];
 }
 /** The last day customers may book now: series are booked up to here. */
@@ -134,7 +136,11 @@ export async function extend(c, cfg, s, createdBy, { db: known, have = new Set()
  */
 export function createSeries(workspaceId, who, body) {
   return write(workspaceId, async (c, cfg, q) => {
-    const a = await getAppointment(q, cfg, body.appointmentId, await linkOf(q, workspaceId, who));
+    const me = await linkOf(q, workspaceId, who);
+    const a = await getAppointment(q, cfg, body.appointmentId, me);
+    // The series and its new visits are where the specialist works now, which may not be where this booking was made.
+    const branchId = (await q("SELECT branch_id FROM crm_staff WHERE workspace_id = $1 AND id = $2", [workspaceId, a.staffId])).rows[0]?.branch_id || a.branchId;
+    ownBranch({ branchOnly: me.branch }, branchId);
     if (a.seriesId) throw new HttpError(409, "This booking already repeats.", { code: "in_series", seriesId: a.seriesId });
     if (!kindHolds(kindOf(cfg.data.apptStages, a.status))) throw new HttpError(409, "A cancelled or missed booking can't repeat. Restore it first.", { code: "booking_closed" });
     const first = dayOf(a.start);
@@ -144,7 +150,7 @@ export function createSeries(workspaceId, who, body) {
     const { rows } = await c.query(
       `INSERT INTO crm_series (workspace_id, branch_id, customer_id, staff_id, service_ids, time_of_day, duration, price, source, note, fields, every, weekdays, start_day, until, count, through, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $14, $17) RETURNING ${SERIES}`,
-      [workspaceId, cfg.branchId, a.customerId, a.staffId, a.serviceIds, hmOf(a.start), a.duration, a.price, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), body.every || 1, weekdays, first, body.until || null, body.count || null, who.user.id]
+      [workspaceId, branchId, a.customerId, a.staffId, a.serviceIds, hmOf(a.start), a.duration, a.price, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), body.every || 1, weekdays, first, body.until || null, body.count || null, who.user.id]
     );
     const anchor = (await c.query(`UPDATE crm_appointments SET series_id = $3, series_day = $4 WHERE workspace_id = $1 AND id = $2 RETURNING ${APPT("$5")}`, [workspaceId, a.id, rows[0].id, first, cfg.timezone])).rows[0];
     const { series, created, skipped } = await extend(c, cfg, rows[0], who.user.id);
@@ -185,7 +191,9 @@ export function changeSeries(workspaceId, who, id, body) {
     const reach = visits.reduce((d, v) => latest(d, v.seriesDay), latest(horizon, s.through));
     const lastDay = visits.reduce((d, v) => latest(d, dayOf(v.start)), reach);
     const db = await loadRules(q, cfg, from < today ? from : today, lastDay);
-    if (patch.staffId && !db.staff.some((p) => p.id === patch.staffId)) throw new HttpError(400, "This specialist no longer exists.", { code: "bad_staff" });
+    const person = patch.staffId && db.staff.find((p) => p.id === patch.staffId);
+    if (patch.staffId && !person) throw new HttpError(400, "This specialist no longer exists.", { code: "bad_staff" });
+    if (person) ownBranch({ branchOnly: me.branch }, person.branchId);
     if (patch.serviceIds && patch.serviceIds.some((x) => !db.services.some((v) => v.id === x))) throw new HttpError(400, "One of the services no longer exists.", { code: "bad_service" });
     // New services bring their own length and price, unless the caller says otherwise.
     const sum = patch.serviceIds ? totals(db, patch.serviceIds) : null;

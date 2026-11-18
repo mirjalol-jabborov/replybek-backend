@@ -1,9 +1,15 @@
-// Sets up Polar billing: the three monthly products and the webhook, then writes their ids and the
-// webhook secret to an env file. Safe to run again: existing products and endpoints are reused.
+// Sets up Polar billing: one monthly product per offer (a package in a tier: see
+// src/core/billing/packages.js) and the webhook, then writes their ids and the webhook secret to an
+// env file. Safe to run again: existing products and endpoints are reused.
 //
 //   node scripts/polar-setup.js --webhook-url https://<tunnel>.trycloudflare.com      (sandbox, into .env)
 //   node scripts/polar-setup.js --skip-webhook                                          (products only)
 //   node scripts/polar-setup.js --production --webhook-url https://api.replybek.uz --out .env.production
+//
+// Prices come from the env file: POLAR_PRICE_<PACKAGE>_<TIER> in the currency's smallest unit
+// (POLAR_PRICE_CRM_GROWTH=1900 is 19.00), POLAR_CURRENCY (usd unless set). The AI agent's tiers
+// fall back to the dashboard's plan list (replybek-app/src/constants.js) when it is there.
+// An offer without a price is skipped and stays unsold.
 //
 // Reads POLAR_ACCESS_TOKEN from the env file it writes to. The token needs products:read/write and
 // webhooks:read/write here, and checkouts:write, subscriptions:write, customer_sessions:write at runtime.
@@ -12,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { PACKAGES } from "../src/core/billing/packages.js";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const arg = (name) => {
@@ -25,14 +32,26 @@ const token = env.POLAR_ACCESS_TOKEN || process.env.POLAR_ACCESS_TOKEN;
 const apiBase = arg("--api") || (production ? "https://api.polar.sh/v1" : "https://sandbox-api.polar.sh/v1");
 const webhookBase = (arg("--webhook-url") || env.PUBLIC_API_URL || "").replace(/\/$/, "");
 const skipWebhook = process.argv.includes("--skip-webhook");
+const currency = (env.POLAR_CURRENCY || "usd").toLowerCase();
 
-if (!token) fail(`Put POLAR_ACCESS_TOKEN=… (a ${production ? "production" : "sandbox"} organization token) in ${path.basename(envFile)} first.`);
-if (!skipWebhook && !/^https:\/\//.test(webhookBase)) fail("Polar needs a public https address for the webhook: pass --webhook-url https://… (or --skip-webhook to add it later)");
+if (!token) fail(`Put POLAR_ACCESS_TOKEN=... (a ${production ? "production" : "sandbox"} organization token) in ${path.basename(envFile)} first.`);
+if (!skipWebhook && !/^https:\/\//.test(webhookBase)) fail("Polar needs a public https address for the webhook: pass --webhook-url https://... (or --skip-webhook to add it later)");
 
-// Prices come from the dashboard's plan list, so Polar and the app can't drift apart.
-const constants = fs.readFileSync(path.resolve(dir, "../../replybek-app/src/constants.js"), "utf8");
-const PLANS = [...constants.matchAll(/\{ id: "(starter|growth|business)", name: "([^"]+)", price: (\d+)/g)].map(([, id, name, price]) => ({ id, name, price: Number(price) }));
-if (PLANS.length !== 3) fail("Couldn't read the three plans from replybek-app/src/constants.js.");
+// The dashboard's plan list: { starter: { name, price (whole dollars) } }, when the app sits next to this repo.
+const appPlans = (() => {
+  const file = path.resolve(dir, "../../replybek-app/src/constants.js");
+  if (!fs.existsSync(file)) return {};
+  const text = fs.readFileSync(file, "utf8");
+  return Object.fromEntries([...text.matchAll(/\{ id: "(starter|growth|business)", name: "([^"]+)", price: (\d+)/g)].map(([, id, name, price]) => [id, { name, price: Number(price) }]));
+})();
+
+const tierName = (tier) => appPlans[tier]?.name || tier[0].toUpperCase() + tier.slice(1);
+function priceOf(pkg, tier) {
+  const raw = env[`POLAR_PRICE_${pkg.key.toUpperCase()}_${tier.toUpperCase()}`];
+  if (raw != null && /^\d+$/.test(raw.trim())) return Number(raw);
+  if (pkg.key === "agent" && appPlans[tier]) return appPlans[tier].price * 100;
+  return null;
+}
 
 const EVENTS = ["subscription.created", "subscription.updated", "subscription.active", "subscription.canceled", "subscription.uncanceled", "subscription.revoked", "subscription.past_due"];
 
@@ -48,29 +67,35 @@ async function call(method, p, body) {
   return data;
 }
 
+const money = (amount) => `${(amount / 100).toFixed(2)} ${currency}`;
 const values = { POLAR_API_URL: apiBase };
 const existing = (await call("GET", "/products/?is_archived=false&limit=100")).items || [];
-for (const plan of PLANS) {
-  const name = `Replybek ${plan.name}`;
-  let product = existing.find((p) => p.name === name && p.recurring_interval === "month");
-  if (product) {
-    const price = product.prices?.find((x) => x.amount_type === "fixed" && !x.is_archived);
-    if (price && price.price_amount !== plan.price * 100) {
-      // Listing only the new price archives the old one. Existing subscribers keep what they signed up at.
-      await call("PATCH", `/products/${product.id}`, { prices: [{ amount_type: "fixed", price_amount: plan.price * 100, price_currency: "usd" }] });
-      console.log(`✓ ${name}: price changed from $${price.price_amount / 100} to $${plan.price}/month (new buyers only)`);
-    } else {
-      console.log(`✓ ${name}: already there`);
+for (const pkg of PACKAGES) {
+  for (const tier of pkg.tiers) {
+    const name = ["Replybek", pkg.name, tierName(tier)].filter(Boolean).join(" ");
+    const amount = priceOf(pkg, tier);
+    const key = `${pkg.env[0]}_${tier.toUpperCase()}`;
+    if (amount == null) {
+      console.log(`- ${name}: skipped, no price (set POLAR_PRICE_${pkg.key.toUpperCase()}_${tier.toUpperCase()})`);
+      continue;
     }
-  } else {
-    product = await call("POST", "/products/", {
-      name,
-      recurring_interval: "month",
-      prices: [{ amount_type: "fixed", price_amount: plan.price * 100, price_currency: "usd" }],
-    });
-    console.log(`✓ ${name}: created, $${plan.price}/month`);
+    const prices = [{ amount_type: "fixed", price_amount: amount, price_currency: currency }];
+    let product = existing.find((p) => p.name === name && p.recurring_interval === "month");
+    if (product) {
+      const price = product.prices?.find((x) => x.amount_type === "fixed" && !x.is_archived);
+      if (price && (price.price_amount !== amount || price.price_currency !== currency)) {
+        // Listing only the new price archives the old one. Existing subscribers keep what they signed up at.
+        await call("PATCH", `/products/${product.id}`, { prices });
+        console.log(`- ${name}: price changed from ${money(price.price_amount)} to ${money(amount)} a month (new buyers only)`);
+      } else {
+        console.log(`- ${name}: already there`);
+      }
+    } else {
+      product = await call("POST", "/products/", { name, recurring_interval: "month", prices });
+      console.log(`- ${name}: created, ${money(amount)} a month`);
+    }
+    values[key] = product.id;
   }
-  values[`POLAR_PRODUCT_${plan.id.toUpperCase()}`] = product.id;
 }
 
 if (!skipWebhook) {
@@ -78,10 +103,10 @@ if (!skipWebhook) {
   const endpoints = (await call("GET", "/webhooks/endpoints?limit=100")).items || [];
   let endpoint = endpoints.find((e) => e.url === url);
   if (endpoint && endpoint.secret) {
-    console.log(`✓ Webhook ${url}: already there`);
+    console.log(`- Webhook ${url}: already there`);
   } else {
     endpoint = await call("POST", "/webhooks/endpoints", { url, name: "Replybek", format: "raw", events: EVENTS });
-    console.log(`✓ Webhook ${url}: created`);
+    console.log(`- Webhook ${url}: created`);
   }
   values.POLAR_WEBHOOK_SECRET = endpoint.secret;
 }
