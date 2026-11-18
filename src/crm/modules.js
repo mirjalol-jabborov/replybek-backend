@@ -1,4 +1,4 @@
-// The modules of the CRM: Booking and Store. Core (settings, customers, the snapshot) is always
+// The modules of the CRM: Booking, Store, Notices and the public pages. Core (settings, customers, the snapshot) is always
 // there and hosts them. The host (index.js) puts them into `modules` when it starts, so a module
 // can use core and core can ask the modules without the two importing each other. A module lives
 // in its own folder and exports these from its index.js, so core never has to know a module's tables:
@@ -15,12 +15,32 @@
 //   customerUses(c, workspaceId, customerId) → { [key]: n }: its rows that belong to a customer
 //   customerHistory(ctx, customerId)         → { [key]: rows }: the same rows, for the customer's panel
 //   settingsShape                            zod fields for settings keys of its own (PUT /settings checks them)
+//   checkSettings(c, cfg, next)              before settings are saved (next: the lists and settings to
+//                                              save): throws to refuse what only the database can tell
+//   onChanges({ workspaceId, cfg }, changes) after any CRM write has committed, with its changes
+//                                              (outside its transaction; cfg.rev is the write's rev)
 // `c` is the client of the write's transaction; `ctx.q(text, params)` reads inside the snapshot's,
 // and `ctx.cfg` is the workspace's CRM as read there (see read() in db.js).
 import { mergeChanges } from "./changes.js";
 
-/** The modules that are mounted, in the order their keys and routes come: Booking, then Store. */
+/** The modules that are mounted, in the order their keys and routes come: Booking, Store, Notices, public pages. */
 export const modules = [];
+
+/**
+ * After a write has committed: each module that wants to may act on what it changed (Notices
+ * queues messages to customers). The write is already saved, so a module that fails is logged
+ * and never fails it.
+ */
+export async function afterWrite(ctx, changes) {
+  for (const m of modules) {
+    if (!m.onChanges) continue;
+    try {
+      await m.onChanges(ctx, changes);
+    } catch (e) {
+      console.error(`After a CRM write in workspace ${ctx.workspaceId}:`, e.message);
+    }
+  }
+}
 
 /** Adds one part's counts into the total. */
 export const add = (into, part) => {
@@ -33,6 +53,11 @@ export async function countUses(c, workspaceId, list, ids) {
   const total = {};
   if (ids.length) for (const m of modules) if (m.countUses) add(total, await m.countUses(c, workspaceId, list, ids));
   return total;
+}
+
+/** Lets each module refuse settings about to be saved. */
+export async function checkSettings(c, cfg, next) {
+  for (const m of modules) if (m.checkSettings) await m.checkSettings(c, cfg, next);
 }
 
 /** Moves every item of a removed step to another step. Returns the changes. */

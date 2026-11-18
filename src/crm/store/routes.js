@@ -37,7 +37,7 @@ router.post("/stock/write-off", validate(writeOffSchema), wrap(async (req, res) 
 router.post("/stock/count", validate(countSchema), wrap(async (req, res) => res.json(await count(ws(req), req.user, req.valid))));
 
 // Orders
-router.post("/orders", validate(orderCreateSchema), wrap(async (req, res) => res.status(201).json(await createOrder(ws(req), req.user, req.valid))));
+router.post("/orders", validate(orderCreateSchema), wrap(async (req, res) => res.status(201).json(await createOrder(ws(req).id, req.user, req.valid))));
 router.put("/orders/:id", validate(orderUpdateSchema), wrap(async (req, res) => res.json(await updateOrder(ws(req), req.user, req.params.id, req.valid))));
 router.delete("/orders/:id", admin, wrap(async (req, res) => res.json(await deleteOrder(ws(req), req.params.id))));
 router.post("/orders/:id/step", validate(stepSchema), wrap(async (req, res) => res.json(await moveOrder(ws(req), req.user, req.params.id, req.valid))));

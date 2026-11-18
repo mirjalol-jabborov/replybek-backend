@@ -55,11 +55,14 @@ export async function drainJobs(limit = 100) {
 
 /** Queues a re-sync for website sources whose next_sync_at has passed. Returns how many. */
 export async function enqueueDueSyncs() {
+  // The sources are picked once, in a CTE: as `id IN (subquery)` the planner may run the subquery
+  // again per row, and a source locked by one pick but not returned by the next is left out.
   const { rows } = await query(
-    `UPDATE sources SET syncing = true WHERE id IN (
-        SELECT id FROM sources WHERE type = 'website' AND next_sync_at <= now() AND status = 'ready' AND NOT syncing
-         ORDER BY next_sync_at LIMIT 20 FOR UPDATE SKIP LOCKED)
-      RETURNING id`
+    `WITH picked AS (
+       SELECT id FROM sources WHERE type = 'website' AND next_sync_at <= now() AND status = 'ready' AND NOT syncing
+        ORDER BY next_sync_at LIMIT 20 FOR UPDATE SKIP LOCKED)
+     UPDATE sources s SET syncing = true FROM picked WHERE s.id = picked.id
+     RETURNING s.id`
   );
   for (const r of rows) await enqueue("ingest_source", { source_id: r.id });
   return rows.length;

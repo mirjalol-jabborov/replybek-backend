@@ -2,14 +2,24 @@
 // transaction, so what the dialog showed and what the server decides can only differ when the
 // calendar changed in between. The database has the last word on double bookings (the exclusion
 // constraint in sql/crm/10-booking.sql); its refusal reads the same as check()'s.
+//
+// Who does it (`who`): the team ({ user, role }), or a customer acting for themselves
+// ({ by: "customer", via: "page" | "ai", source, capped }: a public page, the AI agent). Server
+// code alone makes a customer `who`, so its `source` is trusted. A customer's booking is judged
+// as a customer (shared check() with by: "customer", nothing forced), starts in the first step,
+// takes its length and price from the services, counts toward their daily share (`capped`), and
+// can be moved or cancelled by them only while cancelProblem() allows. Their refusals carry
+// only what a customer may see (refusalsFor). Booking fields: a customer fills only the required
+// ones (customerFields, what the callers ask for); a booking is never refused for one left empty,
+// and its history says which were missing, for the team to fill.
 import { z } from "zod";
 import { HttpError, forbidden, notFound } from "../../core/http.js";
-import { write, isUuid, updateRow } from "../db.js";
-import { refusal } from "../errors.js";
+import { write, wall, isUuid, updateRow } from "../db.js";
+import { refusal, refusalsFor, shareUsed } from "../errors.js";
 import { uuid, serviceList, moment, minutes, money, label } from "../shapes.js";
-import { customerExists, needSource } from "../core/customers.js";
-import { cleanFields, missingFields, same } from "../shared/index.js";
-import { check, verdict, assign, totals, startStage, kindHolds, holdsTime } from "../shared/booking.js";
+import { findCustomer, needSource } from "../core/customers.js";
+import { cleanFields, customerFields, missingFields, same, stageIds, PER_PHONE_PER_DAY } from "../shared/index.js";
+import { check, verdict, assign, totals, startStage, kindHolds, holdsTime, cancelProblem } from "../shared/booking.js";
 import { dayOf, fromMin, toMin } from "../shared/time.js";
 import { APPT, loadRules } from "./rows.js";
 import { linkOf } from "./staff.js";
@@ -43,8 +53,15 @@ export async function getAppointment(q, cfg, id, me) {
   return rows[0];
 }
 
-/** One line of a booking's history: what was done, when (the business's clock) and by whom. */
-export const entry = (cfg, who, what) => ({ at: cfg.now, by: who?.user?.name || "", byId: who?.user?.id || null, ...what });
+const byCustomer = (who) => who?.by === "customer";
+
+/**
+ * One line of a booking's history: what was done, when (the business's clock) and by whom. A
+ * customer's own change says so (`customer: true`) and where they made it (`via`: "page", "ai").
+ */
+export const entry = (cfg, who, what) => ({
+  at: cfg.now, by: who?.user?.name || "", byId: who?.user?.id || null, ...what, ...(byCustomer(who) ? { customer: true, via: who.via } : {}),
+});
 
 /**
  * The booking rules said no: 422 { code: "rules", hard, soft, override }. `override` says whether
@@ -85,25 +102,42 @@ async function guarded(c, cfg, draft, run) {
   }
 }
 
-/** Services that exist; a new booking (or a service added to one) also needs them switched on. */
-function needServices(db, ids, kept = []) {
+/**
+ * Services that exist; a new booking (or a service added to one) also needs them switched on. To
+ * a customer a switched-off service is simply not one they can book: bad_service.
+ */
+function needServices(db, ids, kept = [], who = null) {
   for (const id of ids) {
     const s = db.services.find((x) => x.id === id);
-    if (!s) throw new HttpError(400, "One of the services no longer exists.", { code: "bad_service", serviceId: id });
+    if (!s || (!s.active && byCustomer(who))) throw new HttpError(400, "One of the services no longer exists.", { code: "bad_service", serviceId: id });
     if (!s.active && !kept.includes(id)) throw new HttpError(400, "One of the services is switched off.", { code: "service_off", serviceId: id });
   }
 }
 async function needCustomer(q, cfg, id) {
-  if (!(await customerExists(q, cfg, id))) throw new HttpError(400, "This customer no longer exists.", { code: "bad_customer" });
+  if (!(await findCustomer(q, cfg, { id }))) throw new HttpError(400, "This customer no longer exists.", { code: "bad_customer" });
 }
-/** The booking's own fields, checked against the workspace's list. */
-function fieldsOf(cfg, sent, stored) {
+/**
+ * The booking's own fields, checked against the workspace's list: { values, missing: [required
+ * field ids left empty] }. The team must fill the required ones. A customer fills only those
+ * (customerFields: what they send for the team's own is left out) and keeps a note of the rest.
+ */
+function fieldsOf(cfg, sent, stored, who = null) {
   const defs = cfg.data.fields.appointment;
-  const { values, errors } = cleanFields(defs, sent || {}, stored);
+  const { values, errors } = cleanFields(byCustomer(who) ? customerFields(defs) : defs, sent || {}, stored);
   if (Object.keys(errors).length) throw new HttpError(400, "One of the booking's fields has a value that doesn't fit it.", { code: "bad_fields", fields: errors });
-  const missing = missingFields(defs, values);
-  if (missing.length) throw new HttpError(400, "Fill in the required fields.", { code: "missing_fields", fields: missing.map((f) => f.id) });
-  return values;
+  const missing = missingFields(defs, values).map((f) => f.id);
+  if (missing.length && !byCustomer(who)) throw new HttpError(400, "Fill in the required fields.", { code: "missing_fields", fields: missing });
+  return { values, missing };
+}
+
+/** How many bookings this customer made themselves today (the business's day) that are not called off. */
+export async function bookedByCustomerToday(q, cfg, customerId) {
+  const { rows } = await q(
+    `SELECT count(*)::int AS n FROM crm_appointments
+      WHERE workspace_id = $1 AND customer_id = $2 AND customer_made AND status <> ALL($3::text[]) AND ${wall("created_at", "$4")} >= $5`,
+    [cfg.workspaceId, customerId, stageIds(cfg.data.apptStages, "cancelled"), cfg.timezone, `${dayOf(cfg.now)}T00:00`]
+  );
+  return rows[0].n;
 }
 /** Someone who works only with their own bookings books only for themselves. */
 function ownOnly(me, staffId) {
@@ -114,22 +148,29 @@ function ownOnly(me, staffId) {
  * Decides who takes a visit and whether it may be booked. Throws the 422 refusal, or returns
  * { staffId, soft } (soft: the rule reasons that were passed with force).
  */
-function decide(cfg, db, draft, me, force) {
-  const opts = { by: "team", now: cfg.now };
+function decide(cfg, db, draft, me, force, who = null) {
+  const by = byCustomer(who) ? "customer" : "team";
+  const opts = { by, now: cfg.now };
   const asked = draft.staffId || me.only;
   if (asked) ownOnly(me, asked);
   const { staffId, result } = asked ? { staffId: asked, result: check(db, { ...draft, staffId: asked }, opts) } : assign(db, draft, opts);
-  if (verdict(db, result, { by: "team", force }) !== "ok") throw refuse(cfg, result);
+  if (verdict(db, result, { by, force: by === "team" && force }) !== "ok") throw refuse(cfg, result);
   return { staffId, soft: result.soft };
+}
+
+/** A customer may move or cancel their own booking only while it is waiting or confirmed, until rules.cancelUntil before it. */
+export function needChangeable(cfg, a, who) {
+  const problem = byCustomer(who) && cancelProblem(cfg.data.apptStages, a, cfg.data.settings.rules, cfg.now);
+  if (problem) throw refusal([problem], [], { message: "Only the team can change this booking now." });
 }
 
 /** Stores a new booking. The caller has checked it; the constraint still guards the time. */
 export function insertAppointment(c, cfg, a) {
   return guarded(c, cfg, a, async () => {
     const { rows } = await c.query(
-      `INSERT INTO crm_appointments (workspace_id, branch_id, customer_id, staff_id, service_ids, start_at, duration, price, status, busy, source, note, fields, series_id, series_day, created_by)
-       VALUES ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING ${APPT("$2")}`,
-      [cfg.workspaceId, cfg.timezone, cfg.branchId, a.customerId, a.staffId, a.serviceIds, a.start, a.duration, a.price, a.status, a.busy, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), a.seriesId || null, a.seriesDay || null, a.createdBy || null]
+      `INSERT INTO crm_appointments (workspace_id, branch_id, customer_id, staff_id, service_ids, start_at, duration, price, status, busy, source, note, fields, series_id, series_day, created_by, customer_made, history)
+       VALUES ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING ${APPT("$2")}`,
+      [cfg.workspaceId, cfg.timezone, cfg.branchId, a.customerId, a.staffId, a.serviceIds, a.start, a.duration, a.price, a.status, a.busy, a.source, JSON.stringify(a.note), JSON.stringify(a.fields), a.seriesId || null, a.seriesDay || null, a.createdBy || null, Boolean(a.customerMade), JSON.stringify(a.history || [])]
     );
     return rows[0];
   });
@@ -145,30 +186,35 @@ export function saveAppointment(c, cfg, a, patch) {
 /* ───── Writes ───── */
 
 /**
- * A booking the team makes by hand. It starts in the first `booked` step: they have spoken with
- * the customer. `who` = { user, role }. Answers { changes, id, forced? } (forced: the rule reasons
- * passed with force).
+ * A new booking. One the team makes by hand starts in the first `booked` step: they have spoken
+ * with the customer; one a customer makes starts in the first step (see the top). `at`: the
+ * workspace's id, or a write already open (db.js write()). Answers { changes, id, forced? }
+ * (forced: the rule reasons the team passed with force).
  */
-export function bookAppointment(workspaceId, who, body) {
-  return write(workspaceId, async (c, cfg, q) => {
-    const me = await linkOf(q, workspaceId, who);
+export function bookAppointment(at, who, body) {
+  return write(at, (c, cfg, q) => refusalsFor(who, async () => {
+    const customer = byCustomer(who);
+    const me = await linkOf(q, cfg.workspaceId, who);
+    if (customer && who.capped && (await bookedByCustomerToday(q, cfg, body.customerId)) >= PER_PHONE_PER_DAY) throw shareUsed();
     const day = dayOf(body.start);
     const db = await loadRules(q, cfg, day, day);
     await needCustomer(q, cfg, body.customerId);
-    needServices(db, body.serviceIds);
-    needSource(cfg, body.source, undefined, "booking");
+    needServices(db, body.serviceIds, [], who);
+    if (!customer) needSource(cfg, body.source, undefined, "booking");
     const sum = totals(db, body.serviceIds);
-    const draft = { staffId: body.staffId || null, serviceIds: body.serviceIds, start: body.start, duration: body.duration ?? sum.duration };
-    const { staffId, soft } = decide(cfg, db, draft, me, body.force);
-    const fields = fieldsOf(cfg, body.fields, {});
-    const stage = startStage(cfg.data.apptStages, "team");
+    const duration = customer ? sum.duration : body.duration ?? sum.duration;
+    const draft = { staffId: body.staffId || null, serviceIds: body.serviceIds, start: body.start, duration };
+    const { staffId, soft } = decide(cfg, db, draft, me, body.force, who);
+    const fields = fieldsOf(cfg, body.fields, {}, who);
+    const stage = startStage(cfg.data.apptStages, customer ? "customer" : "team");
     if (!stage) throw new HttpError(409, "The bookings board has no steps. Add one in CRM settings.", { code: "no_steps" });
     const row = await insertAppointment(c, cfg, {
-      customerId: body.customerId, staffId, serviceIds: body.serviceIds, start: body.start, duration: draft.duration, price: body.price ?? sum.price,
-      status: stage.id, busy: kindHolds(stage.kind), source: body.source || "", note: body.note ?? "", fields, createdBy: who.user.id,
+      customerId: body.customerId, staffId, serviceIds: body.serviceIds, start: body.start, duration, price: customer ? sum.price : body.price ?? sum.price,
+      status: stage.id, busy: kindHolds(stage.kind), source: (customer ? who.source : body.source) || "", note: body.note ?? "", fields: fields.values,
+      createdBy: who.user?.id || null, customerMade: customer, history: fields.missing.length ? [entry(cfg, who, { type: "missing", fields: fields.missing })] : [],
     });
     return { changes: { set: { appointments: [row] } }, id: row.id, ...(soft.length ? { forced: soft } : {}) };
-  });
+  }));
 }
 
 /**
@@ -177,11 +223,16 @@ export function bookAppointment(workspaceId, who, body) {
  * only for a booking that keeps its time: fixing the note of yesterday's visit is always fine.
  * Dragging on the calendar (POST …/move) comes here too, with just the time and the specialist.
  * History gets a line for a move, a new note and new details, as the booking panel shows them.
+ * A customer only moves their own booking (`start`, and `staffId`: another one, or null for
+ * anyone free), judged as a customer.
  */
-export function editAppointment(workspaceId, who, id, body) {
-  return write(workspaceId, async (c, cfg, q) => {
-    const me = await linkOf(q, workspaceId, who);
+export function editAppointment(at, who, id, sent) {
+  return write(at, (c, cfg, q) => refusalsFor(who, async () => {
+    const me = await linkOf(q, cfg.workspaceId, who);
     const a = await getAppointment(q, cfg, id, me);
+    needChangeable(cfg, a, who);
+    // A customer moves their visit: another time, another specialist or anyone free.
+    const body = byCustomer(who) ? { start: sent.start, ...(sent.staffId !== undefined ? { staffId: sent.staffId } : {}) } : sent;
     const patch = {};
     const start = body.start ?? a.start;
     const db = await loadRules(q, cfg, dayOf(start), dayOf(start));
@@ -207,7 +258,7 @@ export function editAppointment(workspaceId, who, id, body) {
     let soft = [];
     if (timeChanged) {
       const draft = { staffId: anyone ? null : body.staffId || a.staffId, serviceIds: services || a.serviceIds, start, duration, ignoreId: a.id };
-      if (holdsTime(db, a)) ({ staffId, soft } = decide(cfg, db, draft, me, body.force));
+      if (holdsTime(db, a)) ({ staffId, soft } = decide(cfg, db, draft, me, body.force, who));
       else {
         // A cancelled or missed booking holds no time, so the rules wait until it is brought back.
         // Only a visit no booking can be (none, or running into the next day) is refused now.
@@ -225,8 +276,8 @@ export function editAppointment(workspaceId, who, id, body) {
     }
     if (body.note !== undefined && !same(body.note, a.note)) patch.note = body.note;
     if (body.fields !== undefined) {
-      const fields = fieldsOf(cfg, body.fields, a.fields);
-      if (!same(fields, a.fields)) patch.fields = fields;
+      const { values } = fieldsOf(cfg, body.fields, a.fields);
+      if (!same(values, a.fields)) patch.fields = values;
     }
     if (!Object.keys(patch).length) return { changes: {} };
     const lines = [];
@@ -236,7 +287,7 @@ export function editAppointment(workspaceId, who, id, body) {
     if (lines.length) patch.history = [...a.history, ...lines.map((l) => entry(cfg, who, l))];
     const row = await saveAppointment(c, cfg, a, patch);
     return { changes: { set: { appointments: [row] } }, ...(soft.length ? { forced: soft } : {}) };
-  });
+  }));
 }
 
 /** Marks a booking paid or unpaid. */

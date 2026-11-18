@@ -7,6 +7,7 @@ import { assertCanAnswer } from "../../core/workspaces/workspaces.js";
 import { notifyWaiting } from "./notify.js";
 import { logActivity } from "../../core/activity/activity.js";
 import { deliver, settleCard } from "./delivery.js";
+import { decideCrmAction } from "../../bridge/crm-tools.js";
 
 /**
  * One conversation, whatever it arrives on. The widget and every messaging channel share this:
@@ -209,7 +210,8 @@ export async function decide(agent, conv, actionId, confirm, { inpageOrigin = nu
 /** Runs the decision, tells the customer what happened, and continues a multi-step procedure. */
 export async function applyDecision(agent, conv, actionId, confirm, inpageOrigin = null) {
   const seen = await visibleMessages(conv.id);
-  const outcome = await decideAction(conv.id, actionId, confirm, inpageOrigin);
+  // A card for the built-in CRM is decided by the bridge; any other by its integration.
+  const outcome = (await decideCrmAction(conv.id, actionId, confirm)) || (await decideAction(conv.id, actionId, confirm, inpageOrigin));
   await query("UPDATE messages SET card = jsonb_set(card, '{status}', to_jsonb($3::text)) WHERE conversation_id = $1 AND card->>'action_id' = $2", [conv.id, actionId, outcome.status]);
   await settleCard(conv, actionId, outcome.status);
   await settleTap(conv.id, actionId, outcome.status);

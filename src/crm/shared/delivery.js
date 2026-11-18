@@ -8,6 +8,11 @@ export const DELIVERY_DEFAULTS = { time: "both", windows: [], daysOff: [], close
 export const rulesOf = (delivery) => ({ ...DELIVERY_DEFAULTS, ...(delivery || {}) });
 /** A window as it is kept on an order: "12:00–15:00". */
 export const windowText = (w) => `${w.from}–${w.to}`;
+/** An order's window "12:00–15:00" back as { from, to }, or null. */
+export function windowOf(slot) {
+  const [from, to] = String(slot || "").split("–");
+  return from && to ? { from, to } : null;
+}
 
 /**
  * Why a day can't be planned, or null when it can. Only the rules about the day itself:
@@ -56,6 +61,24 @@ export function checkDelivery(delivery, settingsDelivery, now) {
 export function deliveryAllowed(check, settingsDelivery, force) {
   if (check.hard.length) return false;
   return !check.soft.length || Boolean(force && rulesOf(settingsDelivery).override);
+}
+
+/**
+ * How a customer chose the delivery time, checked against how the business takes them, as the
+ * order keeps it: { slot, time } or { problem }. choice: { date, time?, window?: { from, to } }.
+ *   time_required   the business takes exact times only
+ *   window_required the business takes windows only, or a window and a time both came
+ *   bad_window      not one of the windows the business offers that day (or it has ended)
+ */
+export function deliveryTime(rules, choice, now) {
+  const mode = rules?.time || "both";
+  const { time, window } = choice;
+  if (time && window) return { problem: { code: "window_required" } };
+  if (time) return mode === "windows" ? { problem: { code: "window_required" } } : { slot: "", time };
+  if (!window) return { problem: { code: mode === "exact" ? "time_required" : "window_required" } };
+  if (mode === "exact") return { problem: { code: "time_required" } };
+  const offered = windowsFor(rules, choice.date, now).some((w) => w.from === window.from && w.to === window.to);
+  return offered ? { slot: windowText(window), time: "" } : { problem: { code: "bad_window" } };
 }
 
 /**

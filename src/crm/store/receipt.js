@@ -3,7 +3,7 @@ import { notFound } from "../../core/http.js";
 import { read, isUuid } from "../db.js";
 import { findCustomer } from "../core/customers.js";
 import { branchOf } from "../core/branches.js";
-import { lineTotal } from "../shared/store.js";
+import { lineTotal, optionsText } from "../shared/store.js";
 import { listOrders } from "./rows.js";
 
 /**
@@ -16,7 +16,7 @@ export function receipt(ctx, id) {
   return read(workspace.id, async (q, cfg) => {
     const [order] = isUuid(id) ? await listOrders(q, cfg, { ids: [id] }) : [];
     if (!order) throw notFound("Order not found");
-    const customer = await findCustomer(q, cfg, order.customerId);
+    const customer = await findCustomer(q, cfg, { id: order.customerId });
     const branch = await branchOf(q, cfg, order.branchId);
     const { rows: goods } = await q(
       `SELECT v.id, p.name, p.unit, p.options, v.option_values AS values, v.sku FROM crm_variants v JOIN crm_products p ON p.workspace_id = v.workspace_id AND p.id = v.product_id
@@ -40,7 +40,7 @@ export function receipt(ctx, id) {
           productId: l.productId,
           variantId: l.variantId,
           name: g.name,
-          variant: (g.options || []).map((o) => g.values?.[o.id]).filter(Boolean).join(", "),
+          variant: optionsText(g.options, g.values),
           sku: g.sku,
           unit: g.unit,
           unitName: named("units", g.unit),

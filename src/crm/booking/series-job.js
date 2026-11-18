@@ -28,7 +28,9 @@ const BATCH = 20;
 /**
  * Books the days in view for a batch of the workspace's series that are behind, under the
  * workspace's write lock. The rules' data is read once for the batch; each booking made joins it,
- * so the next series sees it. Returns { made, more } (more: series are left for another batch).
+ * so the next series sees it. Returns { changes, made, more } (more: series are left for another
+ * batch). The changes go to the host like any write's, so the visits booked here are heard
+ * (Notices sets their reminders).
  */
 function extendBatch(workspaceId) {
   return write(workspaceId, async (c, cfg, q) => {
@@ -40,17 +42,17 @@ function extendBatch(workspaceId) {
     const from = list.reduce((d, s) => (firstToBook(cfg, s) < d ? firstToBook(cfg, s) : d), horizon);
     const db = await loadRules(q, cfg, from, horizon);
     const have = await bookedDays(q, cfg, list);
-    let made = 0;
+    const appointments = [];
+    const series = [];
     for (const { created_by: createdBy, ...s } of list) {
       const r = await extend(c, cfg, s, createdBy, { db, have: have[s.id] });
-      made += r.created.length;
+      appointments.push(...r.created);
       // A series that ran out of its count has nothing more to book: close it, so it stops coming up.
-      if (s.count && seriesEnded(r.series, r.series.through)) {
-        await q("UPDATE crm_series SET until = through WHERE workspace_id = $1 AND id = $2", [workspaceId, s.id]);
-      }
+      const ended = s.count && seriesEnded(r.series, r.series.through);
+      series.push(ended ? (await q(`UPDATE crm_series SET until = through WHERE workspace_id = $1 AND id = $2 RETURNING ${SERIES}`, [workspaceId, s.id])).rows[0] : r.series);
     }
     // Each series of the batch is booked through the horizon now, so the next batch starts after them.
-    return { made, more: rows.length > BATCH };
+    return { changes: { set: { series, ...(appointments.length ? { appointments } : {}) } }, made: appointments.length, more: rows.length > BATCH };
   });
 }
 

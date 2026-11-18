@@ -150,6 +150,10 @@ CREATE INDEX IF NOT EXISTS crm_appointments_staff ON crm_appointments (workspace
 -- The visits of a repeat booking, by their day. It replaces an index on series_id alone.
 CREATE INDEX IF NOT EXISTS crm_appointments_of_series ON crm_appointments (workspace_id, series_id, series_day) WHERE series_id IS NOT NULL;
 DROP INDEX IF EXISTS crm_appointments_series;
+-- Made by the customer themselves (a public page, the AI agent in a chat): such bookings count
+-- toward the customer's daily share (shared/customer.js PER_PHONE_PER_DAY).
+ALTER TABLE crm_appointments ADD COLUMN IF NOT EXISTS customer_made BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS crm_appointments_customer_made ON crm_appointments (workspace_id, customer_id, created_at) WHERE customer_made;
 
 -- ───── Live updates ─────
 SELECT crm_watch('crm_staff', 'staff');

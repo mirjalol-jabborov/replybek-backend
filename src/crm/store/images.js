@@ -34,8 +34,8 @@ export function acceptImage(req, res, next) {
 const NAME = /^[0-9a-f-]{36}\.(jpg|png|webp|gif)$/;
 const keyOf = (workspaceId, name) => `crm/${workspaceId}/products/${name}`;
 const pathOf = (workspaceId, name) => `/w/${workspaceId}/crm/products/images/${name}`;
-/** The file name of a picture this workspace uploaded, or null for a static path. */
-const uploadName = (workspaceId, path) => {
+/** The file name of a picture this workspace uploaded, or null for a static path (or anything else). */
+export const uploadedName = (workspaceId, path) => {
   const prefix = pathOf(workspaceId, "");
   return typeof path === "string" && path.startsWith(prefix) && NAME.test(path.slice(prefix.length)) ? path.slice(prefix.length) : null;
 };
@@ -43,7 +43,7 @@ const gone = () => new HttpError(400, "This picture is no longer there. Upload i
 
 /** Inside a product write: an uploaded picture must still be there to be shown. A static path is fine. */
 export async function checkImage(c, workspaceId, path) {
-  const name = uploadName(workspaceId, path);
+  const name = uploadedName(workspaceId, path);
   if (!name) return;
   const { rows } = await c.query("SELECT 1 FROM crm_product_images WHERE workspace_id = $1 AND name = $2", [workspaceId, name]);
   if (!rows[0]) throw gone();
@@ -56,7 +56,7 @@ export async function checkImage(c, workspaceId, path) {
  * of them either came first (and the picture stays) or finds the row gone and is refused.
  */
 async function forget(workspaceId, paths, { stale = false } = {}) {
-  const names = paths.map((p) => uploadName(workspaceId, p)).filter(Boolean);
+  const names = paths.map((p) => uploadedName(workspaceId, p)).filter(Boolean);
   if (!names.length && !stale) return;
   const { removed } = await write(workspaceId, async (c) => {
     const { rows } = await c.query(
@@ -116,6 +116,21 @@ export async function setProductImage(workspace, productId, file) {
     await dropUpload(workspace.id, path);
     throw e;
   }
+}
+
+/**
+ * Whether anyone may see this uploaded picture (a public page, a chat with the AI agent, which
+ * Telegram fetches without a session): only while a product on sale that customers can order
+ * shows it. That is what the business offers anyone anyway.
+ */
+export async function shownToCustomers(workspaceId, name) {
+  if (!NAME.test(String(name))) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM crm_products p WHERE p.workspace_id = $1 AND p.image = $2 AND p.on_sale
+        AND EXISTS (SELECT 1 FROM crm_variants v WHERE v.workspace_id = p.workspace_id AND v.product_id = p.id AND NOT v.archived) LIMIT 1`,
+    [workspaceId, pathOf(workspaceId, name)]
+  );
+  return rows.length > 0;
 }
 
 /** Sends an uploaded picture, with headers that stop a browser from reading it as anything else. */

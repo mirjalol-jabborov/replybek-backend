@@ -156,8 +156,11 @@ export async function lockOrder(q, cfg, id) {
   return order;
 }
 
-/** One line of an order's history. `text` is a code the app has words for. */
-export const historyLine = (cfg, user, text, extra) => ({ at: cfg.now, text, by: user?.name || "", ...extra });
+/**
+ * One line of an order's history. `text` is a code the app has words for. A customer's own order
+ * says so (`customer: true`) and where they made it (`via`: "page", "ai").
+ */
+export const historyLine = (cfg, user, text, extra) => ({ at: cfg.now, text, by: user?.name || "", ...(user?.by === "customer" ? { customer: true, via: user.via } : {}), ...extra });
 
 /** Money for an order: a plus when it comes in, a minus when it goes back. */
 export const addPayment = (c, cfg, user, orderId, sum, method, note = "") =>

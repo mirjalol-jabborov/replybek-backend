@@ -50,6 +50,29 @@ export const orderUnits = (order) => (order.lines || []).reduce((s, l) => s + l.
 /* ───── Stock numbers ───── */
 
 export const available = (p) => (p ? p.stock - p.reserved : 0);
+/**
+ * What customers are told is left of a thing (the shop page, the AI agent): at most LEFT_CAP, past
+ * it simply "available". One order from a customer asks for at most LEFT_CAP of a thing, so it can
+ * neither hold nor learn more than that.
+ */
+export const LEFT_CAP = 10;
+export const capped = (n) => Math.max(0, Math.min(LEFT_CAP, n));
+/**
+ * The variants a customer's own order asks for more than LEFT_CAP of, its lines merged, as
+ * reasons [{ code: "too_many", variantId, productId, max }]. `lines`: [{ variantId, productId, qty }].
+ */
+export const tooMany = (lines) =>
+  Object.entries(qtyByVariant(lines))
+    .filter(([, qty]) => qty > LEFT_CAP)
+    .map(([variantId]) => ({ code: "too_many", variantId, productId: lines.find((l) => l.variantId === variantId).productId, max: LEFT_CAP }));
+/**
+ * How long an order a customer made themselves holds its goods from other customers while the
+ * team hasn't accepted it (it is still in an `open` step). After that the team meets any real
+ * shortage when it accepts the order.
+ */
+export const HOLD_MINUTES = 30;
+/** A variant's choices as words, in the product's option order: "M, Red". */
+export const optionsText = (options, values) => (options || []).map((o) => values?.[o.id]).filter(Boolean).join(", ");
 export const isOut = (p) => available(p) <= 0;
 export const isLow = (p) => available(p) <= (p.lowAt || 0);
 /** "out" | "low" | "ok" */

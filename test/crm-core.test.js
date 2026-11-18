@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { owner, crmOwner, teammate, browser, base } from "./helpers/setup.js";
 import { modules } from "../src/crm/modules.js";
+import { read } from "../src/crm/db.js";
+import { findCustomer, findCustomers } from "../src/crm/core/customers.js";
+import { telegramHandle } from "../src/crm/shared/customer.js";
 
 /** Opens an event stream like a browser does and collects what arrives. */
 async function openStream(path, cookie) {
@@ -108,7 +111,7 @@ test("the first snapshot of a new workspace has the default lists and nothing el
   const o = await crmOwner("Kamola Yusupova", "Guldasta");
   const db = await snap(o);
   assert.deepEqual(Object.keys(db).sort(), [
-    "appointments", "apptStages", "branches", "customers", "deliveryMethods", "fields", "id", "me", "modules", "movements", "name", "orderStages", "orders",
+    "appointments", "apptStages", "branches", "customers", "deliveryMethods", "fields", "id", "me", "modules", "movements", "name", "notices", "orderStages", "orders",
     "packages", "paymentMethods", "productCategories", "products", "rev", "role", "series", "serviceCategories", "services", "settings", "sources", "staff",
     "tags", "timeOff", "units",
   ]);
@@ -314,7 +317,7 @@ test("customers: add, edit, delete, with the phone kept unique and written one w
   assert.equal(made.body.id, c.id);
   assert.match(c.id, /^[0-9a-f-]{36}$/);
   assert.match(c.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/, "the business's wall clock, to the minute");
-  assert.deepEqual({ ...c, id: 0, createdAt: 0 }, { id: 0, name: "Aziz Karimov", phone: "+998901234567", telegram: "@aziz_k", instagram: "", source: "telegram", tags: ["vip"], note: "Prefers mornings", fields: { dob: "1990-05-17", size: "M", kids: 2, news: true }, createdAt: 0 });
+  assert.deepEqual({ ...c, id: 0, createdAt: 0 }, { id: 0, name: "Aziz Karimov", phone: "+998901234567", telegram: "aziz_k", instagram: "", source: "telegram", tags: ["vip"], note: "Prefers mornings", fields: { dob: "1990-05-17", size: "M", kids: 2, news: true }, createdAt: 0 });
   assert.equal(made.body.rev, (await snap(o, "rev")).rev);
 
   const twin = await addCustomer(o, { name: "Someone Else", phone: "90 123 45 67" });
@@ -345,7 +348,7 @@ test("customers: add, edit, delete, with the phone kept unique and written one w
   const edit = await o.b.call("PUT", `${o.crm}/customers/${c.id}`, { name: "Aziz K.", phone: "+998901234567", fields: { size: "", kids: 3 } });
   assert.equal(edit.status, 200, JSON.stringify(edit.body));
   const [e] = edit.body.changes.set.customers;
-  assert.deepEqual([e.name, e.phone, e.telegram, e.note, e.tags, e.fields], ["Aziz K.", "+998901234567", "@aziz_k", "Prefers mornings", ["vip"], { dob: "1990-05-17", kids: 3, news: true }]);
+  assert.deepEqual([e.name, e.phone, e.telegram, e.note, e.tags, e.fields], ["Aziz K.", "+998901234567", "aziz_k", "Prefers mornings", ["vip"], { dob: "1990-05-17", kids: 3, news: true }]);
   const clash = await o.b.call("PUT", `${o.crm}/customers/${quiet.body.id}`, { phone: "901234567" });
   assert.deepEqual([clash.status, clash.body.code, clash.body.customerId], [409, "phone_taken", c.id]);
   assert.equal((await o.b.call("PUT", `${o.crm}/customers/${c.id}`, {})).status, 400);
@@ -385,6 +388,39 @@ test("customers: add, edit, delete, with the phone kept unique and written one w
   assert.equal((await o.b.call("DELETE", `${o.crm}/customers/${c.id}`)).status, 404);
   assert.deepEqual((await snap(o, "customers")).customers.map((x) => x.name), ["Malika", "Sardor"]);
   assert.equal((await addCustomer(o, { name: "New Aziz", phone: "901234567" })).status, 201, "the number is free again");
+});
+
+test("a Telegram handle is kept bare however it was typed, and one find answers by id, phone or handle", async () => {
+  assert.deepEqual(["@Jasur_K", "t.me/jasur_k", "https://t.me/Jasur_K/", "  telegram.me/jasur_k ", "@@x", "jasur", "Jasur Karimov", ""].map(telegramHandle), ["Jasur_K", "jasur_k", "Jasur_K", "jasur_k", "x", "jasur", "Jasur Karimov", ""]);
+  const o = await crmOwner();
+  const forms = ["@Jasur_K", "t.me/aziz_k", "https://t.me/Malika_A"];
+  const ids = [];
+  for (const [i, telegram] of forms.entries()) ids.push((await addCustomer(o, { name: `C${i}`, phone: `+99890000000${i}`, telegram })).body.id);
+  assert.deepEqual((await snap(o, "customers")).customers.map((c) => c.telegram), ["Jasur_K", "aziz_k", "Malika_A"]);
+  const edited = await o.b.call("PUT", `${o.crm}/customers/${ids[1]}`, { telegram: "https://telegram.me/aziz_k" });
+  assert.deepEqual(edited.body.changes.set.customers[0].telegram, "aziz_k");
+
+  const find = (by) => read(o.ws.id, (q, cfg) => findCustomer(q, cfg, by)).then((c) => c?.id || null);
+  assert.equal(await find({ id: ids[0] }), ids[0]);
+  assert.equal(await find({ id: "nope" }), null);
+  assert.equal(await find({ phone: "90 000 00 01" }), ids[1]);
+  assert.equal(await find({ phone: "12345" }), null);
+  for (const handle of ["jasur_k", "@JASUR_K", "t.me/jasur_k"]) assert.equal(await find({ telegram: handle }), ids[0], handle);
+  assert.equal(await find({ telegram: "" }), null);
+  // Two customers with one handle: nobody is picked. One from a source left out doesn't count.
+  const twin = (await addCustomer(o, { name: "Twin", telegram: "jasur_k", source: "phone" })).body.id;
+  assert.equal(await find({ telegram: "jasur_k" }), null);
+  assert.equal(await find({ telegram: "jasur_k", notFrom: "phone" }), ids[0]);
+  assert.ok(twin);
+  // Another workspace's customer is never found.
+  const other = await crmOwner();
+  assert.equal(await read(other.ws.id, (q, cfg) => findCustomer(q, cfg, { phone: "+998900000001" })), null);
+  // Several by id in one read, as findCustomer gives each: only this workspace's.
+  const many = await read(o.ws.id, (q, cfg) => findCustomers(q, cfg, [ids[2], ids[0], "00000000-0000-0000-0000-000000000000"]));
+  assert.deepEqual(many.map((c) => c.id).sort(), [ids[0], ids[2]].sort());
+  assert.deepEqual(many.find((c) => c.id === ids[0]), await read(o.ws.id, (q, cfg) => findCustomer(q, cfg, { id: ids[0] })));
+  assert.deepEqual(await read(other.ws.id, (q, cfg) => findCustomers(q, cfg, ids)), []);
+  assert.deepEqual(await read(o.ws.id, (q, cfg) => findCustomers(q, cfg, [])), []);
 });
 
 test("a team member works with customers; settings and deleting are for admins", async () => {

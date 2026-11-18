@@ -14,12 +14,14 @@ import { TOP_KEYS } from "./defaults.js";
 import { modules } from "./modules.js";
 import * as booking from "./booking/index.js";
 import * as store from "./store/index.js";
+import * as notices from "./notices/index.js";
+import * as publicPages from "./public/index.js";
 import { router as core } from "./core/index.js";
 import { view } from "./core/settings.js";
 import { listCustomers } from "./core/customers.js";
 import { listBranches } from "./core/branches.js";
 
-modules.push(booking, store);
+modules.push(booking, store, notices, publicPages);
 
 const router = Router({ mergeParams: true });
 

@@ -1,8 +1,9 @@
 /**
  * A small in-memory request limiter (one server, so no shared store is needed).
- * `key(req)` says who is counted; over the limit the answer is 429 with Retry-After.
+ * `key(req)` says who is counted; over the limit the answer is 429 with Retry-After, and
+ * { message, code? } (`code` for callers that speak in codes, like the public pages).
  */
-export function rateLimit({ windowMs, max, key, message = "Too many requests. Try again in a minute." }) {
+export function rateLimit({ windowMs, max, key, message = "Too many requests. Try again in a minute.", code }) {
   const hits = new Map(); // who → { count, resetAt }
   setInterval(() => {
     const now = Date.now();
@@ -21,7 +22,7 @@ export function rateLimit({ windowMs, max, key, message = "Too many requests. Tr
     entry.count += 1;
     if (entry.count <= max) return next();
     res.set("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)));
-    return res.status(429).json({ message });
+    return res.status(429).json({ message, ...(code ? { code } : {}) });
   };
 }
 

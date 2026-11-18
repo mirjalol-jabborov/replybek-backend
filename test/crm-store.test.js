@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { owner, crmOwner, teammate, browser, base, query } from "./helpers/setup.js";
 import { addDays, nowIn, weekday } from "../src/crm/shared/time.js";
+import { LEFT_CAP } from "../src/crm/shared/store.js";
+import { createOrder } from "../src/crm/store/index.js";
 
 const ok = (r, status = 200) => {
   assert.equal(r.status, status, JSON.stringify(r.body));
@@ -981,4 +983,22 @@ test("editing an order checks the shelf of the order's own branch", async () => 
   const more = ok(await o.b.call("PUT", `${o.crm}/orders/${id}`, { lines: [{ productId: p.id, qty: 3 }] })).changes.set;
   assert.deepEqual([more.products[0].stock, more.products[0].reserved], [5, 3]);
   await ledgerHolds(o);
+});
+
+test("a customer's own order asks for at most LEFT_CAP of a thing, however its lines are split; the team's is not capped", async () => {
+  const o = await crmOwner();
+  const p = await product(o, { opening: 37 });
+  const v = p.variants[0].id;
+  const c = await customer(o);
+  const asCustomer = { by: "customer", via: "ai", source: "ai", capped: true };
+  const make = (lines) => createOrder(o.ws.id, asCustomer, { customerId: c, lines, delivery: { type: "pickup" } }).then((r) => ({ status: 201, body: r }), (e) => ({ status: e.status, body: e.extra }));
+  const tooMany = { status: 422, code: "rules", hard: [{ code: "too_many", variantId: v, productId: p.id, max: LEFT_CAP }], soft: [] };
+  // Past the cap is refused before the stock is asked, so the answer never tells how many are left.
+  for (const lines of [[{ productId: p.id, variantId: v, qty: LEFT_CAP + 1 }], [{ productId: p.id, variantId: v, qty: 6 }, { productId: p.id, variantId: v, qty: 6 }], [{ productId: p.id, variantId: v, qty: 999 }]]) {
+    assert.deepEqual(rules(await make(lines)), tooMany, JSON.stringify(lines));
+  }
+  assert.deepEqual((await snap(o, "orders")).orders, []);
+  assert.equal((await make([{ productId: p.id, variantId: v, qty: LEFT_CAP }])).status, 201);
+  // The team sells as much as is on the shelf.
+  ok(await step(o, (await order(o, { customerId: c, lines: [{ productId: p.id, qty: 27 }] })).id, "confirmed"));
 });

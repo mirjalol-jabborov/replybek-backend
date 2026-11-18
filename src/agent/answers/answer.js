@@ -11,6 +11,7 @@ import { inventedIds, withEmptyHint } from "../integrations/tool-guard.js";
 import { describeNow, validTimeZone } from "../../core/clock.js";
 import { languageName } from "../../core/languages.js";
 import { signal } from "../../core/events.js";
+import { crmTools, runCrmTool } from "../../bridge/crm-tools.js";
 
 const HUMAN_RE = /\b(human|person|someone|representative|real person|talk to|speak (to|with)|teammate|staff|operator|live agent)\b/i;
 const TONES = {
@@ -166,7 +167,8 @@ export async function answerQuestion({ agent, question, file = null, history = [
   // A file's first lines help find the right knowledge (a photo of a broken sole finds returns).
   const { passages, smallTalk } = await retrieve(agent, [question, file?.text?.slice(0, 1500)].filter(Boolean).join("\n") || file?.name || "", history).finally(() => clearTimeout(slowSearch));
   const asked = question || file?.text?.slice(0, 300) || file?.name || "";
-  const tools = await agentTools(agent.id, channel);
+  // The business's integrations, and the built-in CRM when this workspace connected it (src/bridge).
+  const tools = [...(await agentTools(agent.id, channel)), ...(await crmTools(agent, conversationId))];
   // Nothing in the knowledge matches and there are no tools. Without handoff that's simply the
   // fallback; with it, the model still reads the message, because handoff rules (damaged items,
   // "talk to a person") don't depend on knowledge. Small talk always gets a real reply.
@@ -195,7 +197,7 @@ export async function answerQuestion({ agent, question, file = null, history = [
     const invented = inventedIds(args, said.join("\n"));
     if (invented.length) return { error: "value_not_given", message: `Nobody gave ${invented.join(", ")} in this conversation, so nothing was looked up. Ask the customer for it; never guess.` };
     await progress(found.tool.kind === "write" ? "confirm" : "tool", found.tool.progress ? { label: found.tool.progress } : {});
-    const res = await runTool({ conversationId, integration: found.integration, tool: found.tool, args, inpageOrigin });
+    const res = found.integration.crm ? await runCrmTool({ agent, conversationId, tool: found.tool, args }) : await runTool({ conversationId, integration: found.integration, tool: found.tool, args, inpageOrigin });
     await progress("writing");
     said.push(JSON.stringify(res.output ?? null));
     if (res.card && !(card?.type === "connect")) card = res.card;

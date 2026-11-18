@@ -4,3 +4,4 @@
 export * from "./lists.js";
 export * from "./fields.js";
 export * from "./phone.js";
+export * from "./customer.js";

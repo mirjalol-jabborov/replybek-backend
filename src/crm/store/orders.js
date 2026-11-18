@@ -2,16 +2,27 @@
 // is in steps.js, money in payments.js. The rules are the pure functions in ../shared/store.js:
 // this file loads the rows under a lock, asks the rules and writes what they allow, all in one
 // transaction.
+//
+// An order is made by the team (`user`: the signed-in person) or by a customer for themselves
+// (`user` = { by: "customer", via: "page" | "ai", source, capped }: a public page, the AI agent).
+// Server code alone makes the customer one, so its `source` is trusted ("ai" too, which the team
+// can't send). A customer's order is made with that source in the same transaction, at the
+// variants' prices, with no discount, payment or force; their delivery rules bind with soft
+// reasons too, required order fields bind them as they bind the team, and only what can still
+// be promised to a customer (for-customers.js) can be ordered. It counts toward their daily
+// share (`capped`). Their refusals carry only what a customer may see (refusalsFor).
 import { z } from "zod";
 import { write, updateRow } from "../db.js";
-import { bad, conflict, refusal } from "../errors.js";
+import { bad, conflict, refusal, refusalsFor, shareUsed } from "../errors.js";
 import { uuid, money, day } from "../shapes.js";
-import { customerExists, cleanCustomer, insertCustomer, needSource } from "../core/customers.js";
-import { cleanFields, firstOf, hasId, isHm, same } from "../shared/index.js";
+import { findCustomer, cleanCustomer, insertCustomer, needSource } from "../core/customers.js";
+import { cleanFields, firstOf, hasId, isHm, same, PER_PHONE_PER_DAY } from "../shared/index.js";
 import { K, canEditLines, planLines, requiredMissing, totals } from "../shared/store.js";
 import { checkDelivery, deliveryAllowed } from "../shared/delivery.js";
 import { addPayment, historyLine, lockOrder, storeChanges } from "./rows.js";
-import { hasTarget, lockStock, postMoves, resolveVariants, target } from "./stock.js";
+import { hasTarget, postMoves, target } from "./stock.js";
+import { sameLines, cleanLines, customerLines, writeLines } from "./order-lines.js";
+import { shortForCustomers, orderedByCustomerToday } from "./for-customers.js";
 
 /* ───── Shapes ───── */
 
@@ -65,15 +76,9 @@ export const orderUpdateSchema = z.object(shape).partial().strict().refine((v) =
 
 /* ───── Pieces ───── */
 
-// The most an order's goods may come to, in soʻm. With the delivery fee (up to 10^9) every sum of
-// an order stays a whole number JS adds up exactly (below 2^53), and so does what is paid for it.
-const MAX_ORDER = 1e15;
 const MAP = { columns: { customerId: "customer_id" }, json: ["delivery", "fields", "history"], touch: true };
-/** The same lines, in the same order, at the same prices. */
-const sameLines = (a, b) => a.length === b.length && a.every((l, i) => ["variantId", "qty", "price", "discount"].every((k) => l[k] === b[i][k]));
-
 async function needCustomer(q, cfg, id) {
-  if (!(await customerExists(q, cfg, id))) throw bad("Choose a customer from the list.", "bad_customer");
+  if (!(await findCustomer(q, cfg, { id }))) throw bad("Choose a customer from the list.", "bad_customer");
 }
 
 /**
@@ -116,79 +121,53 @@ function cleanOrderFields(cfg, sent, stored) {
   return { fields: values, hard: requiredMissing(defs, values) };
 }
 
-/**
- * The lines to store: [{ variantId, qty, price, discount }], with the variants locked and their
- * stock read in the order's branch. A price or discount not given is the line's old one (the line
- * in the same place, else the first with that variant), or the variant's price and none.
- * `old`: the order's lines now. A product that is off sale can stay on an order but can't be added to one.
- */
-async function cleanLines(c, cfg, sent, old = [], branchId = cfg.branchId) {
-  const kept = sent.filter((l) => l.qty > 0);
-  if (!kept.length) throw refusal([{ code: "no_lines" }]);
-  const ids = await resolveVariants(c, cfg, kept);
-  const stock = await lockStock(c, cfg, [...ids, ...old.map((l) => l.variantId)], branchId);
-  const hard = [];
-  const lines = kept.map((l, i) => {
-    const v = stock[ids[i]];
-    const before = old[i]?.variantId === v.variantId ? old[i] : old.find((o) => o.variantId === v.variantId);
-    if (!before && (!v.onSale || v.archived) && !hard.some((r) => r.variantId === v.variantId)) hard.push({ code: "off_sale", variantId: v.variantId, productId: v.productId, name: v.name });
-    const out = { variantId: v.variantId, productId: v.productId, qty: l.qty, price: l.price ?? before?.price ?? v.price, discount: l.discount ?? before?.discount ?? 0 };
-    if (out.discount > out.qty * out.price) throw bad("A discount can't be more than the line it is on.", "bad_discount", { variantId: v.variantId });
-    return out;
-  });
-  if (totals({ lines }).lines > MAX_ORDER) throw bad("An order can come to 1,000,000,000,000,000 soʻm at most.", "order_too_large", { max: MAX_ORDER });
-  return { lines, stock, hard };
-}
-
 function checkDiscount(order) {
   const sums = totals({ ...order, discount: 0 });
   if ((order.discount || 0) > sums.subtotal) throw bad("A discount can't be more than the order's goods come to.", "bad_discount", { subtotal: sums.subtotal });
 }
 
-/** The order's lines from now on, in one statement. A line's position is its place in the list. */
-async function writeLines(c, cfg, orderId, lines) {
-  await c.query("DELETE FROM crm_order_lines WHERE workspace_id = $1 AND order_id = $2", [cfg.workspaceId, orderId]);
-  await c.query(
-    `INSERT INTO crm_order_lines (workspace_id, order_id, variant_id, qty, price, discount, position)
-     SELECT $1, $2, l.variant_id, l.qty, l.price, l.discount, l.n - 1 FROM unnest($3::uuid[], $4::int[], $5::bigint[], $6::bigint[]) WITH ORDINALITY AS l(variant_id, qty, price, discount, n)`,
-    [cfg.workspaceId, orderId, lines.map((l) => l.variantId), lines.map((l) => l.qty), lines.map((l) => l.price), lines.map((l) => l.discount)]
-  );
-}
-
 /* ───── Create and edit ───── */
 
-/** A new order, in the first open step: it holds nothing until it is accepted. */
-export function createOrder(workspace, user, input) {
-  return write(workspace.id, async (c, cfg, q) => {
+/**
+ * A new order, in the first open step: it holds nothing until it is accepted. `at`: the
+ * workspace's id, or a write already open (db.js write()).
+ */
+export function createOrder(at, user, input) {
+  return write(at, (c, cfg, q) => refusalsFor(user, async () => {
+    const customer = user?.by === "customer";
+    if (customer && user.capped && (await orderedByCustomerToday(q, cfg, input.customerId)) >= PER_PHONE_PER_DAY) throw shareUsed();
     const stages = cfg.data.orderStages;
-    const source = input.source || "";
-    needSource(cfg, source, undefined, "order");
+    const source = (customer ? user.source : input.source) || "";
+    if (!customer) needSource(cfg, source, undefined, "order");
     const payment = methodOf(cfg, input.payment || cfg.data.paymentMethods[0]?.id || "");
     // A customer who comes with the order is checked the way the Customers page checks one: { name, phone }.
     const comes = input.customerId ? await needCustomer(q, cfg, input.customerId) : await cleanCustomer(q, cfg, { name: input.customer.name, phone: input.customer.phone || "" });
     const d = cleanDelivery(cfg, input.delivery || {});
     const f = cleanOrderFields(cfg, input.fields || {});
-    const l = await cleanLines(c, cfg, input.lines);
-    const draft = { lines: l.lines, discount: input.discount || 0, delivery: d.delivery };
+    const l = customer ? await customerLines(c, cfg, input.lines) : await cleanLines(c, cfg, input.lines);
+    const draft = { lines: l.lines, discount: (!customer && input.discount) || 0, delivery: d.delivery };
     checkDiscount(draft);
     const hard = [...l.hard, ...d.hard, ...f.hard];
-    if (hard.length || !deliveryAllowed(d, cfg.data.settings.delivery, input.force)) throw refusal(hard, d.soft);
+    if (hard.length || !deliveryAllowed(d, cfg.data.settings.delivery, !customer && input.force)) throw refusal(hard, d.soft);
+    // Checked last, so a refusal tells a customer nothing about the stock unless the order could be placed.
+    const short = customer ? await shortForCustomers(q, cfg, l.lines) : [];
+    if (short.length) throw refusal(short);
 
     // A customer who came with the order is added only now, when nothing can refuse it any more.
-    const customer = comes ? await insertCustomer(c, cfg, { ...comes, source }) : null;
+    const added = comes ? await insertCustomer(c, cfg, { ...comes, source }) : null;
     const first = firstOf(stages, K.open) || stages[0];
     const number = (await c.query("UPDATE crm_settings SET order_seq = order_seq + 1 WHERE workspace_id = $1 RETURNING order_seq", [cfg.workspaceId])).rows[0].order_seq;
     const { rows } = await c.query(
-      `INSERT INTO crm_orders (workspace_id, branch_id, number, customer_id, status, delivery, payment, discount, source, note, fields, history, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
-      [cfg.workspaceId, cfg.branchId, number, customer?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify([historyLine(cfg, user, "created")]), user?.id || null]
+      `INSERT INTO crm_orders (workspace_id, branch_id, number, customer_id, status, delivery, payment, discount, source, note, fields, history, created_by, customer_made)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+      [cfg.workspaceId, cfg.branchId, number, added?.id || input.customerId, first.id, JSON.stringify(d.delivery), payment, draft.discount, source, input.note || "", JSON.stringify(f.fields), JSON.stringify([historyLine(cfg, user, "created")]), user?.id || null, customer]
     );
     const orderId = rows[0].id;
     await writeLines(c, cfg, orderId, l.lines);
     const total = totals(draft).total;
-    if (input.paid && total > 0) await addPayment(c, cfg, user, orderId, total, payment);
-    return { changes: await storeChanges(q, cfg, { orderId, more: customer ? { customers: [customer] } : undefined }), id: orderId };
-  });
+    if (!customer && input.paid && total > 0) await addPayment(c, cfg, user, orderId, total, payment);
+    return { changes: await storeChanges(q, cfg, { orderId, more: added ? { customers: [added] } : undefined }), id: orderId };
+  }));
 }
 
 /**

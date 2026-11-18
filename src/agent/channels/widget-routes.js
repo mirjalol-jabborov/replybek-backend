@@ -8,6 +8,7 @@ import { languageOf } from "../answers/suggestions.js";
 import { widgetAgent, localizedConfig, startConversation, ownConversation, postVisitorMessage, pollMessages, requestHuman, startConnect, decide, cardAction, deliverTool, visitorSees, visitorHere, visitorTyping, leaveConversation, identifyVisitor } from "./widget.js";
 import { stream } from "../../core/events.js";
 import { acceptFile, visitorAttachment, sendAttachment } from "../inbox/attachments.js";
+import { mediaRouter } from "../../bridge/media.js";
 
 /**
  * The public API the chat widget calls from customers' websites. No cookies: a conversation
@@ -27,6 +28,9 @@ function pageOrigin(req) {
     return undefined;
   }
 }
+
+// Product photos on the CRM's cards: opened by an <img> or by Telegram, so before the origin check.
+router.use(mediaRouter);
 
 router.use(wrap(async (req, res, next) => {
   req.agent = await widgetAgent(req.params.key, pageOrigin(req));

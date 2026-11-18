@@ -8,7 +8,7 @@ import { write } from "../db.js";
 import { conflict, refusal } from "../errors.js";
 import { uuid, money, label } from "../shapes.js";
 import { same } from "../shared/index.js";
-import { planWriteOff, planCount } from "../shared/store.js";
+import { planWriteOff, planCount, optionsText } from "../shared/store.js";
 import { storeChanges } from "./rows.js";
 
 /** What a line of stock or of an order points at: a variant, or a product that has just one. */
@@ -64,9 +64,9 @@ export async function lockStock(c, cfg, variantIds, branchId = cfg.branchId) {
   const out = {};
   for (const { product, values, options, ...r } of rows) {
     // "T-shirt (M, Red)": the product's name with what was chosen, for a refusal that names it.
-    const chosen = (options || []).map((o) => values?.[o.id]).filter(Boolean);
+    const chosen = optionsText(options, values);
     // Money and the counters are BIGINT, which pg hands over as text.
-    out[r.variantId] = { ...r, price: Number(r.price), cost: Number(r.cost), stock: Number(r.stock), reserved: Number(r.reserved), name: chosen.length ? `${product} (${chosen.join(", ")})` : product };
+    out[r.variantId] = { ...r, price: Number(r.price), cost: Number(r.cost), stock: Number(r.stock), reserved: Number(r.reserved), name: chosen ? `${product} (${chosen})` : product };
   }
   const missing = ids.find((id) => !out[id]);
   if (missing) throw new HttpError(404, "Product not found", { code: "missing_product", variantId: missing });

@@ -23,5 +23,6 @@ else are named for what calls them (`widget-routes.js`, `telegram-routes.js`, `p
 | `src/agent/channels/` | connecting channels, the Telegram bot, its polling and its API client (`telegram-api.js`), the website widget, channel wording |
 | `src/agent/analytics/` | conversation volume |
 | `src/agent/onboarding/` | reading the business's site or documents into a first agent |
-| `src/crm/` | the CRM product: host, core, booking, store, shared rules |
+| `src/crm/` | the CRM product: the host (`index.js`, `modules.js`, `db.js`: every write and its one "after a write" report), core, and the modules booking, store, notices (messages to customers) and public (the business's own booking and shop pages); `shared/` holds the pure rules, mirrored to the CRM app |
+| `src/bridge/` | the one place the AI agent and the CRM meet: the CRM tools an answer may use, their confirm cards, who the customer in a chat is. It calls the CRM's exported functions (a module's `index.js`, `core/customers.js`) as a customer (`{ by: "customer", via: "ai" }`); nothing in `src/crm` imports it |
 | `src/locales/` | wording a customer reads on messaging channels |

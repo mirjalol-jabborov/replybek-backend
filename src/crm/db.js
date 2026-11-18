@@ -7,6 +7,7 @@
 // Readers take q(text, params), so the same reader works in read()'s picture and inside a write.
 import { tx, getClient } from "../core/db.js";
 import { defaults, withDefaults } from "./defaults.js";
+import { afterWrite } from "./modules.js";
 
 /**
  * SQL for a stored instant as the business's wall clock: "2026-11-17T09:30".
@@ -42,10 +43,19 @@ async function ensureCrm(q, workspaceId) {
  * Runs one CRM write: fn(c, cfg, q) inside a transaction that holds the workspace's lock.
  * `c` is the transaction's client and `q` the same as q(text, params); `cfg` is the workspace's
  * CRM (see shape above), read under the lock. Whatever fn returns goes back with the new `rev`
- * added; if it throws, nothing is saved.
+ * added; if it throws, nothing is saved. Once it is saved, the modules hear of its changes
+ * (afterWrite in modules.js): this is the one place every write of the CRM is reported from.
+ *
+ * `at` is the workspace's id, or a write that is already open ({ c, cfg }, as fn got them): then
+ * fn runs inside it, as one more step of the caller's transaction (a public page or the AI agent
+ * adds its own rows around a module's write). The caller's write bumps `rev` and reports the
+ * changes it returns, so it passes on what fn returned.
  */
-export function write(workspaceId, fn) {
-  return tx(async (c) => {
+export async function write(at, fn) {
+  if (typeof at === "object") return fn(at.c, at.cfg, asQ(at.c));
+  const workspaceId = at;
+  let cfg;
+  const out = await tx(async (c) => {
     const q = asQ(c);
     const bump = `UPDATE crm_settings s SET rev = s.rev + 1 WHERE s.workspace_id = $1 RETURNING ${ROW}`;
     let { rows } = await q(bump, [workspaceId]);
@@ -53,9 +63,11 @@ export function write(workspaceId, fn) {
       await ensureCrm(q, workspaceId);
       ({ rows } = await q(bump, [workspaceId]));
     }
-    const cfg = shape(workspaceId, rows[0]);
+    cfg = shape(workspaceId, rows[0]);
     return { ...(await fn(c, cfg, q)), rev: cfg.rev };
   });
+  if (out.changes) await afterWrite({ workspaceId, cfg }, out.changes);
+  return out;
 }
 
 /**

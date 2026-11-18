@@ -7,7 +7,7 @@ import { write } from "../db.js";
 import { TOP_KEYS } from "../defaults.js";
 import { mergeChanges } from "../changes.js";
 import { listId as id, hm, hmEnd, day, text, label } from "../shapes.js";
-import { modules, add, countUses, moveStage } from "../modules.js";
+import { modules, add, countUses, moveStage, checkSettings } from "../modules.js";
 import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds } from "../shared/index.js";
 import { toMin } from "../shared/time.js";
 import { customerCols, sourceUses } from "./customers.js";
@@ -212,6 +212,7 @@ export function saveSettings(workspace, body) {
       if (rows.length) changes.push({ set: { customers: rows } });
     }
 
+    await checkSettings(c, cfg, next);
     await c.query("UPDATE crm_settings SET data = $2, updated_at = now() WHERE workspace_id = $1", [workspace.id, JSON.stringify(next)]);
     const shown = view(next, workspace);
     return { changes: mergeChanges(...changes, { top: Object.fromEntries(TOP_KEYS.filter((k) => body[k] !== undefined).map((k) => [k, shown[k]])) }) };

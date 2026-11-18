@@ -33,6 +33,8 @@ import knowledge from "./agent/knowledge/routes.js";
 import inbox from "./agent/inbox/routes.js";
 import integrations from "./agent/integrations/routes.js";
 import crmRoutes from "./crm/index.js";
+import "./agent/channels/notice-sender.js"; // the Telegram bot as a way the CRM's messages reach a customer
+import { router as crmPageRoutes } from "./crm/public/page-routes.js";
 
 // Everything here is scoped to /w/:wid, and every query filters by that workspace. Each area's
 // routes keep the order they always had; what sits above readOnlyUntilTrial stays open while locked.
@@ -65,6 +67,9 @@ app.get(["/widget.js", "/replybek-widget.js"], (req, res) => {
 // The widget runs on customers' sites: any origin may call it (each agent can limit its origins),
 // and it never uses cookies.
 app.use("/widget/:key", cors({ origin: true, credentials: false }), express.json({ limit: "640kb" }), widgetRoutes);
+
+// A business's own booking and shop pages: open to anyone, never a cookie (see src/crm/public/page-routes.js).
+app.use("/public/crm/:slug", crmPageRoutes);
 
 // Where an integration's sign-in page sends the customer back. A plain page, no CORS or cookies.
 app.use("/oauth", oauthRoutes);

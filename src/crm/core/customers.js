@@ -2,11 +2,11 @@
 // ones through here, so a customer is checked the same way wherever they come from.
 import { z } from "zod";
 import { notFound } from "../../core/http.js";
-import { read, write, wall, isUuid, insertRow, updateRow } from "../db.js";
+import { read, write, wall, isUuid, asQ, insertRow, updateRow } from "../db.js";
 import { bad, conflict } from "../errors.js";
 import { someKey } from "../shapes.js";
 import { modules, customerUses } from "../modules.js";
-import { cleanFields, hasId, normalPhone, same } from "../shared/index.js";
+import { cleanFields, hasId, normalPhone, same, telegramHandle } from "../shared/index.js";
 
 /** The columns of a customer as the app reads it. `tz`: the parameter holding the workspace's time zone ("$2"). */
 export const customerCols = (tz) => `id, name, phone, telegram, instagram, source, tags, note, fields, ${wall("created_at", tz)} AS "createdAt"`;
@@ -33,20 +33,37 @@ export async function listCustomers(q, cfg) {
   return rows;
 }
 
-/** One customer of this workspace, or null. Another workspace's id reads like one that doesn't exist. */
-export async function findCustomer(q, cfg, id, lock = "") {
-  if (!isUuid(id)) return null;
-  return (await q(`SELECT ${customerCols("$3")} FROM crm_customers WHERE workspace_id = $1 AND id = $2 ${lock}`, [cfg.workspaceId, id, cfg.timezone])).rows[0] || null;
+/**
+ * The one customer of this workspace found by `by`, or null:
+ *   { id }                     by the row's id (another workspace's id reads like one that doesn't exist)
+ *   { phone }                  by phone number, in any form normalPhone() reads; two customers never share one
+ *   { telegram, notFrom? }     by Telegram handle, in any form telegramHandle() reads, without regard to
+ *                              letter case; null when two customers have it. `notFrom`: leave out the
+ *                              customers who came from this source.
+ * `lock`: "FOR UPDATE" inside a write.
+ */
+export async function findCustomer(q, cfg, by, lock = "") {
+  const one = async (where, params, limit = 1) => {
+    const { rows } = await q(`SELECT ${customerCols("$2")} FROM crm_customers WHERE workspace_id = $1 AND ${where} LIMIT ${limit} ${lock}`, [cfg.workspaceId, cfg.timezone, ...params]);
+    return rows.length === 1 ? rows[0] : null;
+  };
+  if (by.id !== undefined) return isUuid(by.id) ? one("id = $3", [by.id]) : null;
+  // `phone <> ''` and `telegram <> ''` let Postgres use the indexes that leave empty ones out.
+  if (by.phone !== undefined) return normalPhone(by.phone) ? one("phone = $3 AND phone <> ''", [normalPhone(by.phone)]) : null;
+  const handle = telegramHandle(by.telegram);
+  return handle ? one("lower(telegram) = lower($3) AND telegram <> '' AND source IS DISTINCT FROM $4", [handle, by.notFrom ?? null], 2) : null;
 }
 async function getCustomer(q, cfg, id, lock) {
-  const found = await findCustomer(q, cfg, id, lock);
+  const found = await findCustomer(q, cfg, { id }, lock);
   if (!found) throw notFound("Customer not found");
   return found;
 }
 
-/** Whether this workspace has the customer a booking or an order names. */
-export async function customerExists(q, cfg, id) {
-  return Boolean((await q("SELECT 1 FROM crm_customers WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, id])).rows[0]);
+/** These customers of the workspace, by id, in one query, each as findCustomer gives it. Ids it doesn't have are left out. */
+export async function findCustomers(q, cfg, ids) {
+  if (!ids.length) return [];
+  const { rows } = await q(`SELECT ${customerCols("$2")} FROM crm_customers WHERE workspace_id = $1 AND id = ANY($3::uuid[])`, [cfg.workspaceId, cfg.timezone, ids]);
+  return rows;
 }
 
 /**
@@ -71,16 +88,15 @@ export async function sourceUses(c, workspaceId, ids) {
  */
 export async function cleanCustomer(q, cfg, sent, stored) {
   const out = {};
-  for (const key of ["name", "telegram", "instagram", "note"]) if (sent[key] !== undefined) out[key] = sent[key];
+  for (const key of ["name", "instagram", "note"]) if (sent[key] !== undefined) out[key] = sent[key];
+  // One way to keep a handle, so a Telegram chat finds its customer however the team typed it.
+  if (sent.telegram !== undefined) out.telegram = telegramHandle(sent.telegram);
   if (sent.phone !== undefined) {
     // A customer may have no phone (someone who only writes on Instagram). A phone that is given must be a real one.
     out.phone = sent.phone === "" ? "" : normalPhone(sent.phone);
     if (out.phone === null) throw bad("Write the number like +998 90 123 45 67.", "bad_phone");
-    if (out.phone) {
-      // `phone <> ''` lets Postgres use the unique index on phone, which leaves empty numbers out.
-      const twin = (await q("SELECT id, name FROM crm_customers WHERE workspace_id = $1 AND phone = $2 AND phone <> '' AND id IS DISTINCT FROM $3", [cfg.workspaceId, out.phone, stored?.id || null])).rows[0];
-      if (twin) throw conflict(`${twin.name} already has this number.`, "phone_taken", { customerId: twin.id, customerName: twin.name });
-    }
+    const twin = out.phone && (await findCustomer(q, cfg, { phone: out.phone }));
+    if (twin && twin.id !== stored?.id) throw conflict(`${twin.name} already has this number.`, "phone_taken", { customerId: twin.id, customerName: twin.name });
   }
   if (sent.source !== undefined) {
     needSource(cfg, sent.source, stored?.source, "customer");
@@ -101,6 +117,20 @@ export async function cleanCustomer(q, cfg, sent, stored) {
 /** Stores a customer that cleanCustomer() passed. Returns the row as the app reads it. */
 export async function insertCustomer(c, cfg, values) {
   return (await insertRow(c, cfg, "crm_customers", MAP, customerCols, values))[0];
+}
+
+/**
+ * Inside a write, for a customer who comes by themselves (a public page, the AI agent): the one
+ * with this phone, or a new one with what they gave ({ name, phone, telegram? }), from `source`
+ * (the caller's own, "website" or "ai", which the team's lists don't need to have). A known
+ * customer keeps what the team stored. Answers { id, added: the new row | null }.
+ */
+export async function findOrAddCustomer(c, cfg, who, source) {
+  const q = asQ(c);
+  const known = await findCustomer(q, cfg, { phone: who.phone });
+  if (known) return { id: known.id, added: null };
+  const added = await insertCustomer(c, cfg, { ...(await cleanCustomer(q, cfg, { name: who.name, phone: who.phone, ...(who.telegram ? { telegram: who.telegram } : {}) })), source });
+  return { id: added.id, added };
 }
 
 export function createCustomer(workspaceId, input) {

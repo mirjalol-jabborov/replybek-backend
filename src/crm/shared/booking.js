@@ -5,54 +5,11 @@
 // its own words. Nothing reads the clock: `now` ("2026-11-17T09:30") is handed in.
 //
 // Steps of a booking are the workspace's own list (db.apptStages); the code only looks at what a
-// step means (its kind): pending, booked, here, done, noshow, cancelled.
-import { stageOf, firstOf } from "./lists.js";
+// step means (its kind): see booking-steps.js, which this file passes on.
+import { holdsTime, isOpen } from "./booking-steps.js";
 import { dayOf, hmOf, at, toMin, fromMin, addDays, weekday, weekStart, absMin, daysBetween } from "./time.js";
 
-/* ───────── Steps ───────── */
-
-export const CLOSED_KINDS = ["noshow", "cancelled"];
-export const OPEN_KINDS = ["pending", "booked", "here"];
-/** A step of this kind keeps its time: every kind except no-show and cancelled. */
-export const kindHolds = (kind) => !CLOSED_KINDS.includes(kind);
-export const apptKind = (db, a) => stageOf(db.apptStages, a.status).kind;
-/** A booking takes its time in any step except no-show and cancelled. */
-export const holdsTime = (db, a) => kindHolds(apptKind(db, a));
-/** Still ahead or going on: not done, not closed. */
-export const isOpen = (db, a) => OPEN_KINDS.includes(apptKind(db, a));
-/** The board's main columns: every step except no-show and cancelled, in list order. */
-export const flowStages = (db) => (db.apptStages || []).filter((s) => kindHolds(s.kind));
-export const closedStages = (db) => (db.apptStages || []).filter((s) => !kindHolds(s.kind));
-
-/**
- * The step a new booking starts in. One the team makes by hand is confirmed already (they have
- * spoken with the customer): the first `booked` step. One that arrives by itself (the website,
- * the AI agent) starts in the first step of the list.
- */
-export function startStage(stages, by = "team") {
-  const list = stages || [];
-  return (by === "team" && firstOf(list, "booked")) || list[0] || null;
-}
-
-/**
- * Why a booking can't be put into this step now: a reason, or null.
- *   unknown_step  the step isn't in the list
- *   here_early    { day }   "here" only on the day of the visit, and that day hasn't come
- *   here_late     { day }   …or has passed: mark it done or missed instead
- *   done_early    { day }   a visit can be finished from its day on
- *   noshow_early  { start } missed only after the start time
- */
-export function stepBlock(stages, a, stageId, now) {
-  const s = (stages || []).find((x) => x.id === stageId);
-  if (!s) return { code: "unknown_step", id: stageId };
-  const day = dayOf(a.start);
-  const today = dayOf(now);
-  if (s.kind === "here" && day > today) return { code: "here_early", day };
-  if (s.kind === "here" && day < today) return { code: "here_late", day };
-  if (s.kind === "done" && day > today) return { code: "done_early", day };
-  if (s.kind === "noshow" && a.start > now) return { code: "noshow_early", start: a.start };
-  return null;
-}
+export * from "./booking-steps.js";
 
 /* ───────── Time ───────── */
 
@@ -63,6 +20,15 @@ export const rulesOf = (db) => ({ minNotice: 0, maxDays: 30, cancelUntil: 0, buf
 export const doesAll = (person, serviceIds) => (serviceIds || []).every((id) => (person.serviceIds || []).includes(id));
 /** People who could do these services: active, and doing every one of them. */
 export const eligible = (db, serviceIds) => (db.staff || []).filter((p) => p.active && doesAll(p, serviceIds));
+/**
+ * What a customer can book on their own (a public page, the AI agent): switched-on services that
+ * someone switched on does, and the specialists who do at least one of them.
+ */
+export function customerCatalogue(db) {
+  const services = (db.services || []).filter((s) => s.active && eligible(db, [s.id]).length);
+  const staff = (db.staff || []).filter((p) => p.active && services.some((s) => (p.serviceIds || []).includes(s.id)));
+  return { services, staff };
+}
 
 /** Working hours of a person on a day, as minutes [from, to], or null on a day off. */
 export function hoursOn(person, day) {

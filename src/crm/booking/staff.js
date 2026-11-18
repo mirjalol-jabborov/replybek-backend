@@ -8,11 +8,14 @@ import { check } from "../shared/booking.js";
 import { STAFF, APPT, one, upcomingOf } from "./rows.js";
 
 /**
- * What the signed-in person is to the Booking module: { staffId, only }.
+ * What the signed-in person is to the Booking module: { staffId, only }. `who`: { user, role }
+ * for the team, or { by: "customer", ... } for a customer (see bookAppointment).
  * staffId: the specialist they are, if any. only: that same id when they may see and change
  * nothing but their own bookings (a team member with ownOnly; admins and the owner see all).
  */
 export async function linkOf(q, workspaceId, who) {
+  // A customer acting for themselves is nobody on the team.
+  if (who.by === "customer") return { staffId: null, only: null };
   const { rows } = await q("SELECT id, own_only FROM crm_staff WHERE workspace_id = $1 AND user_id = $2", [workspaceId, who.user.id]);
   const staffId = rows[0]?.id || null;
   return { staffId, only: staffId && rows[0].own_only && who.role === "agent" ? staffId : null };

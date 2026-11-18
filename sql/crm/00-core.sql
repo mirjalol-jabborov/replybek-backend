@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS crm_customers (
 CREATE INDEX IF NOT EXISTS crm_customers_workspace ON crm_customers (workspace_id, created_at);
 -- Two customers of one business can't share a phone number. Customers without one are fine.
 CREATE UNIQUE INDEX IF NOT EXISTS crm_customers_phone ON crm_customers (workspace_id, phone) WHERE phone <> '';
+-- A Telegram handle is kept bare ("jasur_k"), however it was typed (shared/customer.js
+-- telegramHandle). Handles saved before that rule lose only the known prefixes: "@", "t.me/",
+-- "https://t.me/" and a trailing "/". Anything else stays as it was.
+UPDATE crm_customers SET telegram = regexp_replace(regexp_replace(regexp_replace(btrim(telegram), '^(https?://)?(www\.)?(t\.me|telegram\.me)/', '', 'i'), '^@+', ''), '/+$', '')
+ WHERE telegram ~* '^\s|\s$|^@|^(https?://)?(www\.)?(t\.me|telegram\.me)/|/$';
+-- A Telegram chat finds the customer the team saved with its handle, in any letter case.
+DROP INDEX IF EXISTS crm_customers_telegram;
+CREATE INDEX IF NOT EXISTS crm_customers_handle ON crm_customers (workspace_id, lower(telegram)) WHERE telegram <> '';
 
 -- ───── Live updates ─────
 -- Every CRM table says when it changed: {"w": workspace, "t": "crm", "k": snapshot key} on the

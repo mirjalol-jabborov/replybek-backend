@@ -242,6 +242,13 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS crm_stock_moves_keep ON crm_stock_moves;
 CREATE TRIGGER crm_stock_moves_keep BEFORE UPDATE OR DELETE ON crm_stock_moves FOR EACH ROW EXECUTE FUNCTION crm_stock_moves_keep();
 
+-- ───── Orders customers made themselves ─────
+-- A public page or the AI agent made it. Such an order counts toward the customer's daily share
+-- (shared/customer.js PER_PHONE_PER_DAY), and while it waits in an open step it holds what it asks
+-- for from other customers for HOLD_MINUTES (shared/store.js; store/for-customers.js).
+ALTER TABLE crm_orders ADD COLUMN IF NOT EXISTS customer_made BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS crm_orders_customer_made ON crm_orders (workspace_id, created_at) WHERE customer_made;
+
 -- ───── Live updates ─────
 -- Stock numbers are part of a product as the app reads it, so they announce "products".
 SELECT crm_watch('crm_products', 'products');

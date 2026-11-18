@@ -25,6 +25,12 @@ export const same = (a, b) =>
 /** Required fields that are still empty: [{ id, name, … }]. `only`: check just these field ids. */
 export const missingFields = (defs, values, only) => (defs || []).filter((d) => (only ? only.includes(d.id) : d.required) && (d.type === "yesno" ? values?.[d.id] !== true && only : empty(values?.[d.id])));
 
+/**
+ * The fields a customer acting for themselves (a public page, the AI agent) is asked for and may
+ * fill: the required ones. The others are the team's own ("Deposit taken", a staff note).
+ */
+export const customerFields = (defs) => (defs || []).filter((d) => d.required);
+
 /** Whether a new value fits a field's type. */
 function fits(def, v) {
   if (def.type === "yesno") return typeof v === "boolean";

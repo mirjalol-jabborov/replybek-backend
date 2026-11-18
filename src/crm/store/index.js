@@ -6,6 +6,13 @@ import { listProducts, listMovements, listOrders } from "./rows.js";
 export { router } from "./routes.js";
 export const keys = ["products", "movements", "orders"];
 
+// What the public pages and the AI agent's bridge ask the Store for: orders a customer makes
+// themselves, the store as customers see it, and its pictures.
+export { createOrder } from "./orders.js";
+export { listProducts, listOrders } from "./rows.js";
+export { productsForCustomers, findForCustomers, orderedByCustomerToday } from "./for-customers.js";
+export { uploadedName, shownToCustomers, sendImage } from "./images.js";
+
 /* ───── What core asks a module ───── */
 
 export async function snapshot({ q, cfg, want }) {

@@ -9,6 +9,13 @@ import "./series-job.js"; // registers the daily job that books what comes into 
 export { router } from "./routes.js";
 export const keys = ["staff", "services", "timeOff", "appointments", "series"];
 
+// What the public pages and the AI agent's bridge ask Booking for: bookings a customer makes,
+// moves and cancels themselves (`who` = { by: "customer", ... }, see appointments.js), and the
+// rows the free times are read from.
+export { bookAppointment, editAppointment, getAppointment, bookedByCustomerToday } from "./appointments.js";
+export { cancelAppointment } from "./steps.js";
+export { loadRules } from "./rows.js";
+
 // What the signed-in person is to Booking, read once per snapshot or history (me() and snapshot() share a ctx).
 const links = new WeakMap();
 const linkFor = (ctx) => {
