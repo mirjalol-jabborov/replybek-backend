@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 import { owner, query, drainJobs } from "./helpers/setup.js";
-import { widgetConfig } from "../src/services/widget.service.js";
-import { fakeAI } from "../src/ai.js";
-import { validateAIDraft, redactDocumentation } from "../src/services/integration-ai.service.js";
+import { widgetConfig } from "../src/agent/channels/widget.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
+import { validateAIDraft, redactDocumentation } from "../src/agent/integrations/ai-draft.js";
 
 async function setup() {
   const o = await owner();

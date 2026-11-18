@@ -48,7 +48,8 @@ process.env.POLAR_PRODUCT_BUSINESS = PRODUCTS.business;
 // Imported after the env is set; `setup.base` is read live because the server starts in before().
 const setup = await import("./helpers/setup.js");
 const { owner } = setup;
-const { signWebhook, verifyWebhook } = await import("../src/lib/polar.js");
+const { signWebhook, verifyWebhook } = await import("../src/core/billing/polar.js");
+const { appOrigins } = await import("../src/core/auth/session.js");
 
 after(() => new Promise((done) => fakePolar.close(done)));
 
@@ -82,7 +83,7 @@ test("with Polar configured, plans change through checkout instead of the simula
   const { b, ws } = await owner();
   const w = `/w/${ws.id}`;
   const simulated = await b.call("PATCH", `${w}/plan`, { plan: "business" });
-  assert.equal(simulated.status, 409);
+  assert.deepEqual([simulated.status, simulated.body.code], [409, "checkout_required"]);
 
   const r = await b.call("POST", `${w}/billing/checkout`, { plan: "business" });
   assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -113,6 +114,8 @@ test("checkout refuses plans the usage doesn't fit", async () => {
   const r = await b.call("POST", `${w}/billing/checkout`, { plan: "starter" });
   assert.equal(r.status, 409);
   assert.match(r.body.message, /agents/);
+  // A code the apps can say in their own words, with the tier and what is over it.
+  assert.deepEqual([r.body.code, r.body.tier, r.body.over], ["usage_above_tier", "starter", ["agents"]]);
 });
 
 test("webhooks need a valid, fresh signature", async () => {
@@ -150,10 +153,16 @@ test("a started subscription sets the plan; plan changes switch product in place
   assert.equal(again.body.duplicate, true);
   assert.equal((await b.call("GET", w)).body.plan, "business");
 
-  // The customer portal opens for the workspace's Polar customer.
+  // The customer portal opens for the workspace's Polar customer, and comes back to the app that asked.
   const portal = await b.call("POST", `${w}/billing/portal`);
   assert.equal(portal.status, 200);
   assert.equal(portal.body.url, `https://polar.sh/portal?customer=${ws.id}`);
+  const sessions = () => polarCalls.filter((c) => c.url === "/v1/customer-sessions/").at(-1).body.return_url;
+  assert.equal(sessions(), `${appOrigins()[0]}/#/settings/billing`);
+  assert.equal((await b.call("POST", `${w}/billing/portal`, { origin: "http://localhost:5192/" })).status, 200);
+  assert.equal(sessions(), "http://localhost:5192/#/");
+  const elsewhere = await b.call("POST", `${w}/billing/portal`, { origin: "https://evil.example" });
+  assert.deepEqual([elsewhere.status, elsewhere.body.code], [400, "bad_origin"]);
 
   // The owner cancels in the portal: still active until the period ends.
   await deliver("subscription.canceled", { ...started, cancel_at_period_end: true });
@@ -233,6 +242,13 @@ test("the free trial starts only through Polar checkout (card on file); before i
   assert.equal(out.status, 402);
   assert.match(out.body.message, /used your 3 free test messages\. Start your 7-day free trial/);
   assert.equal(out.body.code, "trial_required");
+  // The message says the trial the AI agent really gives.
+  process.env.TRIAL_DAYS_AGENT = "10";
+  try {
+    assert.match((await b.call("POST", `${w}/agents/${agent.id}/test`, { question: "Hi there" })).body.message, /Start your 10-day free trial/);
+  } finally {
+    delete process.env.TRIAL_DAYS_AGENT;
+  }
 
   // Starting the trial on Polar (card entered there) turns everything on; onboarding returns to onboarding.
   const checkout = await b.call("POST", `${w}/billing/checkout`, { plan: "growth", return_to: "onboarding" });
@@ -368,4 +384,29 @@ test("the read-only lock never blocks the one call that can lift it", async () =
   await b.call("POST", `${w}/onboarding/complete`, {});
   // The read-only lock must not block the one call that can lift it.
   assert.equal((await b.call("POST", `${w}/billing/sync`)).status, 200);
+});
+
+test("checkout also takes a package and tier; the AI agent's package reads its Polar products from the older names", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  const r = await b.call("POST", `${w}/billing/checkout`, { package: "agent", tier: "starter" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(lastCheckout().body.products, [PRODUCTS.starter]);
+  assert.deepEqual(lastCheckout().body.metadata, { workspace_id: ws.id, plan: "starter", package: "agent" });
+  // While the CRM is free, a package with it isn't sold.
+  const both = await b.call("POST", `${w}/billing/checkout`, { package: "both", tier: "starter" });
+  assert.deepEqual([both.status, both.body.code, both.body.product], [409, "product_free", "crm"]);
+});
+
+test("an older picture of the subscription arriving late changes nothing", async () => {
+  const { b, ws } = await owner();
+  const w = `/w/${ws.id}`;
+  const sub = subscription({ id: "sub_late", product_id: PRODUCTS.growth, customer: { external_id: ws.id }, created_at: "2026-11-01T00:00:00.000000Z", modified_at: "2026-11-10T10:00:00.000002Z" });
+  await deliver("subscription.updated", sub);
+  // Polar stamps changes in microseconds; this one is one microsecond older.
+  await deliver("subscription.updated", { ...sub, product_id: PRODUCTS.business, status: "past_due", modified_at: "2026-11-10T10:00:00.000001Z" });
+  const s = (await b.call("GET", w)).body;
+  assert.equal(s.plan, "growth");
+  assert.equal(s.billing.status, "active");
+  assert.equal(s.billing.grace_ends_at, null);
 });

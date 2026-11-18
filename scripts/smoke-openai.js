@@ -1,7 +1,8 @@
 // Checks the real OpenAI connection with the key in .env: one embedding, one moderation and one
 // answer call (a fraction of a cent). Prints models, timings and results; never the key.
 import "dotenv/config";
-import { ai, models, isFake } from "../src/ai.js";
+import { ai, isFake } from "../src/agent/answers/ai.js";
+import { models } from "../src/agent/answers/models.js";
 
 if (isFake()) {
   console.error("AI_FAKE or NODE_ENV=test is set; unset it to test the real API.");

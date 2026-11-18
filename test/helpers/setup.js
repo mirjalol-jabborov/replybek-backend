@@ -1,5 +1,6 @@
-// Starts the real app against the local test database (replybek_test) with the fake AI.
+// Starts the real app against a local test database (replybek_test, or any name starting with it) with the fake AI.
 // Each test file runs in its own process; the test database is emptied when a file starts.
+// Several people can run tests at once, each on their own database: PGDATABASE=replybek_test_<name>.
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
@@ -11,17 +12,17 @@ process.env.UPLOAD_DIR = path.join(os.tmpdir(), `replybek-test-uploads-${process
 process.env.S3_BUCKET = ""; // files go to UPLOAD_DIR, even when .env names a bucket
 
 const { default: app } = await import("../../src/app.js");
-const { query, closeDb } = await import("../../src/db.js");
-const { drainJobs } = await import("../../src/services/jobs.service.js");
-const { stopEvents } = await import("../../src/services/events.service.js");
-const { dbConfig } = await import("../../src/dbConfig.js");
+const { query, closeDb } = await import("../../src/core/db.js");
+const { drainJobs } = await import("../../src/core/jobs.js");
+const { stopEvents } = await import("../../src/core/events.js");
+const { dbConfig } = await import("../../src/core/db-config.js");
 
 let server;
 export let base;
 export { query, drainJobs };
 
 before(async () => {
-  assert.equal(dbConfig().database, "replybek_test", "tests only run against the replybek_test database");
+  assert.match(String(dbConfig().database), /^replybek_test/, "tests only run against a replybek_test database");
   await query("TRUNCATE users, workspaces, jobs, billing_events CASCADE");
   await new Promise((done) => (server = app.listen(0, "127.0.0.1", done)));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -66,4 +67,23 @@ export async function owner(name = "Alex Morgan", workspace = "Northstar Outfitt
   const r = await b.call("POST", "/auth/register", { name, email: `owner${++n}@test.replybek.dev`, password: "correct horse battery", workspace_name: workspace });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   return { b, user: r.body.user, ws: r.body.workspaces[0] };
+}
+
+/** Registers a new owner whose workspace has the CRM only. Returns { b, user, ws, crm }: `crm` is the CRM's base path. */
+export async function crmOwner(name = "Kamola Yusupova", workspace = "Guldasta") {
+  const b = browser();
+  const r = await b.call("POST", "/auth/register", { name, email: `owner${++n}@test.replybek.dev`, password: "correct horse battery", workspace_name: workspace, product: "crm" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const ws = r.body.workspaces[0];
+  return { b, user: r.body.user, ws, crm: `/w/${ws.id}/crm` };
+}
+
+/** Invites someone into an owner's workspace and joins as them. Returns { b, user }. */
+export async function teammate(o, role = "agent", name = "Sherzod Karimov") {
+  const invite = await o.b.call("POST", `/w/${o.ws.id}/invites`, { email: `mate${++n}@test.replybek.dev`, role });
+  assert.equal(invite.status, 201, JSON.stringify(invite.body));
+  const b = browser();
+  const joined = await b.call("POST", `/invites/${invite.body.link.split("/invite/")[1]}/join`, { name, password: "correct horse battery" });
+  assert.equal(joined.status, 201, JSON.stringify(joined.body));
+  return { b, user: joined.body.user };
 }

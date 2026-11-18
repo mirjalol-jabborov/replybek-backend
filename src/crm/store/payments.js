@@ -1,0 +1,62 @@
+// Money for an order: payments in (all that is owed, or a part) and refunds out (a minus
+// payment, for admins). `order.paid` is true when nothing is owed any more; the sums are
+// totals() in ../shared/store.js, so the app and the server add up the same way.
+import { z } from "zod";
+import { write } from "../db.js";
+import { conflict } from "../errors.js";
+import { money } from "../shapes.js";
+import { kindOf } from "../shared/index.js";
+import { K } from "../shared/store.js";
+import { addPayment, historyLine, lockOrder, storeChanges } from "./rows.js";
+import { methodOf } from "./orders.js";
+import { applyMove, cancelledStep } from "./steps.js";
+
+const amount = money.min(1).optional(); // whole soʻm; all of it when not given
+const method = z.string().trim().max(40).optional(); // the order's payment method when not given
+const note = z.string().trim().max(500).optional();
+export const paySchema = z.object({ amount, method, note }).strict();
+export const refundSchema = z.object({ amount, method, note, returnGoods: z.boolean().optional() }).strict();
+
+const addHistory = (c, cfg, orderId, line) =>
+  c.query("UPDATE crm_orders SET history = history || $3::jsonb, updated_at = now() WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, orderId, JSON.stringify([line])]);
+
+/** Money came in: all that is owed, or a part of it. Never more than is owed, never for a cancelled order. */
+export function payOrder(workspace, user, id, input) {
+  return write(workspace.id, async (c, cfg, q) => {
+    const order = await lockOrder(q, cfg, id, user?.branchOnly);
+    if (kindOf(cfg.data.orderStages, order.status) === K.cancelled) throw conflict("This order is cancelled.", "order_cancelled");
+    const { balance } = order.totals;
+    if (balance <= 0) throw conflict("This order is already paid.", "already_paid");
+    const sum = input.amount ?? balance;
+    if (sum > balance) throw conflict("That is more than is still owed.", "over_balance", { balance });
+    // The method named, else the order's own ("" names none).
+    const how = methodOf(cfg, input.method || undefined, order.payment);
+    await addPayment(c, cfg, user, order.id, sum, how, input.note || "");
+    await addHistory(c, cfg, order.id, historyLine(cfg, user, sum === balance ? "paid" : "part_paid", { amount: sum, method: how }));
+    return { changes: await storeChanges(q, cfg, { orderId: order.id }), id: order.id };
+  });
+}
+
+/**
+ * Money goes back to the customer: a payment with a minus, never more than was paid. With
+ * `returnGoods`, a finished order's goods also come back to the shelf and the order is closed
+ * as returned, in the same transaction.
+ */
+export function refundOrder(workspace, user, id, input) {
+  return write(workspace.id, async (c, cfg, q) => {
+    const order = await lockOrder(q, cfg, id);
+    const { paid } = order.totals;
+    if (paid <= 0) throw conflict("Nothing was paid for this order.", "nothing_paid");
+    const sum = input.amount ?? paid;
+    if (sum > paid) throw conflict("That is more than was paid.", "over_paid", { paid });
+    const how = methodOf(cfg, input.method || undefined, order.payment);
+    let moved = {};
+    if (input.returnGoods) {
+      if (kindOf(cfg.data.orderStages, order.status) !== K.done || order.returned) throw conflict("Only a finished order's goods can come back.", "not_done");
+      moved = await applyMove(c, cfg, user, order, cancelledStep(cfg), input.note);
+    }
+    await addPayment(c, cfg, user, order.id, -sum, how, input.note || "");
+    await addHistory(c, cfg, order.id, historyLine(cfg, user, "refunded", { amount: sum, method: how, ...(input.note ? { note: input.note } : {}) }));
+    return { changes: await storeChanges(q, cfg, { orderId: order.id, ...moved }), id: order.id };
+  });
+}

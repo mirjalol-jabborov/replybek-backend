@@ -196,7 +196,7 @@ test("every AI reply counts toward the monthly message usage", async () => {
 test("if the AI fails, the visitor gets a polite reply and the team gets the conversation", async () => {
   const { b, w, agent } = await liveAgent();
   await b.call("POST", `${w}/agents/${agent.id}/publish`);
-  const { fakeAI } = await import("../src/ai.js");
+  const { fakeAI } = await import("../src/agent/answers/ai.js");
   const realEmbed = fakeAI.embed;
   fakeAI.embed = async () => {
     throw new Error("OpenAI outage");

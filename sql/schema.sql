@@ -457,7 +457,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 
 -- ───── Files and photos in conversations ─────
 -- One row per file on a message; the bytes live in UPLOAD_DIR/attachments/<id>
--- (src/services/attachments.service.js). Deleting a conversation removes the rows; the files stay
+-- (src/agent/inbox/attachments.js). Deleting a conversation removes the rows; the files stay
 -- on disk until a cleanup job exists.
 CREATE TABLE IF NOT EXISTS attachments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -495,7 +495,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS previous_id UUID REFERENCES c
 -- ───── Live updates ─────
 -- Every change to a conversation, its messages or its tool calls is announced on the channel
 -- replybek_events as {"w": workspace, "c": conversation, "t": table, "r": message role}.
--- src/services/events.service.js passes it on to open dashboards and widgets, which then fetch
+-- src/core/events.js passes it on to open dashboards and widgets, which then fetch
 -- the details the usual way. Updates that change nothing (marking an already-read chat read) stay quiet.
 CREATE OR REPLACE FUNCTION replybek_notify() RETURNS trigger AS $$
 DECLARE
@@ -545,6 +545,8 @@ CREATE TABLE IF NOT EXISTS agent_channels (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS agent_channels_agent ON agent_channels (agent_id);
+-- A workspace's bots: whether it has one connected (the CRM's messages go out through it).
+CREATE INDEX IF NOT EXISTS agent_channels_workspace ON agent_channels (workspace_id, type, status);
 -- One bot belongs to one agent: the same token connected twice would steal the first webhook.
 CREATE UNIQUE INDEX IF NOT EXISTS agent_channels_account ON agent_channels (type, (config->>'account_id'));
 

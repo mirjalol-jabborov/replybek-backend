@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inventedIds, withEmptyHint } from "../src/lib/tool-guard.js";
+import { inventedIds, withEmptyHint } from "../src/agent/integrations/tool-guard.js";
 
 test("an order number nobody gave is caught; one the customer wrote is not", () => {
   assert.deepEqual(inventedIds({ order_id: "123456" }, "where is my order?"), ["order_id"]);

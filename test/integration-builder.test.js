@@ -2,19 +2,17 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test, before, after } from "node:test";
 import { owner, query, base } from "./helpers/setup.js";
+import { importDefinition } from "../src/agent/integrations/import.js";
+import { exportPackage } from "../src/agent/integrations/package.js";
 import {
-  importDefinition,
-  exportPackage,
   resolveInputs,
   modelInput,
-} from "../src/lib/integration-config.js";
-import {
-  runTool,
-  decideAction,
-  loadIntegration,
-  simulateProcedure,
-} from "../src/services/integrations.service.js";
-import { startConversation } from "../src/services/widget.service.js";
+} from "../src/agent/integrations/definitions.js";
+import { runTool } from "../src/agent/integrations/tools.js";
+import { decideAction } from "../src/agent/integrations/confirmations.js";
+import { loadIntegration } from "../src/agent/integrations/integrations.js";
+import { simulateProcedure } from "../src/agent/integrations/procedures.js";
+import { startConversation } from "../src/agent/channels/widget.js";
 
 let system,
   url,

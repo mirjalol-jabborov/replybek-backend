@@ -1,0 +1,153 @@
+import crypto from "crypto";
+import { query } from "../../core/db.js";
+import { HttpError, notFound } from "../../core/http.js";
+import { encrypt, decrypt } from "../../core/secrets.js";
+import * as telegram from "./telegram-api.js";
+import { text, LANGUAGES } from "./text.js";
+import { logActivity } from "../../core/activity/activity.js";
+import { pollingMode, startPolling, stopPolling } from "./polling.js";
+import { businessOf } from "./business.js";
+
+/**
+ * Channels an agent answers on besides its website widget. A channel holds the credentials for
+ * one messaging account and nothing else: the agent, its knowledge and its integrations are the
+ * same whichever channel a customer writes from.
+ */
+
+const PUBLIC_API_URL = () => (process.env.PUBLIC_API_URL || `http://localhost:${process.env.PORT || 3100}`).replace(/\/$/, "");
+export const webhookUrl = (channelId) => `${PUBLIC_API_URL()}/channels/telegram/${channelId}`;
+
+/** What the dashboard may see: everything except the credentials. */
+export const safe = (row) => ({
+  id: row.id,
+  agent_id: row.agent_id,
+  type: row.type,
+  status: row.status,
+  disabled_reason: row.disabled_reason,
+  account_name: row.config.account_name || null,
+  // What the greeting offers as buttons: the agent's suggested questions, and "Talk to a person".
+  settings: { suggestions: row.config.suggestions !== false, person_button: row.config.person_button !== false },
+  business: businessOf(row),
+  created_at: row.created_at,
+});
+
+export async function ownChannel(workspaceId, agentId, channelId) {
+  if (!/^[0-9a-f-]{36}$/i.test(channelId || "")) throw notFound("Channel not found");
+  const { rows } = await query("SELECT * FROM agent_channels WHERE id = $1 AND workspace_id = $2 AND agent_id = $3", [channelId, workspaceId, agentId]);
+  if (!rows[0]) throw notFound("Channel not found");
+  return rows[0];
+}
+
+/** Telegram's refusal, in words an owner can act on. */
+export function refusal(e) {
+  if (e.retryAfter) {
+    const minutes = Math.ceil(e.retryAfter / 60);
+    return new HttpError(429, `Telegram limits how often a bot's profile can change. Try again in ${minutes === 1 ? "a minute" : `${minutes} minutes`}.`);
+  }
+  if (e.unauthorized) return new HttpError(400, "Telegram no longer accepts this bot's token. Connect the bot again.");
+  return new HttpError(400, `Telegram refused the change: ${e.message}`);
+}
+
+export async function listChannels(workspaceId, agentId) {
+  const { rows } = await query("SELECT * FROM agent_channels WHERE workspace_id = $1 AND agent_id = $2 ORDER BY created_at", [workspaceId, agentId]);
+  return rows.map(safe);
+}
+
+/**
+ * Connects a Telegram bot to an agent. The token is checked against Telegram before anything is
+ * stored, so a typo is a clear error rather than a channel that silently never answers.
+ */
+export async function connectTelegram(workspace, agentId, user, botToken) {
+  const { rows: agents } = await query("SELECT id FROM agents WHERE id = $1 AND workspace_id = $2", [agentId, workspace.id]);
+  if (!agents[0]) throw notFound("Agent not found");
+
+  let me;
+  try {
+    me = await telegram.getMe(botToken);
+  } catch (e) {
+    throw new HttpError(400, e.unauthorized ? "Telegram didn't accept that token. Copy it again from BotFather." : `Telegram couldn't be reached: ${e.message}`);
+  }
+
+  const config = {
+    account_id: String(me.id),
+    account_name: me.username ? `@${me.username}` : me.first_name,
+    secret: crypto.randomBytes(24).toString("base64url"),
+    token: encrypt(botToken),
+  };
+  // Reconnecting the same bot to this workspace (a new token, say) takes the new credentials and
+  // keeps its settings and its Telegram Business link. A bot held by another workspace is excluded
+  // by the WHERE, which returns no row: the one case that is a conflict.
+  const { rows } = await query(
+    `INSERT INTO agent_channels (workspace_id, agent_id, type, config) VALUES ($1, $2, 'telegram', $3)
+     ON CONFLICT (type, (config->>'account_id')) DO UPDATE
+       SET agent_id = EXCLUDED.agent_id, config = agent_channels.config || EXCLUDED.config, status = 'active', disabled_reason = NULL
+       WHERE agent_channels.workspace_id = EXCLUDED.workspace_id
+     RETURNING *`,
+    [workspace.id, agentId, config]
+  );
+  const row = rows[0];
+  if (!row) throw new HttpError(409, "That bot already answers for another workspace. Disconnect it there, or create a second bot in BotFather.");
+
+  if (pollingMode()) {
+    // This machine has no address Telegram can call, so the bot asks Telegram for its updates
+    // instead. Any webhook left from another machine has to go, or Telegram keeps sending there.
+    await telegram.deleteWebhook(botToken).catch(() => {});
+    startPolling(row.id);
+  } else {
+    try {
+      await telegram.setWebhook(botToken, webhookUrl(row.id), config.secret);
+    } catch (e) {
+      await query("DELETE FROM agent_channels WHERE id = $1", [row.id]);
+      throw new HttpError(400, `Telegram refused the webhook address ${webhookUrl(row.id)}: ${e.message}`);
+    }
+  }
+  // The menu next to the message box, in each language the bot speaks (Telegram picks by the app's language).
+  const menu = (language) => [
+    { command: "start", description: text(language, "commandStart") },
+    { command: "operator", description: text(language, "person") },
+  ];
+  await Promise.all([telegram.setMyCommands(botToken, menu("en")), ...LANGUAGES.map((language) => telegram.setMyCommands(botToken, menu(language), language))]).catch((e) =>
+    console.error(`Couldn't set the menu of ${config.account_name}:`, e.message)
+  );
+  await logActivity(workspace.id, user?.id || null, "{actor} connected a Telegram channel", { actor: user?.name || "Someone" }, config.account_name);
+  return safe(row);
+}
+
+export async function disconnectChannel(workspaceId, agentId, channelId, user) {
+  const { rows } = await query("SELECT * FROM agent_channels WHERE id = $1 AND workspace_id = $2 AND agent_id = $3", [channelId, workspaceId, agentId]);
+  const channel = rows[0];
+  if (!channel) throw notFound("Channel not found");
+  stopPolling(channelId);
+  // Telegram may refuse (a revoked token); the channel still goes, or it would answer nowhere.
+  await telegram.deleteWebhook(decrypt(channel.config.token)).catch(() => {});
+  await query("DELETE FROM agent_channels WHERE id = $1", [channelId]);
+  await logActivity(workspaceId, user?.id || null, "{actor} disconnected a Telegram channel", { actor: user?.name || "Someone" }, channel.config.account_name);
+  return { ok: true };
+}
+
+/** An active channel with its credentials, for the webhook and for sending. */
+export async function loadChannel(channelId) {
+  if (!/^[0-9a-f-]{36}$/i.test(channelId || "")) return null;
+  const { rows } = await query("SELECT * FROM agent_channels WHERE id = $1 AND status = 'active'", [channelId]);
+  const channel = rows[0];
+  return channel ? { ...channel, token: decrypt(channel.config.token), secret: channel.config.secret } : null;
+}
+
+/** The channel a conversation arrived on, if it is still connected. */
+export const channelFor = (conv) => (conv.channel_id ? loadChannel(conv.channel_id) : null);
+
+export async function disableChannel(channelId, reason) {
+  await query("UPDATE agent_channels SET status = 'disabled', disabled_reason = $2 WHERE id = $1", [channelId, reason]);
+}
+
+/**
+ * True the first time an update is seen. Telegram redelivers an update until it is acknowledged,
+ * and a redelivery must not answer the customer twice.
+ */
+export async function firstTime(channelId, updateId) {
+  const { rowCount } = await query("INSERT INTO channel_updates (channel_id, update_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [channelId, String(updateId)]);
+  return rowCount > 0;
+}
+
+/** Keeps the seen-updates table small; Telegram stops retrying long before this. */
+export const forgetOldUpdates = () => query("DELETE FROM channel_updates WHERE received_at < now() - interval '2 days'");

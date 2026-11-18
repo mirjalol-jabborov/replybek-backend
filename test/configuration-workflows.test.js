@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 import { owner, drainJobs, query } from "./helpers/setup.js";
-import { fakeAI } from "../src/ai.js";
-import { savedQuestions } from "../src/services/suggestions.service.js";
-import { structuredDocumentation, readDocumentationSite } from "../src/lib/documentation-site.js";
-import { postmanDocumentation, selectedDocumentation } from "../src/lib/documentation.js";
-import { runOne } from "../src/services/jobs.service.js";
-import { toolInterface } from "../src/lib/tool-catalog.js";
+import { fakeAI } from "../src/agent/answers/ai.js";
+import { savedQuestions } from "../src/agent/answers/suggestions.js";
+import { structuredDocumentation, readDocumentationSite } from "../src/agent/integrations/documentation-site.js";
+import { postmanDocumentation, selectedDocumentation } from "../src/agent/integrations/documentation.js";
+import { runOne } from "../src/core/jobs.js";
+import { toolInterface } from "../src/agent/integrations/tool-catalog.js";
 
 const collection = count => ({info:{name:"Records API",description:"API base URL https://api.example.com\nPublic API; no authentication required."},item:Array.from({length:count},(_,i)=>({name:`Record ${i}`,request:{method:"GET",url:`https://api.example.com/records/${i}`,description:`Read record ${i}. Inputs and response are documented here.`,body:{mode:"raw",raw:"{}"}}}))});
 async function setup(){const o=await owner();const base=`/w/${o.ws.id}`;const agent=(await o.b.call("POST",base+"/agents",{name:"Support"})).body;return {...o,base,agent};}
