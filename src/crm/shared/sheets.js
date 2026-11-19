@@ -47,6 +47,7 @@ export const HEADERS = {
   onSale: ["On sale", "В продаже", "Sotuvda"],
   stock: ["Stock", "Остаток", "Qoldiq"],
   reserved: ["Held for orders", "В резерве", "Buyurtmalarga ajratilgan"],
+  description: ["Description", "Описание", "Tavsif"],
   start: ["Start", "Начало", "Boshlanishi"],
   minutes: ["Minutes", "Минуты", "Daqiqa"],
   customer: ["Customer", "Клиент", "Mijoz"],

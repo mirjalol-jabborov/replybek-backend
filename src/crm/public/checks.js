@@ -4,6 +4,7 @@ import { z } from "zod";
 import { uuid, day, moment, hm, hmEnd } from "../shapes.js";
 import { normalPhone } from "../shared/phone.js";
 import { LEFT_CAP, tooMany } from "../shared/store.js";
+import { telegramHandle } from "../shared/customer.js";
 
 // Control characters and the marks that turn text around. Outside a note, any run of spaces and
 // line breaks is one space.
@@ -23,6 +24,17 @@ const phone = z
   .transform((v) => normalPhone(v))
   .refine((v) => v !== null, { message: "Write the number like +998 90 123 45 67.", params: { code: "bad_phone" } });
 const note = words(500, { lines: true }).default("");
+// The customer's own Telegram username, optional: "@name", "name" or "t.me/name", kept bare
+// ("name"). A new customer is saved with it, so the business's notices reach them on Telegram
+// once they have written to its bot. "" is the same as leaving it out.
+const TELEGRAM = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
+const telegram = z
+  .string()
+  .max(80)
+  .transform((v) => telegramHandle(v))
+  .refine((v) => v === "" || TELEGRAM.test(v), { message: "Write the Telegram username like @name.", params: { code: "bad_telegram" } })
+  .transform((v) => v || undefined)
+  .optional();
 // The honeypot: a field the page hides from people. Anything in it means a script filled the form.
 const url = z.string().max(500).optional();
 
@@ -41,7 +53,7 @@ const fields = z
   .refine((v) => Object.keys(v).length <= 50, "Too many fields.")
   .optional();
 export const bookingBody = z
-  .object({ serviceIds: services, staffId: uuid.nullable().optional(), start: moment, name, phone, note, fields, url })
+  .object({ serviceIds: services, staffId: uuid.nullable().optional(), start: moment, name, phone, telegram, note, fields, url })
   .strict();
 
 // One order asks for at most what the page may show is left of a thing (the Store's tooMany, which
@@ -67,6 +79,7 @@ export const orderBody = z
       .refine((lines) => !tooMany(lines).length, { message: `At most ${LEFT_CAP} of one thing.`, params: { code: "too_many", max: LEFT_CAP } }),
     name,
     phone,
+    telegram,
     delivery: z
       .object({
         method: z.string().min(1).max(40),

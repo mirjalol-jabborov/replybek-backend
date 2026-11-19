@@ -487,7 +487,7 @@ test("catalogue: what is on sale, whether each variant is there and a capped cou
   assert.deepEqual(keys(c), ["products"]);
   assert.deepEqual(c.products.map((p) => p.name).sort(), ["Shampoo", "Shirt", "Towel"]);
   for (const p of c.products) {
-    assert.deepEqual(keys(p), ["category", "id", "image", "name", "options", "unit", "variants"]);
+    assert.deepEqual(keys(p), ["category", "description", "id", "image", "images", "name", "options", "unit", "variants"]);
     for (const v of p.variants) assert.deepEqual(keys(v), ["available", "id", "left", "price", "values"]);
   }
   const find = (id) => c.products.find((p) => p.id === id);
@@ -663,6 +663,64 @@ test("pictures: an uploaded one is served to the page while a product on sale sh
   ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { onSale: false }));
   assert.equal((await x.pub("GET", `/images/${name}`)).status, 404);
   assert.equal((await x.pub("GET", "/images/..%2F..%2Fetc")).status, 404);
+});
+
+test("catalogue: the description as typed and every photo, each served only while the product is on sale", async () => {
+  const x = await business();
+  const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+  const upload = async () => {
+    const form = new FormData();
+    form.append("file", new Blob([png], { type: "image/png" }), "a.png");
+    return ok(await x.b.call("POST", `${x.crm}/products/images`, form), 201).image;
+  };
+  const [a, b] = [await upload(), await upload()];
+  const p = await product(x, { images: [a, b], description: "Soft shampoo.\n\nFor every day." });
+  const plain = await product(x, { name: "Plain", image: "/products/static.jpg" });
+  const list = async () => ok(await x.pub("GET", "/products")).products;
+  const seen = (await list()).find((v) => v.id === p.id);
+  const name = (path) => path.split("/").pop();
+  assert.equal(seen.description, "Soft shampoo.\n\nFor every day.");
+  assert.deepEqual(seen.images, [a, b].map((path) => `/public/crm/${x.slug}/images/${name(path)}`));
+  assert.equal(seen.image, seen.images[0]);
+  assert.deepEqual((await list()).find((v) => v.id === plain.id).images, ["/products/static.jpg"], "a product with its one old picture");
+  // The second photo is served like the main one, and stops with it.
+  assert.equal((await x.pub("GET", `/images/${name(b)}`)).status, 200);
+  ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { onSale: false }));
+  assert.equal((await x.pub("GET", `/images/${name(b)}`)).status, 404);
+  assert.equal((await x.pub("GET", `/images/${name(a)}`)).status, 404);
+  ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { onSale: true }));
+  assert.equal((await x.pub("GET", `/images/${name(b)}`)).status, 200);
+  // Taken out of the gallery: no longer served (and removed).
+  ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { images: [a] }));
+  assert.equal((await x.pub("GET", `/images/${name(b)}`)).status, 404);
+  assert.deepEqual((await list()).find((v) => v.id === p.id).images.length, 1);
+});
+
+test("orders and bookings: an optional Telegram username, saved on a new customer, never on a known one", async () => {
+  const x = await business();
+  const p = await product(x, { opening: 9 });
+  const placed = (over, status = 201) => x.pub("POST", "/orders", order(p, over), browser()).then((r) => ok(r, status));
+  const byPhone = async (phone) => (await x.snap("customers")).customers.find((c) => c.phone === phone);
+  await placed({ phone: "+998 93 100 00 01", telegram: "@Malika_Flowers" });
+  assert.equal((await byPhone("+998931000001")).telegram, "Malika_Flowers", "kept bare, as the team's handles are");
+  await placed({ phone: "+998 93 100 00 02", telegram: "https://t.me/aziz_k" });
+  assert.equal((await byPhone("+998931000002")).telegram, "aziz_k");
+  await placed({ phone: "+998 93 100 00 03", telegram: "" });
+  assert.equal((await byPhone("+998931000003")).telegram, "");
+  // A known customer keeps what the team stored: a handle typed on a page never reroutes their notices.
+  await placed({ phone: "+998 93 100 00 01", telegram: "@someone_else" });
+  assert.equal((await byPhone("+998931000001")).telegram, "Malika_Flowers");
+  // Not a username: 400 bad_telegram, nothing saved.
+  for (const bad of ["@ab", "@1abc_def", "@has space", "@name!", "@" + "a".repeat(33), "https://evil.example/x"]) {
+    const r = await x.pub("POST", "/orders", order(p, { phone: "+998 93 100 00 09", telegram: bad }), browser());
+    assert.equal(r.status, 400, bad);
+    assert.ok(JSON.stringify(r.body).includes("bad_telegram"), bad);
+  }
+  assert.equal(await byPhone("+998931000009"), undefined);
+  assert.equal((await x.pub("POST", "/orders", order(p, { telegram: 5 }), browser())).status, 400);
+  // The booking page takes it too.
+  ok(await x.pub("POST", "/bookings", visit(x, { phone: "+998 90 100 00 05", telegram: "@dilnoza_b" }), browser()), 201);
+  assert.equal((await byPhone("+998901000005")).telegram, "dilnoza_b");
 });
 
 test("pictures have their own read limit: a page full of them never uses up the page's", async () => {

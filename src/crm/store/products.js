@@ -11,7 +11,7 @@ import { uuid, listId as id, money, text, someKey } from "../shapes.js";
 import { hasId } from "../shared/index.js";
 import { storeChanges } from "./rows.js";
 import { lockStock, postMoves } from "./stock.js";
-import { checkImage, dropUpload } from "./images.js";
+import { checkImage, dropUploads } from "./images.js";
 
 /** The note on a new variant's first stock, a receipt in the ledger. */
 export const OPENING = { en: "Opening stock", ru: "Начальный остаток", uz: "Boshlangʻich qoldiq" };
@@ -21,6 +21,22 @@ export const OPENING = { en: "Opening stock", ru: "Начальный остат
 const whole = z.number().int().min(0).max(1_000_000);
 // A picture is a path on the same site: a static one ("/products/x.jpg") or an uploaded one (see uploadImage).
 const image = z.string().trim().max(300).regex(/^(\/(?!\/)[A-Za-z0-9_\-./%]*)?$/, "A picture is a path that starts with /.");
+/** How many photos a product shows, the main one included; and how long its description may be. */
+export const MAX_IMAGES = 8;
+export const MAX_DESCRIPTION = 2000;
+// Control characters and the marks that turn text around; line breaks and tabs stay.
+const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/g;
+// Plain text as typed: line breaks kept (as \n), at most one empty line in a row, trimmed. Shown as text, never as HTML.
+const description = z
+  .string()
+  .max(MAX_DESCRIPTION * 2)
+  .transform((v) => v.replace(/\r\n?/g, "\n").replace(CONTROL, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim())
+  .pipe(z.string().max(MAX_DESCRIPTION, `A description can be up to ${MAX_DESCRIPTION} characters.`));
+// Every photo of the product in order, the first is the main one (`image`). Each one once.
+const images = z
+  .array(image.refine(Boolean, "A photo is a path that starts with /."))
+  .max(MAX_IMAGES, `A product can have up to ${MAX_IMAGES} photos.`)
+  .refine((list) => new Set(list).size === list.length, "The same photo is there twice.");
 const option = z.object({ id, name: text(60), values: z.array(text(80)).min(1, "An option needs at least one value.").max(50) }).strict();
 const variant = z
   .object({
@@ -38,6 +54,8 @@ const shape = {
   category: z.union([id, z.literal("")]),
   unit: id,
   image,
+  images,
+  description,
   onSale: z.boolean(),
   options: z.array(option).max(5),
   variants: z.array(variant).min(1, "A product needs at least one variant.").max(200),
@@ -94,7 +112,25 @@ async function checkSkus(c, cfg, variants, productId) {
   if (rows[0]) throw conflict(`SKU ${rows[0].sku} is already used.`, "sku_taken", { sku: rows[0].sku });
 }
 
-const PRODUCT = { columns: { onSale: "on_sale" }, json: ["options"], touch: true };
+const PRODUCT = { columns: { onSale: "on_sale" }, json: ["options", "gallery"], touch: true };
+
+/**
+ * The photos a write leaves the product with, as columns: { image, gallery }, or null when it
+ * sends neither `images` nor `image`. `images` is the whole list (the first is the main one).
+ * `image` alone, as before galleries, changes only the main photo; the others stay (an empty one
+ * makes the next photo the main one). `stored`: { image, gallery } as the product has them.
+ */
+function photosOf(v, stored) {
+  let next;
+  if (v.images !== undefined) next = v.images;
+  else if (v.image !== undefined) {
+    const rest = (stored?.gallery || []).filter((p) => p !== v.image);
+    next = v.image ? [v.image, ...rest] : rest;
+  } else return null;
+  return { image: next[0] || "", gallery: next.slice(1, MAX_IMAGES) };
+}
+/** A product's photos as one list, the main one first. */
+const photoList = (p) => [p?.image, ...(p?.gallery || [])].filter(Boolean);
 /** Each variant with its place in the product's list: [{ ...variant, position }]. */
 const placed = (variants) => variants.map((x, i) => ({ ...x, position: i }));
 
@@ -149,10 +185,11 @@ export function createProduct(workspace, user, input) {
     const variants = v.variants?.map(({ id: _, ...x }) => x) || [{ sku, price, cost, lowAt, opening }];
     checkVariants(options, variants);
     await checkSkus(c, cfg, variants);
-    if (v.image) await checkImage(c, cfg.workspaceId, v.image);
+    const photos = photosOf(v) || { image: "", gallery: [] };
+    for (const path of photoList(photos)) await checkImage(c, cfg.workspaceId, path);
     const { rows } = await c.query(
-      "INSERT INTO crm_products (workspace_id, name, category, unit, image, on_sale, options) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
-      [cfg.workspaceId, v.name, v.category || "", v.unit, v.image || "", v.onSale ?? true, JSON.stringify(options)]
+      "INSERT INTO crm_products (workspace_id, name, category, unit, image, gallery, description, on_sale, options) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+      [cfg.workspaceId, v.name, v.category || "", v.unit, photos.image, JSON.stringify(photos.gallery), v.description || "", v.onSale ?? true, JSON.stringify(options)]
     );
     const productId = rows[0].id;
     return answer(q, cfg, productId, await addVariants(c, cfg, user, productId, placed(variants)), user?.branchOnly);
@@ -167,22 +204,27 @@ export function createProduct(workspace, user, input) {
  */
 export async function updateProduct(workspace, user, productId, input) {
   const { old, ...out } = await write(workspace.id, async (c, cfg, q) => {
-    const stored = isUuid(productId) && (await c.query("SELECT id, unit, category, options, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
+    const stored = isUuid(productId) && (await c.query("SELECT id, unit, category, options, image, gallery FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
     if (!stored) throw notFound("Product not found");
-    const { sku, price, cost, lowAt, variants, ...v } = input;
+    const { sku, price, cost, lowAt, variants, images: _, ...v } = input;
     checkLists(cfg, v, stored);
-    if (v.image && v.image !== stored.image) await checkImage(c, cfg.workspaceId, v.image);
+    const photos = photosOf(input, stored);
+    const had = photoList(stored);
+    if (photos) {
+      for (const path of photoList(photos)) if (!had.includes(path)) await checkImage(c, cfg.workspaceId, path);
+      Object.assign(v, photos);
+    }
     const options = v.options ?? stored.options;
-    const { rows: had } = await c.query("SELECT id, option_values AS values, sku FROM crm_variants WHERE workspace_id = $1 AND product_id = $2 AND NOT archived ORDER BY position, created_at, id FOR UPDATE", [cfg.workspaceId, productId]);
+    const { rows: kept } = await c.query("SELECT id, option_values AS values, sku FROM crm_variants WHERE workspace_id = $1 AND product_id = $2 AND NOT archived ORDER BY position, created_at, id FOR UPDATE", [cfg.workspaceId, productId]);
     let moveIds = [];
 
     if (variants) {
-      const unknown = variants.find((x) => x.id && !had.some((h) => h.id === x.id));
+      const unknown = variants.find((x) => x.id && !kept.some((h) => h.id === x.id));
       if (unknown) throw bad("One of the variants is not this product's.", "bad_variant", { variantId: unknown.id });
-      const merged = variants.map((x) => ({ ...(had.find((h) => h.id === x.id) || {}), ...x }));
+      const merged = variants.map((x) => ({ ...(kept.find((h) => h.id === x.id) || {}), ...x }));
       checkVariants(options, merged);
       await checkSkus(c, cfg, merged, productId);
-      const gone = had.filter((h) => !variants.some((x) => x.id === h.id)).map((h) => h.id);
+      const gone = kept.filter((h) => !variants.some((x) => x.id === h.id)).map((h) => h.id);
       if (gone.length) {
         // Stock at any branch keeps the variant.
         const stock = await lockStock(c, cfg, gone, null);
@@ -204,13 +246,13 @@ export async function updateProduct(workspace, user, productId, input) {
       moveIds = await addVariants(c, cfg, user, productId, list.filter((x) => !x.id));
     } else {
       // The options changed around variants that stayed as they were: they must still fit.
-      if (v.options) checkVariants(options, had);
+      if (v.options) checkVariants(options, kept);
       if ([sku, price, cost, lowAt].some((x) => x !== undefined)) {
-        if (had.length !== 1) throw bad("This product has options. Change the price, SKU and low-stock level on its variants.", "variant_required", { productId });
+        if (kept.length !== 1) throw bad("This product has options. Change the price, SKU and low-stock level on its variants.", "variant_required", { productId });
         if (sku !== undefined) await checkSkus(c, cfg, [{ sku }], productId);
         await c.query("UPDATE crm_variants SET sku = COALESCE($3, sku), price = COALESCE($4, price), cost = COALESCE($5, cost), low_at = COALESCE($6, low_at) WHERE workspace_id = $1 AND id = $2", [
           cfg.workspaceId,
-          had[0].id,
+          kept[0].id,
           sku ?? null,
           price ?? null,
           cost ?? null,
@@ -220,11 +262,11 @@ export async function updateProduct(workspace, user, productId, input) {
     }
 
     await updateRow(c, cfg, "crm_products", PRODUCT, "id", productId, v);
-    const old = v.image !== undefined && v.image !== stored.image ? stored.image : "";
+    const old = photos ? had.filter((path) => !photoList(photos).includes(path)) : [];
     return { ...(await answer(q, cfg, productId, moveIds, user?.branchOnly)), old };
   });
-  // A picture uploaded for this product and no longer shown by any goes too (after the commit: files are not part of it).
-  await dropUpload(workspace.id, old);
+  // Pictures uploaded for this product and no longer shown by any go too (after the commit: files are not part of it).
+  await dropUploads(workspace.id, old);
   return out;
 }
 
@@ -234,7 +276,7 @@ export async function updateProduct(workspace, user, productId, input) {
  */
 export async function deleteProduct(workspace, productId) {
   const out = await write(workspace.id, async (c, cfg) => {
-    const stored = isUuid(productId) && (await c.query("SELECT id, name, image FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
+    const stored = isUuid(productId) && (await c.query("SELECT id, name, image, gallery FROM crm_products WHERE workspace_id = $1 AND id = $2 FOR UPDATE", [cfg.workspaceId, productId])).rows[0];
     if (!stored) throw notFound("Product not found");
     const { rows } = await c.query(
       `SELECT (SELECT count(*)::int FROM crm_variants v JOIN crm_stock_moves m ON m.workspace_id = v.workspace_id AND m.variant_id = v.id WHERE v.workspace_id = $1 AND v.product_id = $2) AS movements,
@@ -247,9 +289,9 @@ export async function deleteProduct(workspace, productId) {
       throw conflict(`${stored.name} has stock history or orders, so it can't be deleted. Take it off sale instead.`, "product_in_use", uses);
     }
     await c.query("DELETE FROM crm_products WHERE workspace_id = $1 AND id = $2", [cfg.workspaceId, productId]);
-    return { changes: { del: { products: [productId] } }, image: stored.image };
+    return { changes: { del: { products: [productId] } }, old: photoList(stored) };
   });
-  const { image: old, ...answerBody } = out;
-  await dropUpload(workspace.id, old);
+  const { old, ...answerBody } = out;
+  await dropUploads(workspace.id, old);
   return answerBody;
 }

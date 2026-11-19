@@ -29,6 +29,8 @@ function productRow(r) {
     cost: first.cost,
     unit: r.unit,
     image: r.image,
+    images: [r.image, ...(r.gallery || [])].filter(Boolean),
+    description: r.description,
     onSale: r.onSale,
     stock: sum("stock"),
     reserved: sum("reserved"),
@@ -76,7 +78,7 @@ export async function listProducts(q, cfg, ids, branchId = null) {
         WHERE v.workspace_id = $1 ${only("v.product_id")}
         GROUP BY v.product_id
      )
-     SELECT p.id, p.name, p.category, p.unit, p.image, p.on_sale AS "onSale", p.options, ${wall("p.created_at", "$2")} AS "createdAt", v.variants,
+     SELECT p.id, p.name, p.category, p.unit, p.image, p.gallery, p.description, p.on_sale AS "onSale", p.options, ${wall("p.created_at", "$2")} AS "createdAt", v.variants,
             ${branchId ? "false" : MULTI} AS multi
        FROM crm_products p LEFT JOIN v ON v.product_id = p.id
       WHERE p.workspace_id = $1 ${only("p.id")}
