@@ -27,7 +27,7 @@ const imageKind = (req, res, next) => next(KINDS.includes(req.params.kind) ? und
 router.post("/public/images/:kind", requireRole("admin"), imageKind, acceptImage, wrap(async (req, res) => res.status(201).json(await uploadPageImage(req.workspace, req.params.kind, req.file))));
 router.delete("/public/images/:kind", requireRole("admin"), imageKind, wrap(async (req, res) => res.json(await removePageImage(req.workspace, req.params.kind))));
 // GET /w/:wid/crm/public/images/<name>: the current cover or logo for the tab's preview, page on or off.
-router.get("/public/images/:name", wrap((req, res) => sendPageImage(res, req.workspace, req.params.name, { forPage: false })));
+router.get("/public/images/:name", wrap((req, res) => sendPageImage(res, req.workspace, req.params.name, { forPage: false, w: req.query.w })));
 
 /**
  * Before settings are saved: a page's new address must not be another workspace's (409 slug_taken).

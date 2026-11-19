@@ -25,11 +25,11 @@ function pictureOf(ws, slug, image) {
   return image && image.startsWith("/") && !image.startsWith("/w/") ? image : "";
 }
 
-/** GET images/:name: a picture that a product on sale shows. */
-export async function sendPicture(res, ws, name) {
+/** GET images/:name[?w=]: a picture that a product on sale shows, or a smaller copy of it. Anyone's, so a CDN may keep it. */
+export async function sendPicture(res, ws, name, w) {
   await read(ws.id, async (q, cfg) => void openPart(cfg, "shop"));
   if (!(await shownToCustomers(ws.id, name))) throw pageNotFound();
-  await sendImage(res, ws, name);
+  await sendImage(res, ws, name, { w, shared: true });
 }
 
 /* ───── The catalogue ───── */

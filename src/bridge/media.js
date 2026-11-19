@@ -19,7 +19,8 @@ export function imageUrl(access, image) {
   if (typeof image !== "string" || !image) return null;
   if (/^https?:\/\//i.test(image)) return image;
   const name = uploadedName(access.workspace.id, image);
-  return name && access.agentKey ? `${PUBLIC_API_URL()}/widget/${access.agentKey}/crm-media/${name}` : null;
+  // 480 px wide: what a chat's product card shows (core/thumbs.js), not the full upload.
+  return name && access.agentKey ? `${PUBLIC_API_URL()}/widget/${access.agentKey}/crm-media/${name}?w=480` : null;
 }
 
 /** Mounted in the widget's router, before its origin check: a picture is fetched by an <img> or by Telegram. */
@@ -27,5 +28,7 @@ export const mediaRouter = Router({ mergeParams: true });
 mediaRouter.get("/crm-media/:name", wrap(async (req, res) => {
   const agent = (await query("SELECT workspace_id FROM agents WHERE public_key = $1 AND status = 'active'", [req.params.key])).rows[0];
   if (!agent || !(await shownToCustomers(agent.workspace_id, req.params.name))) throw notFound("Picture not found");
-  await sendImage(res, { id: agent.workspace_id }, req.params.name);
+  // A copy is WebP for a browser and JPEG for anyone that doesn't say it takes WebP (Telegram's
+  // fetcher). As the answer depends on Accept, it stays private: no CDN mixes the two up.
+  await sendImage(res, { id: agent.workspace_id }, req.params.name, { w: req.query.w, jpegUnlessWebp: req.get("accept") || "" });
 }));
