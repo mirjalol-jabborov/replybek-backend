@@ -8,7 +8,7 @@
 import { query } from "../core/db.js";
 import { writeRefusal } from "../core/billing/product-access.js";
 import { read } from "../crm/db.js";
-import { aiLink, agentsOf, levelsOf } from "../crm/core/ai-link.js";
+import { aiLink, agentsOf, levelsOf, cartOf } from "../crm/core/ai-link.js";
 
 /** The CRM's name for the channel a conversation came in on. */
 const CHANNELS = { widget: "widget", telegram: "telegram", telegram_business: "telegram" };
@@ -51,5 +51,18 @@ export async function crmAccess(agent, conversationId = null) {
     levels,
     modules: { booking: levels.booking !== "off", store: levels.store !== "off" },
     act: { booking: levels.booking === "act" && writable, store: levels.store === "act" && writable },
+    // Where a card's "Add to cart" puts things (settings.ai.cart): the chat's cart or the website's.
+    cart: cartOf(link.ai.cart),
   };
+}
+
+/**
+ * The website cart a product card's "Add to cart" fills, for the widget's settings: { url } when
+ * the CRM says so for this agent (Orders at "act", the website chat on), else null.
+ */
+export async function siteCartFor(agent) {
+  const access = await crmAccess(agent).catch(() => null);
+  if (!access?.act.store || access.cart.mode !== "site") return null;
+  const link = await linkOf(access.workspace);
+  return link?.ai.channels.widget ? { url: access.cart.url } : null;
 }

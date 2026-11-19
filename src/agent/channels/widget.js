@@ -9,8 +9,9 @@ import { addMessage } from "../inbox/conversations.js";
 import { filesForAI } from "../inbox/attachments.js";
 import { savedQuestions } from "../answers/suggestions.js";
 import { signal } from "../../core/events.js";
-import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say, noteTyping } from "../inbox/chat.js";
+import { visibleMessages, forAI, receiveMessage, decide as decideOnChat, handToTeam, say, noteTyping, tapCrmButton } from "../inbox/chat.js";
 import { widgetTexts } from "../answers/translations.js";
+import { siteCartFor } from "../../bridge/access.js";
 
 /**
  * The website widget's side of a conversation: the key that identifies the agent, the token that
@@ -38,7 +39,9 @@ export async function widgetAgent(publicKey, origin) {
 
 /** The widget's settings for a visitor in `language`, with the greeting and questions translated when needed. */
 export async function localizedConfig(agent, language = "en") {
-  return { ...widgetConfig(agent, language), ...(await widgetTexts(agent, language)) };
+  // The website's own cart for the CRM's "Add to cart", when the CRM is set so (read here, never from the page).
+  const cart = await siteCartFor(agent);
+  return { ...widgetConfig(agent, language), ...(await widgetTexts(agent, language)), ...(cart ? { cart } : {}) };
 }
 
 export const widgetConfig = (agent, language = "en") => ({
@@ -173,13 +176,21 @@ export async function afterConnect(conversationId, label, name) {
   }
 }
 
-/** The customer pressed Confirm or Cancel on a change the AI proposed. */
-/** The customer tapped the button under one of a reply's cards (say, "Book" under a room). */
-export async function cardAction(agent, convId, token, messageId, index, inpageOrigin = null, qty = null) {
+/**
+ * The customer tapped the button under one of a reply's cards (say, "Book" under a room). The
+ * built-in CRM's "Add to cart" is one step (no Confirm); `site` ({ placed: "site", refused? }) says
+ * the page's own cart took it, or refused it, before the widget asked here.
+ */
+export async function cardAction(agent, convId, token, messageId, index, inpageOrigin = null, qty = null, site = {}) {
   const conv = await ownConversation(agent, convId, token);
   if (!/^[0-9a-f-]{36}$/i.test(messageId || "") || !Number.isInteger(index) || index < 0) throw notFound("This button is no longer available.");
   const msg = (await query("SELECT card FROM messages WHERE id = $1 AND conversation_id = $2 AND role = 'ai'", [messageId, conv.id])).rows[0];
   if (!msg?.card) throw notFound("This button is no longer available.");
+  if (msg.card.action?.crm) {
+    const seen = await visibleMessages(conv.id);
+    await tapCrmButton(agent, conv, { id: messageId, card: msg.card }, index, { qty, placed: site.placed || null, refused: site.refused || null });
+    return { ...statusFor(conv), messages: (await visibleMessages(conv.id)).slice(seen.length) };
+  }
   const tapped = msg.card.taps?.[index];
   if (tapped && tapped.status !== "failed") throw new HttpError(409, "This request was already handled.");
   const actionId = await queueCardAction(agent.id, conv.id, msg.card, index, inpageOrigin, qty);

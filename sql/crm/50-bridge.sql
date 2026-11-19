@@ -57,3 +57,19 @@ CREATE INDEX IF NOT EXISTS pending_actions_crm_waiting ON pending_actions (conve
 
 -- Whether an agent's website chat is in use (CRM settings, the AI agent section: its channels).
 CREATE INDEX IF NOT EXISTS conversations_agent_channel ON conversations (agent_id, channel);
+
+-- ───── The cart in a chat ─────
+-- What the customer put aside in this conversation before ordering: a card's "Add to cart" button
+-- or the AI agent (crm_add_to_cart). Nothing is held or ordered by it; crm_place_order without
+-- lines orders what is here, and the order takes its things out. One row per variant, at most 10
+-- of it (the Store's cap on one customer order). Products are the CRM's, so a row whose product
+-- went off sale or was deleted simply reads as unavailable.
+CREATE TABLE IF NOT EXISTS crm_bridge_cart (
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  product_id UUID NOT NULL,
+  variant_id UUID NOT NULL,
+  qty INT NOT NULL CHECK (qty BETWEEN 1 AND 10),
+  added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, conversation_id, variant_id)
+);

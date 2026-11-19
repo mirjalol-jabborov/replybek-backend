@@ -137,12 +137,16 @@ export const setMyCommands = (token, commands, languageCode) =>
 export const editMessageText = (token, chatId, messageId, text, { keyboard, business } = {}) =>
   call(token, "editMessageText", { chat_id: chatId, message_id: messageId, text, ...(business ? { business_connection_id: business } : {}), reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined });
 
+/** New buttons under a message already sent (a photo's "Add to cart" turning into − N +). */
+export const editMessageReplyMarkup = (token, chatId, messageId, keyboard, business = null) =>
+  call(token, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, ...(business ? { business_connection_id: business } : {}), reply_markup: { inline_keyboard: keyboard || [] } });
+
 /** The three dots, so a slow answer doesn't look like silence. Lasts five seconds. */
 export const sendChatAction = (token, chatId, action = "typing", business = null) =>
   call(token, "sendChatAction", { chat_id: chatId, action, ...(business ? { business_connection_id: business } : {}) });
 
 /** Stops the spinner on a tapped button. Telegram spins for 30 s until this is answered. */
-export const answerCallbackQuery = (token, id, text) => call(token, "answerCallbackQuery", { callback_query_id: id, text });
+export const answerCallbackQuery = (token, id, text) => call(token, "answerCallbackQuery", { callback_query_id: id, ...(text ? { text: text.slice(0, 200) } : {}) });
 
 /** A multipart call: anything that carries a file. */
 async function upload(token, method, form) {

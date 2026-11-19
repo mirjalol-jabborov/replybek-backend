@@ -8,7 +8,7 @@ import { read, write } from "../crm/db.js";
 import { HttpError } from "../core/http.js";
 import { mergeChanges } from "../crm/changes.js";
 import * as storeModule from "../crm/store/index.js";
-import { LEFT_CAP, capped, optionsText, qtyByVariant, requiredMissing, tooMany, totals } from "../crm/shared/store.js";
+import { LEFT_CAP, capped, requiredMissing, totals } from "../crm/shared/store.js";
 import { checkDelivery, dayProblem, deliveryTime, earliestToday, rulesOf, suggestDelivery, windowText, windowsFor } from "../crm/shared/delivery.js";
 import { forCustomer } from "../crm/shared/customer.js";
 import { kindOf, stageOf } from "../crm/shared/lists.js";
@@ -16,13 +16,10 @@ import { asCustomer, ensureCustomer, rememberItem, mineTest, capReached, capAnsw
 import { imageUrl } from "./media.js";
 import { word, dayWords, moneyText, nameIn, listName } from "./wording.js";
 import { id, day } from "./inputs.js";
+import { optionText, orderable, resolveLines } from "./lines.js";
+import { cartAsked, cartRows, takeOut, CART_ACTION } from "./cart.js";
 
 const SHOWN = 8; // products in one answer; the customer narrows the search for more
-
-/** A variant's options as words: "M, Red". */
-const optionText = (p, v) => optionsText(p.options, v.values);
-/** The variants a customer can order now: something is left of them. */
-const orderable = (p) => p.variants.filter((v) => v.left > 0);
 
 /* ───── Lookups ───── */
 
@@ -49,6 +46,8 @@ async function findProducts(access, args, lang) {
           choices: (p.options || []).map((o) => `${o.name}: ${o.values.filter((val) => variants.some((v) => v.values?.[o.id] === val)).join(", ")}`).join("; "),
           // How many are left, at most LEFT_CAP: past it, "available".
           variants: variants.map((v) => ({ variant: v.id, option: optionText(p, v), price: v.price, left: capped(v.left) })),
+          // The one option there is, for the card's "Add to cart" button; with several the agent asks.
+          ...(variants.length === 1 ? { cartVariant: variants[0].id } : {}),
         };
       }),
     };
@@ -115,23 +114,9 @@ async function draftOrder(q, cfg, args) {
   // Order fields the business requires are the team's to fill: an order can't be made without them.
   const fields = requiredMissing(cfg.data.fields.order, {});
   if (fields.length) return { error: "rules", hard: fields, soft: [] };
-  const onSale = await storeModule.productsForCustomers(q, cfg, [...new Set(args.lines.map((l) => l.product))]);
-  const lines = [];
-  for (const asked of args.lines) {
-    const p = onSale.find((x) => x.id === asked.product);
-    if (!p) return { error: (await storeModule.listProducts(q, cfg, [asked.product])).length ? "off_sale" : "not_found", product: asked.product };
-    const choices = orderable(p);
-    const v = asked.variant ? p.variants.find((x) => x.id === asked.variant) : choices.length === 1 ? choices[0] : null;
-    if (!v && !asked.variant && choices.length > 1) return { error: "variant_required", product: p.id, variants: choices.map((x) => ({ variant: x.id, option: optionText(p, x) })) };
-    if (!v) return { error: "off_sale", product: p.id };
-    lines.push({ productId: p.id, variantId: v.id, qty: asked.qty, price: v.price, name: p.name, option: optionText(p, v), left: v.left });
-  }
-  // The Store's cap on one customer order comes before the stock, so no answer tells more than LEFT_CAP.
-  const [over] = tooMany(lines);
-  if (over) return { error: "too_many", product: over.productId, variant: over.variantId, max: over.max };
-  const need = qtyByVariant(lines);
-  const short = lines.find((l) => need[l.variantId] > l.left);
-  if (short) return { error: "short", product: short.productId, variant: short.variantId, left: capped(short.left) };
+  const resolved = await resolveLines(q, cfg, args.lines);
+  if (resolved.error) return resolved;
+  const { lines } = resolved;
   const method = cfg.data.deliveryMethods.find((m) => m.id === args.delivery.method);
   if (!method) return { error: "bad_delivery" };
   const address = String(args.delivery.address || "").trim();
@@ -154,6 +139,12 @@ async function draftOrder(q, cfg, args) {
 
 const order = {
   async plan(access, link, args, lang) {
+    // No lines: what the customer put in the chat's cart.
+    if (!args.lines) {
+      const lines = cartAsked(await cartRows(access));
+      if (!lines.length) return { error: "cart_empty" };
+      args = { ...args, lines };
+    }
     return read(access.workspace.id, async (q, cfg) => {
       const d = await draftOrder(q, cfg, args);
       if (d.error) return d;
@@ -200,6 +191,8 @@ const order = {
       });
       const [row] = made.changes.set.orders;
       await rememberItem(q, access, "order", row.id);
+      // What is ordered leaves the chat's cart.
+      await takeOut(q, access, args.lines.map((l) => l.variantId));
       return { changes: mergeChanges(made.changes, customer.added && { set: { customers: [customer.added] } }), result: { order: row.id, number: row.number, total: row.totals.total } };
     });
   },
@@ -213,10 +206,12 @@ export const tools = [
     module: "store",
     kind: "read",
     description:
-      "Products on sale that can be ordered now, with price, options and what is left (left: up to 10, past that it is simply available). They are shown to the customer as cards with photos. Ids here are what crm_place_order takes.",
+      "Products on sale that can be ordered now, with price, options and what is left (left: up to 10, past that it is simply available). They are shown to the customer as cards with photos; where the agent may take orders, each card has a quantity and an \"Add to cart\" button. Ids here are what crm_add_to_cart and crm_place_order take.",
     when: "The customer asks what is sold, for a product, its price, options or whether it is in stock. Search with a word or two from the product's name; leave the search out to browse.",
     input: { type: "object", properties: { search: { type: "string", maxLength: 100 } }, additionalProperties: false },
     display: { items: "products", title: "name", image: "image", subtitle: "choices", price: "priceText", id: "id" },
+    // The cards' button, only where the agent may act in the Store (crm-tools.js adds it then).
+    cardAction: CART_ACTION,
     run: findProducts,
   },
   {
@@ -245,7 +240,7 @@ export const tools = [
     kind: "write",
     customer: true,
     description:
-      "Makes an order for the customer. Shows them a card to confirm; nothing is ordered before they press Confirm. Refusals are codes: variant_required (ask which option), too_many (one order takes at most max of a thing), short (left), off_sale, address_required, bad_delivery, time_required or window_required (how the business takes times), bad_window, rules (the day or time is not allowed; first is the first one that is), bad_payment, phone_limit (this phone made the day's orders already: offer to pass the request to the team). A newer card replaces the one before. On Confirm, price_changed means a price or the delivery fee changed since the card.",
+      "Makes an order for the customer. Leave lines out to order what is in the chat's cart (crm_cart); what is ordered leaves the cart. Shows them a card to confirm; nothing is ordered before they press Confirm. Refusals are codes: cart_empty (no lines and nothing in the cart), variant_required (ask which option), too_many (one order takes at most max of a thing), short (left), off_sale, address_required, bad_delivery, time_required or window_required (how the business takes times), bad_window, rules (the day or time is not allowed; first is the first one that is), bad_payment, phone_limit (this phone made the day's orders already: offer to pass the request to the team). A newer card replaces the one before. On Confirm, price_changed means a price or the delivery fee changed since the card.",
     when: "The customer chose the products, how many, the delivery and the payment.",
     input: {
       type: "object",
@@ -266,7 +261,7 @@ export const tools = [
         payment: { type: "string", maxLength: 40, description: "A payment id from crm_order_options." },
         note: { type: "string", maxLength: 500 },
       },
-      required: ["lines", "delivery"],
+      required: ["delivery"],
       additionalProperties: false,
     },
     op: order,

@@ -205,7 +205,7 @@ export async function answerQuestion({ agent, question, file = null, history = [
     if (res.card && !(card?.type === "connect")) card = res.card;
     // A result the tool shows as cards (items with their photos), unless a sign-in or a
     // confirmation is waiting: that one matters more.
-    else if (!res.card && found.tool.display && (!card || card.type === "products")) card = displayCard(found.tool.display, res.output, { integration_id: buttonIntegration(tools, found) }) || card;
+    else if (!res.card && found.tool.display && (!card || card.type === "products")) card = displayCard(found.tool.display, res.output, { integration_id: buttonIntegration(tools, found), crm: Boolean(found.integration.crm) }) || card;
     return withEmptyHint(res.output);
   };
   const out = tools.length ? await ai.chatTools({ ...request, ...toolInterface(tools, execute) }) : await ai.chatJSON(request);
@@ -265,6 +265,8 @@ export async function describeOutcome({ agent, history, outcome, pageLanguage = 
       ? `Done: ${outcome.summary?.title || "the change"}. Result from ${outcome.name}: ${JSON.stringify(outcome.result ?? null).slice(0, 1500)}`
       : outcome.status === "cancelled"
         ? `The customer cancelled: ${outcome.summary?.title || "the change"}. Nothing was changed.`
+        : outcome.status === "ask"
+          ? `Not done yet: ${outcome.summary?.title || "the change"}. Ask the customer the one question needed, naming the choices. Details from ${outcome.name}: ${outcome.error || ""}`
         : `It failed: ${outcome.summary?.title || "the change"}. Reason from ${outcome.name}: ${outcome.error || "unknown"}. Nothing was changed.`;
   // Name the customer's own words: "the language of their messages" alone lets the model guess from
   // details like "Samarkand" or "so'm" and answer in Russian (or Spanish) to an English customer.
@@ -280,5 +282,5 @@ export async function describeOutcome({ agent, history, outcome, pageLanguage = 
   } catch {
     // Fall through to the plain sentence.
   }
-  return outcome.status === "done" ? "Done." : outcome.status === "cancelled" ? "Okay, I didn't change anything." : `That didn't work: ${outcome.error || "please try again later."}`;
+  return outcome.status === "done" ? "Done." : outcome.status === "cancelled" ? "Okay, I didn't change anything." : outcome.status === "ask" ? "Which option would you like?" : `That didn't work: ${outcome.error || "please try again later."}`;
 }

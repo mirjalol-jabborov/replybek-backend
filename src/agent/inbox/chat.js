@@ -1,4 +1,5 @@
 import { query, tx } from "../../core/db.js";
+import { HttpError } from "../../core/http.js";
 import { answerQuestion, describeOutcome } from "../answers/answer.js";
 import { decideAction, actionIntegrationMode } from "../integrations/confirmations.js";
 import { disconnect } from "../integrations/connections.js";
@@ -9,7 +10,7 @@ import { assertCanAnswer } from "../../core/workspaces/workspaces.js";
 import { notifyWaiting } from "./notify.js";
 import { logActivity } from "../../core/activity/activity.js";
 import { deliver, settleCard } from "./delivery.js";
-import { decideCrmAction } from "../../bridge/crm-tools.js";
+import { decideCrmAction, tapCrmCard, stepCrmCard } from "../../bridge/crm-tools.js";
 
 /**
  * One conversation, whatever it arrives on. The widget and every messaging channel share this:
@@ -43,11 +44,16 @@ export async function forAI(conversationId, messages, max = 1500) {
   return messages.filter((m) => m.role !== "human").map((m) => ({ role: m.role, body: [m.body, note(files.get(m.id)), shown(m.card)].filter(Boolean).join("\n") }));
 }
 
-// What the customer saw under a reply, so "the first one" or "the cheaper one" means a card.
+// What the customer saw under a reply, so "the first one" or "the cheaper one" means a card, and
+// what they put in a cart with a card's "Add to cart": the website's own, or this chat's.
 function shown(card) {
   if (card?.type !== "products" || !card.items?.length) return "";
   const price = (i) => (i.price == null ? "" : `, ${i.price}${i.currency ? ` ${i.currency}` : ""}`);
-  return `[Cards shown under this reply, in this order: ${card.items.map((i, n) => `${n + 1}) ${i.title}${price(i)}${i.id ? ` (id ${i.id})` : ""}`).join("; ")}]`;
+  const cards = `[Cards shown under this reply, in this order: ${card.items.map((i, n) => `${n + 1}) ${i.title}${price(i)}${i.id ? ` (id ${i.id})` : ""}`).join("; ")}]`;
+  const put = Object.entries(card.taps || {}).filter(([n, t]) => t?.status === "done" && t.where && card.items[n]);
+  if (!put.length) return cards;
+  const where = (t) => (t.where === "site" ? "the website's own cart (checked out on the website)" : "this chat's cart");
+  return `${cards}\n[The customer tapped "Add to cart": ${put.map(([n, t]) => `${Number(n) + 1}) ${card.items[n].title} × ${t.qty || 1} into ${where(t)}`).join("; ")}]`;
 }
 
 /** Adds a message the customer is meant to read, and hands it to the channel that will carry it. */
@@ -217,8 +223,7 @@ export async function applyDecision(agent, conv, actionId, confirm, inpageOrigin
   await query("UPDATE messages SET card = jsonb_set(card, '{status}', to_jsonb($3::text)) WHERE conversation_id = $1 AND card->>'action_id' = $2", [conv.id, actionId, outcome.status]);
   await settleCard(conv, actionId, outcome.status);
   await settleTap(conv.id, actionId, outcome.status);
-  const text = await describeOutcome({ agent, history: await forAI(conv.id, seen.slice(-6), 600), outcome, pageLanguage: conv.visitor?.language });
-  await say(conv, { role: "ai", body: text, kind: "answer" });
+  await tellOutcome(agent, conv, seen, outcome);
   if (outcome.continuation) {
     const next = outcome.continuation;
     const body = next.card ? "Please review the next step before continuing." : next.output?.error ? next.output.message || "The procedure stopped." : next.output?.status === "completed" ? "The procedure is complete." : "The procedure stopped.";
@@ -226,6 +231,57 @@ export async function applyDecision(agent, conv, actionId, confirm, inpageOrigin
   }
   if (outcome.status === "failed" && /sign in/i.test(outcome.error || "")) await disconnect(conv.id, outcome.integration_id);
   return { seen, outcome };
+}
+
+/** The AI tells the customer what came of a Confirm, a Cancel or a card's tap. */
+async function tellOutcome(agent, conv, seen, outcome) {
+  const text = await describeOutcome({ agent, history: await forAI(conv.id, seen.slice(-6), 600), outcome, pageLanguage: conv.visitor?.language });
+  await say(conv, { role: "ai", body: text, kind: "answer" });
+}
+
+/**
+ * A tap on a built-in CRM card's "Add to cart" (see bridge/crm-tools.js tapCrmCard). Claimed once
+ * per card: a second tap while one is under way, or after one went in, is "already handled"; one
+ * that failed, or that the agent asked about (several options), can be tapped again. The card
+ * then says what happened (taps[index]: { status, qty, where }) and the AI tells the customer.
+ * `msg`: the AI message { id, card }. `onPlaced(outcome)` runs once the card knows, before the AI
+ * writes (Telegram updates the photo's buttons then).
+ */
+export async function tapCrmButton(agent, conv, msg, index, { qty = null, placed = null, refused = null, onPlaced = null } = {}) {
+  const seen = await visibleMessages(conv.id);
+  const claim = await query(
+    `UPDATE messages SET card = jsonb_set(CASE WHEN card ? 'taps' THEN card ELSE card || '{"taps": {}}'::jsonb END, ARRAY['taps', $2::text], '{"status": "pending"}'::jsonb, true)
+      WHERE id = $1 AND conversation_id = $3 AND COALESCE(card->'taps'->$2::text->>'status', 'failed') = 'failed' RETURNING id`,
+    [msg.id, String(index), conv.id]
+  );
+  if (!claim.rowCount) throw new HttpError(409, "This request was already handled.");
+  let outcome;
+  try {
+    outcome = await tapCrmCard(agent, conv.id, msg.card, index, { qty, placed, refused });
+  } catch (e) {
+    await setTap(msg.id, index, null);
+    throw e;
+  }
+  await setTap(msg.id, index, outcome.status === "ask" ? null : { status: outcome.status, qty: outcome.status === "done" && outcome.where === "chat" ? outcome.result.inCart : outcome.qty, ...(outcome.where ? { where: outcome.where } : {}) });
+  if (onPlaced) await onPlaced(outcome);
+  await tellOutcome(agent, conv, seen, outcome);
+  return outcome;
+}
+
+/** One more or one fewer in the chat's cart from a card (Telegram's + and −): { qty, error? }. */
+export async function stepCrmButton(agent, conv, msg, index, delta) {
+  const out = await stepCrmCard(agent, conv.id, msg.card, index, delta);
+  if (!out.error) await setTap(msg.id, index, out.qty ? { status: "done", qty: out.qty, where: "chat" } : null);
+  return out;
+}
+
+/** A card's tap as the card keeps it, or none. */
+async function setTap(messageId, index, tap) {
+  if (!tap) return query("UPDATE messages SET card = card #- ARRAY['taps', $2::text] WHERE id = $1", [messageId, String(index)]);
+  return query(
+    "UPDATE messages SET card = jsonb_set(CASE WHEN card ? 'taps' THEN card ELSE card || '{\"taps\": {}}'::jsonb END, ARRAY['taps', $2::text], $3::jsonb, true) WHERE id = $1",
+    [messageId, String(index), JSON.stringify(tap)]
+  );
 }
 
 // A card button's tap (say, "Book" under a room) shows how its action ended.

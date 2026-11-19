@@ -13,19 +13,24 @@ const WORDS = {
     book: "New booking", cancel: "Cancel the booking", move: "Move the booking", order: "New order",
     service: "Service", when: "When", was: "Was", specialist: "Specialist", anyone: "Any free specialist",
     delivery: "Delivery", address: "Address", payment: "Payment", fee: "Delivery fee", total: "Total", note: "Note",
+    addToCart: "Add to cart", inCart: "In cart",
   },
   ru: {
     book: "Новая запись", cancel: "Отменить запись", move: "Перенести запись", order: "Новый заказ",
     service: "Услуга", when: "Когда", was: "Было", specialist: "Специалист", anyone: "Любой свободный специалист",
     delivery: "Доставка", address: "Адрес", payment: "Оплата", fee: "Стоимость доставки", total: "Итого", note: "Комментарий",
+    addToCart: "В корзину", inCart: "В корзине",
   },
   uz: {
     book: "Yangi bron", cancel: "Bronni bekor qilish", move: "Bronni koʻchirish", order: "Yangi buyurtma",
     service: "Xizmat", when: "Qachon", was: "Avval", specialist: "Mutaxassis", anyone: "Istalgan boʻsh mutaxassis",
     delivery: "Yetkazib berish", address: "Manzil", payment: "Toʻlov", fee: "Yetkazib berish narxi", total: "Jami", note: "Izoh",
+    addToCart: "Savatga", inCart: "Savatda",
   },
 };
 export const word = (lang, key) => WORDS[langOf(lang)][key];
+/** One word in every language at once, { en, ru, uz }: a card's button, which the chat shows in its own language. */
+export const cartWords = (key) => Object.fromEntries(LANGS.map((l) => [l, WORDS[l][key]]));
 
 /** A day "2026-11-18" the way the CRM's messages write one: "Wednesday, 18 November", "18-noyabr, chorshanba". */
 export const dayWords = (lang, day) => dayText(day, langOf(lang));

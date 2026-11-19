@@ -9,7 +9,9 @@
 // the changes (access.js). Otherwise crmTools() is empty and the agent answers exactly as without a CRM.
 // Every change waits for the customer's Confirm on a card (pending_actions with source 'crm'),
 // and the CRM's rules are asked again when they press it. A newer card for the same change takes
-// the older one's place. Answers to the agent are codes.
+// the older one's place. Answers to the agent are codes. The one change without a card is the
+// cart in the chat (cart.js): nothing is ordered by it, so a card's "Add to cart" tap
+// (tapCrmCard) and the agent's crm_add_to_cart take one step; its tools exist where changes do.
 import Ajv from "ajv";
 import { query } from "../core/db.js";
 import { HttpError } from "../core/http.js";
@@ -20,6 +22,8 @@ import { currentLink, identify, ready, unknown } from "./customer.js";
 import { unrealDates } from "./inputs.js";
 import { tools as bookingTools } from "./booking.js";
 import { tools as storeTools } from "./store.js";
+import { tools as cartTools, addToCart, stepCart } from "./cart.js";
+import { LEFT_CAP } from "../crm/shared/store.js";
 import { langOf } from "./wording.js";
 
 const identifyTool = {
@@ -33,7 +37,7 @@ const identifyTool = {
   run: identify,
 };
 
-const TOOLS = [identifyTool, ...bookingTools, ...storeTools];
+const TOOLS = [identifyTool, ...bookingTools, ...storeTools, ...cartTools];
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 // Every tool also takes the language the agent replies in: cards and names come in it.
@@ -42,8 +46,15 @@ const modelInput = (input) => ({ ...input, properties: { ...input.properties, la
 const ajv = new Ajv({ strict: false, allErrors: true });
 const checks = new Map(TOOLS.map((t) => [t.name, ajv.compile(modelInput(t.input))]));
 
-/** Whether this workspace's CRM, as it is now, offers the tool. */
-const offered = (tool, access) => (!tool.module || access.modules[tool.module]) && (tool.kind !== "write" || access.act[tool.module]);
+/** Whether this workspace's CRM, as it is now, offers the tool. Changes and the cart need "act". */
+const offered = (tool, access) => (!tool.module || access.modules[tool.module]) && (tool.kind === "read" || access.act[tool.module]);
+
+/** A tool's cards: with their button only where its action is offered too ("Add to cart" at "act"). */
+function displayOf(t, access) {
+  if (!t.display) return null;
+  const action = t.cardAction && BY_NAME.get(t.cardAction.tool);
+  return action && offered(action, access) ? { ...t.display, action: t.cardAction } : t.display;
+}
 
 /**
  * The CRM tools an answer may use, in the shape the agent's own tools have:
@@ -56,7 +67,7 @@ export async function crmTools(agent, conversationId = null) {
   const integration = { id: null, name: access.workspace.name, crm: true };
   return TOOLS.filter((t) => offered(t, access)).map((t) => ({
     integration,
-    tool: { name: t.name, description: t.description, when: t.when, kind: t.kind === "write" ? "write" : "read", input: modelInput(t.input), ...(t.display ? { display: t.display } : {}) },
+    tool: { name: t.name, description: t.description, when: t.when, kind: t.kind === "write" ? "write" : "read", input: modelInput(t.input), ...(t.display ? { display: displayOf(t, access) } : {}) },
   }));
 }
 
@@ -91,6 +102,7 @@ export async function runCrmTool({ agent, conversationId, tool, args = {} }) {
   if (unreal.length) return { output: { error: "bad_input", issues: unreal } };
   const lang = langOf(args.language, access.visitor.language);
   try {
+    if (def.conversation && !access.conversationId) return { output: { error: "no_conversation" } };
     if (!def.customer) return { output: await def.run(access, args, lang) };
     if (!access.conversationId) return { output: { error: "no_conversation" } };
     const link = await currentLink(access);
@@ -180,4 +192,63 @@ export async function decideCrmAction(conversationId, actionId, confirm) {
   const out = confirm ? await carryOut(row, conversationId).catch((e) => ({ status: "failed", refusal: asCodes(e, `on Confirm in conversation ${conversationId}`) })) : { status: "cancelled" };
   await query("UPDATE pending_actions SET status = $2, result = $3, decided_at = now() WHERE id = $1", [actionId, out.status, out.result ?? out.refusal ?? null]);
   return { status: out.status, name: row.name, summary: row.summary, integration_id: null, result: out.result ?? null, error: out.refusal ? JSON.stringify(out.refusal) : null };
+}
+
+/* ───── A card's "Add to cart" ───── */
+
+/** The item a CRM products card's button stands for, or a 404. */
+function tappedItem(card, index) {
+  const item = card?.type === "products" && card.action?.crm ? card.items?.[index] : null;
+  if (!item?.args?.product) throw new HttpError(404, "This button is no longer available.");
+  return item;
+}
+
+/** The access for a tap: the button's tool must still be offered in this chat. */
+async function tapAccess(agent, conversationId, card) {
+  const def = BY_NAME.get(card.action.tool);
+  const access = def && (await crmAccess(agent, conversationId));
+  return access?.conversationId && offered(def, access) ? access : null;
+}
+
+/**
+ * The customer tapped "Add to cart" under a CRM products card: `qty` of item `index`. A tap is
+ * the customer's own act and nothing is ordered by it, so it is one step. `placed: "site"`: the
+ * website's own cart took it (the widget's ReplybekCart hook), or refused it with the code
+ * `refused`; the chat only records that. Otherwise it goes in the chat's cart.
+ * Returns the outcome the chat tells the customer about, as for a Confirm card, with `where`
+ * ("site" or "chat") and `qty`: { status: "done" | "failed" | "ask", name, summary, result, error }.
+ * "ask": the product has several options, and the agent asks which one.
+ */
+export async function tapCrmCard(agent, conversationId, card, index, { qty, placed = null, refused = null } = {}) {
+  const item = tappedItem(card, index);
+  const n = Math.min(LEFT_CAP, Math.max(1, Math.round(Number(qty) || 1)));
+  const access = await tapAccess(agent, conversationId, card);
+  const what = `${item.title} × ${n}`;
+  const base = { name: access?.workspace.name || "", integration_id: null, qty: n };
+  if (!access) return { ...base, status: "failed", summary: { title: `Add to the cart: ${what}` }, result: null, error: JSON.stringify({ error: "unavailable" }) };
+  if (placed === "site") {
+    // Only where the CRM sends taps to the website's cart: the widget's word alone doesn't do.
+    if (access.cart.mode !== "site") return { ...base, where: "site", status: "failed", summary: { title: `Add to the website's own cart: ${what}` }, result: null, error: JSON.stringify({ error: "unavailable" }) };
+    return refused
+      ? { ...base, where: "site", status: "failed", summary: { title: `Add to the website's own cart: ${what}` }, result: null, error: JSON.stringify({ error: refused, max: LEFT_CAP }) }
+      : { ...base, where: "site", status: "done", summary: { title: `Added to the website's own cart, which the customer checks out on the website (not in this chat's cart): ${what}` }, result: { item: item.title, qty: n }, error: null };
+  }
+  const out = await addToCart(access, { product: item.args.product, variant: item.args.variant, qty: n }, langOf(access.visitor.language)).catch((e) => asCodes(e, `on a card tap in conversation ${conversationId}`));
+  if (out.error === "variant_required") {
+    return { ...base, where: "chat", status: "ask", summary: { title: `Add to this chat's cart: ${what}. It has options: ask the customer which one, then add it with crm_add_to_cart` }, result: null, error: JSON.stringify(out) };
+  }
+  if (out.error) return { ...base, where: "chat", status: "failed", summary: { title: `Add to this chat's cart: ${what}` }, result: null, error: JSON.stringify(out) };
+  return { ...base, where: "chat", status: "done", summary: { title: `Added to this chat's cart (crm_place_order without lines orders it): ${what}` }, result: out, error: null };
+}
+
+/**
+ * One more or one fewer of a card's item in the chat's cart (Telegram's + and − under its photo).
+ * Returns { qty: how many the cart has now, error? }.
+ */
+export async function stepCrmCard(agent, conversationId, card, index, delta) {
+  const item = tappedItem(card, index);
+  const access = await tapAccess(agent, conversationId, card);
+  if (!access) return { qty: 0, error: "unavailable" };
+  const out = await stepCart(access, { product: item.args.product, variant: item.args.variant }, delta, langOf(access.visitor.language)).catch((e) => asCodes(e, `on a card step in conversation ${conversationId}`));
+  return out.error ? { qty: out.inCart ?? 0, error: out.error, ...(out.max ? { max: out.max } : {}), ...(out.left != null ? { left: out.left } : {}) } : { qty: out.inCart };
 }

@@ -86,7 +86,10 @@ router.post("/conversations/:cid/integrations/:iid/connect", perIP, wrap(async (
   res.json(await startConnect(req.agent, req.params.cid, token(req), req.params.iid));
 }));
 router.post("/conversations/:cid/messages/:mid/cards/:index/action", perIP, wrap(async (req, res) => {
-  res.json(await cardAction(req.agent, req.params.cid, token(req), req.params.mid, Number(req.params.index), inpage(req), req.body?.qty));
+  // The page's own cart took the tap (or refused it, with a short code), before the widget asked here.
+  const placed = req.body?.placed === "site" ? "site" : null;
+  const refused = placed && req.body?.refused != null ? (/^[a-z_]{1,40}$/.test(String(req.body.refused)) ? String(req.body.refused) : "refused") : null;
+  res.json(await cardAction(req.agent, req.params.cid, token(req), req.params.mid, Number(req.params.index), inpage(req), req.body?.qty, { placed, refused }));
 }));
 router.post("/conversations/:cid/actions/:aid/:decision(confirm|cancel)", perIP, wrap(async (req, res) => {
   res.json(await decide(req.agent, req.params.cid, token(req), req.params.aid, req.params.decision === "confirm", inpage(req)));

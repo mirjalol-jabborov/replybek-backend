@@ -4,6 +4,10 @@
 //   settings.ai = { agentId: uuid | null, channels: { widget, telegram }, booking: level, store: level }
 //   level: "off" (no tools for the module), "answer" (lookups only), "act" (lookups and changes,
 //   each one confirmed by the customer)
+//   cart: { mode: "chat" | "site", url } (optional): where a product card's "Add to cart" puts
+//   things. "chat": the chat's own cart, which the agent orders. "site": the website's own cart, at
+//   `url` (the widget posts { product, variant, qty, title } there from a page of that site; on
+//   any other page, and in Telegram, the chat's cart). Rows without it read as "chat".
 //
 // Workspaces from before keep only settings.aiConnected / settings.aiAct. They are read through
 // aiLink() without any migration: connected meant every agent on every channel, so it reads as the
@@ -24,8 +28,27 @@ export const aiShape = z
     channels: z.object({ widget: z.boolean(), telegram: z.boolean() }).strict(),
     booking: z.enum(LEVELS),
     store: z.enum(LEVELS),
+    cart: z
+      .object({ mode: z.enum(["chat", "site"]), url: z.string().trim().max(500) })
+      .strict()
+      .refine((c) => c.mode !== "site" || c.url, { message: "Give the address of your website's cart.", path: ["url"] })
+      .refine((c) => !c.url || cartUrlOk(c.url), { message: "The cart's address must start with https:// (http:// only for localhost).", path: ["url"] })
+      .optional(),
   })
   .strict();
+
+/** A website cart address the widget may post to: https, or http on this computer. */
+export function cartUrlOk(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || (u.protocol === "http:" && ["localhost", "127.0.0.1"].includes(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+/** Where "Add to cart" puts things, as saved or the default: { mode, url }. `saved`: a link's `cart`, maybe missing. */
+export const cartOf = (saved) => (saved?.mode === "site" && saved.url && cartUrlOk(saved.url) ? { mode: "site", url: saved.url } : { mode: "chat", url: saved?.url || "" });
 
 /**
  * The workspace's agents the link can name, oldest first: [{ id, name, status }]. Empty without
@@ -50,6 +73,7 @@ export function aiLink(settings, modules, agents) {
       channels: { widget: saved.channels?.widget !== false, telegram: saved.channels?.telegram !== false },
       booking: LEVELS.includes(saved.booking) ? saved.booking : "off",
       store: LEVELS.includes(saved.store) ? saved.store : "off",
+      ...(saved.cart ? { cart: cartOf(saved.cart) } : {}),
     };
   }
   const level = settings.aiAct === false ? "answer" : "act";

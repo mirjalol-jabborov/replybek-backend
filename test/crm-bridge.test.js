@@ -20,7 +20,7 @@ const ok = (r, status = 200) => {
 };
 const names = (entries) => entries.map((e) => e.tool.name).sort();
 const BOOKING_TOOLS = ["crm_book", "crm_cancel_booking", "crm_free_times", "crm_list_services", "crm_move_booking", "crm_my_bookings"];
-const STORE_TOOLS = ["crm_find_products", "crm_my_orders", "crm_order_options", "crm_place_order"];
+const STORE_TOOLS = ["crm_add_to_cart", "crm_cart", "crm_find_products", "crm_my_orders", "crm_order_options", "crm_place_order", "crm_update_cart"];
 
 /**
  * A workspace with the AI agent and the CRM: a published agent, two specialists who work around

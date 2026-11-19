@@ -2,8 +2,8 @@ import { query } from "../../core/db.js";
 import { text } from "./text.js";
 import * as telegram from "./telegram-api.js";
 import { languageOf } from "../answers/suggestions.js";
-import { receiveMessage, decide, say, handToTeam } from "../inbox/chat.js";
-import { notify } from "../inbox/delivery.js";
+import { receiveMessage, decide, say, handToTeam, tapCrmButton, stepCrmButton } from "../inbox/chat.js";
+import { notify, photoKeyboard } from "../inbox/delivery.js";
 import { widgetTexts } from "../answers/translations.js";
 import { firstTime } from "./channels.js";
 import { chatQueue, inChat, arrived, collect } from "./chat-queue.js";
@@ -75,11 +75,63 @@ function handleMessage(channel, agent, message) {
   });
 }
 
+/**
+ * "Add to cart" under a built-in CRM card's photo (cart:<message>:<card>:<add|inc|dec|n>). The
+ * first tap puts one in the chat's cart and the AI says so; then − and + change how many, the
+ * count on the middle button follows and Telegram shows it briefly, with no message each time.
+ */
+function handleCartTap(channel, agent, callback, [messageId, index, op]) {
+  const chatId = callback.message?.chat?.id;
+  const n = Number(index);
+  const business = callback.message?.business_connection_id || null;
+  const answer = (words) => telegram.answerCallbackQuery(channel.token, callback.id, words).catch(() => {});
+  if (!/^[0-9a-f-]{36}$/i.test(messageId || "") || !Number.isInteger(n) || n < 0 || !["add", "inc", "dec", "n"].includes(op) || chatId == null) return answer();
+  const key = business ? `${channel.id}:biz:${chatId}` : `${channel.id}:${chatId}`;
+  return inChat(key, async () => {
+    // The card's own conversation, on this channel and chat, so a tap reaches only what it was sent with.
+    const { rows } = await query(
+      "SELECT m.card, c.* FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = $1 AND m.role = 'ai' AND c.channel_id = $2 AND c.channel_chat_id = $3",
+      [messageId, channel.id, business ? `biz:${chatId}` : String(chatId)]
+    );
+    const { card, ...conv } = rows[0] || {};
+    if (!card?.action?.crm) return answer();
+    const language = conv.visitor?.language || "en";
+    const word = (v) => (v && typeof v === "object" ? v[language] || v.en || "" : String(v || ""));
+    const msg = { id: messageId, card };
+    const buttons = (qty) => telegram.editMessageReplyMarkup(channel.token, chatId, callback.message.message_id, photoKeyboard(msg, n, language, qty), business).catch(() => {});
+    let qty = null;
+    let words = null;
+    try {
+      if (op === "n") return answer(`${word(card.action.done)}: ${card.taps?.[n]?.qty || 0}`);
+      if (op === "add") {
+        answer();
+        // The photo's buttons follow as soon as the cart has it; the AI's words come after.
+        const placed = (outcome) => buttons(outcome.status === "done" ? outcome.result?.inCart || 1 : 0);
+        await whileWorking(channel, chatId, () => tapCrmButton(agent, conv, msg, n, { qty: 1, onPlaced: placed }), business);
+        return;
+      } else {
+        const out = await stepCrmButton(agent, conv, msg, n, op === "inc" ? 1 : -1);
+        qty = out.qty;
+        words = out.error === "too_many" ? text(language, "cartMax", { max: out.max }) : out.error === "short" ? text(language, "cartLeft", { left: out.left }) : out.error ? text(language, "cartGone") : `${word(card.action.done)}: ${qty}`;
+        answer(words);
+      }
+    } catch (e) {
+      // 409: this card's tap is already under way or done. Its buttons follow the cart below.
+      if (e.status !== 409) console.error(`Telegram cart tap failed for conversation ${conv.id}:`, e.message);
+      if (op !== "add") answer();
+      qty = card.taps?.[n]?.status === "done" ? card.taps[n].qty || 0 : null;
+    }
+    if (qty != null) await buttons(qty);
+  });
+}
+
 function handleCallback(channel, agent, callback) {
   const chatId = callback.message?.chat?.id;
+  const [action, ...rest] = String(callback.data || "").split(":");
+  if (action === "cart") return handleCartTap(channel, agent, callback, rest);
   // Stops the spinner on the tapped button straight away; the answer follows as a message.
   telegram.answerCallbackQuery(channel.token, callback.id).catch(() => {});
-  const [action, actionId] = String(callback.data || "").split(":");
+  const actionId = rest[0];
   if (!["confirm", "cancel"].includes(action) || !/^[0-9a-f-]{36}$/i.test(actionId || "") || chatId == null) return;
   // A button in a Telegram Business chat comes with the connection it was sent through.
   const business = callback.message?.business_connection_id || null;
