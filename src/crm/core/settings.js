@@ -6,7 +6,7 @@ import { HttpError } from "../../core/http.js";
 import { write } from "../db.js";
 import { TOP_KEYS } from "../defaults.js";
 import { mergeChanges } from "../changes.js";
-import { listId as id, hm, hmEnd, day, text, label } from "../shapes.js";
+import { listId as id, hm, hmEnd, day, moment, text, label } from "../shapes.js";
 import { modules, add, countUses, moveStage, checkSettings } from "../modules.js";
 import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds } from "../shared/index.js";
 import { toMin, isZoneName } from "../shared/time.js";
@@ -83,6 +83,19 @@ const delivery = z
   .strict()
   .transform((d) => ({ ...d, windows: [...d.windows].sort((a, b) => (a.from < b.from ? -1 : 1)), daysOff: [...new Set(d.daysOff)].sort() }));
 
+/**
+ * The guided setup's record (settings.onboarding). Saved whole. Moments on the business's clock:
+ * when the setup was finished and when the "Get started" list was hidden. The first step (the
+ * modules) can't be skipped.
+ */
+const onboarding = z
+  .object({
+    finishedAt: moment.nullable(),
+    dismissedAt: moment.nullable(),
+    skipped: z.array(z.enum(["business", "services", "team", "store"])).max(4).transform((steps) => [...new Set(steps)]),
+  })
+  .strict();
+
 const move = z.object({ from: id, to: id }).strict();
 
 function bodySchema() {
@@ -102,6 +115,7 @@ function bodySchema() {
       timezone: z.unknown(),
       rules,
       delivery,
+      onboarding,
       ...Object.assign({}, ...modules.map((m) => m.settingsShape || {})),
     })
     .partial()

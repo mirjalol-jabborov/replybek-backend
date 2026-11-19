@@ -1,7 +1,8 @@
-// The emails Replybek sends, in English, Uzbek and Russian. Links point at the dashboard (APP_ORIGIN).
+// The emails Replybek sends, in English, Uzbek and Russian. Links point at the dashboard (APP_ORIGIN),
+// except the email confirmation, which opens the app the person signed up on.
 import { layout, fill, sendMail } from "./mail.js";
 
-const appUrl = (hash) => `${(process.env.APP_ORIGIN || "http://localhost:5173").replace(/\/$/, "")}/#/${hash}`;
+const appUrl = (hash, origin = process.env.APP_ORIGIN || "http://localhost:5173") => `${origin.replace(/\/$/, "")}/#/${hash}`;
 const pick = (lang) => (["en", "uz", "ru"].includes(lang) ? lang : "en");
 
 const ROLE = {
@@ -103,11 +104,34 @@ const TEXT = {
       footer: "Ссылка действует 1 час. Если вы не запрашивали сброс, проигнорируйте письмо: пароль останется прежним.",
     },
   },
+  verify: {
+    en: {
+      subject: "{code} is your Replybek code",
+      heading: "Confirm your email",
+      lines: ["Enter this code in Replybek to confirm {email}, or use the button below."],
+      button: "Confirm email",
+      footer: "The code and the link work for 30 minutes. If you didn't create a Replybek account, you can ignore this email.",
+    },
+    uz: {
+      subject: "Replybek kodi: {code}",
+      heading: "Emailingizni tasdiqlang",
+      lines: ["{email} manzilini tasdiqlash uchun ushbu kodni kiriting yoki quyidagi tugmani bosing."],
+      button: "Emailni tasdiqlash",
+      footer: "Kod va havola 30 daqiqa amal qiladi. Agar Replybek hisobini ochmagan boʻlsangiz, bu xatga eʼtibor bermang.",
+    },
+    ru: {
+      subject: "Код Replybek: {code}",
+      heading: "Подтвердите email",
+      lines: ["Введите этот код в Replybek, чтобы подтвердить {email}, или нажмите кнопку ниже."],
+      button: "Подтвердить email",
+      footer: "Код и ссылка действуют 30 минут. Если вы не создавали аккаунт Replybek, просто проигнорируйте это письмо.",
+    },
+  },
 };
 
-function compose(kind, lang, vars, url) {
+function compose(kind, lang, vars, url, code) {
   const T = TEXT[kind][pick(lang)];
-  const body = layout({ heading: fill(T.heading, vars), lines: T.lines.map((l) => fill(l, vars)), button: T.button, url, footer: fill(T.footer, vars) });
+  const body = layout({ heading: fill(T.heading, vars), lines: T.lines.map((l) => fill(l, vars)), code, button: T.button, url, footer: fill(T.footer, vars) });
   return { subject: fill(T.subject, vars), ...body };
 }
 
@@ -123,6 +147,11 @@ export function sendWaiting({ to, lang, visitor, workspace, message, conversatio
 
 export function sendReset({ to, lang, token }) {
   return sendMail({ to, ...compose("reset", lang, { email: to }, appUrl(`reset/${token}`)) });
+}
+
+/** The code to type and the link to click that confirm a new account's address; `origin` is the app it was asked from. */
+export function sendVerification({ to, lang, code, token, origin }) {
+  return sendMail({ to, ...compose("verify", lang, { email: to, code }, appUrl(`verify/${token}`, origin), code) });
 }
 
 const MONTHS = {

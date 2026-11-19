@@ -60,22 +60,36 @@ export function browser() {
   return { call, get cookie() { return cookie; } };
 }
 
+const { outbox } = await import("../../src/core/mail.js");
+
+/**
+ * Confirms a new account's email the way a person does: the 6-digit code from the email in the
+ * outbox, typed into POST /auth/verify by the signed-in browser `b`. Returns the confirmed user.
+ */
+export async function confirmEmail(b, email) {
+  const code = outbox.filter((m) => m.to === email).at(-1)?.text.match(/\b(\d{6})\b/)?.[1];
+  assert.ok(code, `no confirmation code was emailed to ${email}`);
+  const r = await b.call("POST", "/auth/verify", { code });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.user;
+}
+
 let n = 0;
-/** Registers a new owner with a workspace. Returns { b (browser), user, ws }. */
+/** Registers a new owner with a workspace and confirms their email. Returns { b (browser), user, ws }. */
 export async function owner(name = "Alex Morgan", workspace = "Northstar Outfitters") {
   const b = browser();
   const r = await b.call("POST", "/auth/register", { name, email: `owner${++n}@test.replybek.dev`, password: "correct horse battery", workspace_name: workspace });
   assert.equal(r.status, 201, JSON.stringify(r.body));
-  return { b, user: r.body.user, ws: r.body.workspaces[0] };
+  return { b, user: await confirmEmail(b, r.body.user.email), ws: r.body.workspaces[0] };
 }
 
-/** Registers a new owner whose workspace has the CRM only. Returns { b, user, ws, crm }: `crm` is the CRM's base path. */
+/** Registers a new owner whose workspace has the CRM only, confirmed. Returns { b, user, ws, crm }: `crm` is the CRM's base path. */
 export async function crmOwner(name = "Kamola Yusupova", workspace = "Guldasta") {
   const b = browser();
   const r = await b.call("POST", "/auth/register", { name, email: `owner${++n}@test.replybek.dev`, password: "correct horse battery", workspace_name: workspace, product: "crm" });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   const ws = r.body.workspaces[0];
-  return { b, user: r.body.user, ws, crm: `/w/${ws.id}/crm` };
+  return { b, user: await confirmEmail(b, r.body.user.email), ws, crm: `/w/${ws.id}/crm` };
 }
 
 /** Invites someone into an owner's workspace and joins as them. Returns { b, user }. */

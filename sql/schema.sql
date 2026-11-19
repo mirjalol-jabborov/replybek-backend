@@ -528,6 +528,32 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT UNIQUE;
 ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 -- A person's own photo: a small image as a data: URL (the dashboard crops it to 256 px).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+-- When the person showed the address is theirs: the code or link from the confirmation email,
+-- Google, an emailed invitation or a password reset. Until then no workspace opens. Accounts made
+-- before this column existed count as confirmed: the UPDATE runs only in the migration that adds
+-- the column, so an account made later is never confirmed by migrating again.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'email_verified_at') THEN
+    ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMPTZ;
+    UPDATE users SET email_verified_at = created_at;
+  END IF;
+END $$;
+-- The confirmation email that is open: one per person, a new one replaces it. The 6-digit code
+-- and the link's token are stored as hashes only; both work for 30 minutes, once.
+CREATE TABLE IF NOT EXISTS email_verifications (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  email CITEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  tries INTEGER NOT NULL DEFAULT 0,
+  sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  -- Emails sent since sends_since: at most a few an hour.
+  sends INTEGER NOT NULL DEFAULT 1,
+  sends_since TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- ───── Channels ─────
 -- An agent answers on its website widget and, once connected, inside a messaging app. The agent,

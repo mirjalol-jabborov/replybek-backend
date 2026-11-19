@@ -6,7 +6,8 @@ import bcrypt from "bcrypt";
 import { query, tx } from "../db.js";
 import { HttpError, notFound } from "../http.js";
 import { PLANS } from "../workspaces/workspaces.js";
-import { workspacesOf } from "../auth/auth.js";
+import { workspacesOf, USER } from "../auth/auth.js";
+import { markVerified } from "../auth/verify.js";
 import { logActivity } from "../activity/activity.js";
 import { sendInvite, sendReset } from "../emails.js";
 
@@ -96,25 +97,28 @@ async function join(c, inv, userId) {
   await c.query("UPDATE invitations SET accepted_at = now() WHERE id = $1", [inv.id]);
 }
 
-/** A signed-in person accepts. The invitation is for one address: theirs must match. */
+/** A signed-in person accepts. The invitation is for one address: theirs must match, and the emailed link confirms it. */
 export async function acceptInvite(token, user) {
   const inv = await openInvite(token);
   if (user.email.toLowerCase() !== String(inv.email).toLowerCase()) {
     throw new HttpError(403, `This invitation is for ${inv.email}. Sign in with that address to accept it.`, { email: inv.email });
   }
-  await tx((c) => join(c, inv, user.id));
+  await tx(async (c) => {
+    await join(c, inv, user.id);
+    await markVerified(c, user.id);
+  });
   await logActivity(inv.workspace_id, user.id, "{actor} joined the team", { actor: user.name });
   return { workspace_id: inv.workspace_id, workspaces: await workspacesOf(user.id) };
 }
 
-/** Someone without an account joins: the account is created for the invited address. */
+/** Someone without an account joins: the account is created for the invited address, confirmed by the emailed link. */
 export async function joinWithInvite(token, { name, password }) {
   const inv = await openInvite(token);
   const exists = await query("SELECT 1 FROM users WHERE email = $1", [inv.email]);
   if (exists.rows[0]) throw new HttpError(409, "An account with this email already exists. Sign in to accept the invitation.");
   const passwordHash = await bcrypt.hash(password, 12);
   const user = await tx(async (c) => {
-    const u = (await c.query("INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email", [name, inv.email, passwordHash])).rows[0];
+    const u = (await c.query(`INSERT INTO users (name, email, password_hash, email_verified_at) VALUES ($1, $2, $3, now()) RETURNING ${USER}`, [name, inv.email, passwordHash])).rows[0];
     await join(c, inv, u.id);
     return u;
   });
@@ -163,7 +167,7 @@ export async function forgotPassword(email, lang) {
   await sendReset({ to: rows[0].email, lang: lang || rows[0].lang, token });
 }
 
-/** Sets the new password, signs out every other session, and returns the user. */
+/** Sets the new password, signs out every other session, and returns the user. The emailed link confirms the address. */
 export async function resetPassword(token, password) {
   if (typeof token !== "string" || token.length < 20 || token.length > 100) throw new HttpError(400, "This reset link isn't valid. Ask for a new one.");
   const passwordHash = await bcrypt.hash(password, 12);
@@ -173,8 +177,9 @@ export async function resetPassword(token, password) {
       [hash(token)]
     );
     if (!rows[0]) throw new HttpError(400, "This reset link expired or was already used. Ask for a new one.");
-    const user = (await c.query("UPDATE users SET password_hash = $2 WHERE id = $1 RETURNING id, name, email", [rows[0].user_id, passwordHash])).rows[0];
-    await c.query("DELETE FROM sessions WHERE user_id = $1", [user.id]);
-    return user;
+    await c.query("UPDATE users SET password_hash = $2 WHERE id = $1", [rows[0].user_id, passwordHash]);
+    await c.query("DELETE FROM sessions WHERE user_id = $1", [rows[0].user_id]);
+    await markVerified(c, rows[0].user_id);
+    return (await c.query(`SELECT ${USER} FROM users WHERE id = $1`, [rows[0].user_id])).rows[0];
   });
 }

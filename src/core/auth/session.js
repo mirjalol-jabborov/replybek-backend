@@ -56,13 +56,16 @@ export async function endSession(req, res) {
   res.setHeader("Set-Cookie", sessionCookies("", 0));
 }
 
-/** Requires a signed-in user; loads it into req.user. */
+/**
+ * Requires a signed-in user; loads it into req.user. `req.user.email_verified` says whether the
+ * address is confirmed: until it is, requireWorkspace opens no workspace.
+ */
 export async function requireUser(req, res, next) {
   try {
     const tokens = tokensOf(req);
     if (!tokens.length) throw new HttpError(401, "Sign in required");
     const { rows } = await query(
-      `SELECT u.id, u.name, u.email, u.avatar, u.lang FROM sessions s JOIN users u ON u.id = s.user_id
+      `SELECT u.id, u.name, u.email, u.avatar, u.lang, (u.email_verified_at IS NOT NULL) AS email_verified FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token_hash = ANY($1) AND s.expires_at > now() ORDER BY s.expires_at DESC LIMIT 1`,
       [tokens.map(hash)]
     );
