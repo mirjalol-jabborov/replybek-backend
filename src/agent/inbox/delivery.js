@@ -122,14 +122,34 @@ async function toTelegram(channel, conv, message, replies) {
     // Cards with photos (products, listings, rooms…): one photo each after the words, its name and
     // price underneath and a button to its page. Not an album: Telegram shows a single caption for
     // a whole album, so nobody could tell which photo is which, or reply to one of them.
+    // The built-in CRM's cards also get "Add to cart" (then − N +) under each photo.
     for (const photo of productPhotos(message.card).slice(0, TELEGRAM_CARDS)) {
       try {
-        await send(channel, () => telegram.sendFileByUrl(channel.token, chatId, photo, business, photo.link ? [[{ text: text(language, "open"), url: photo.link }]] : null));
+        await send(channel, () => telegram.sendFileByUrl(channel.token, chatId, photo, business, photoKeyboard(message, photo.index, language)));
       } catch (e) {
         console.error(`Couldn't send a photo on conversation ${conv.id}:`, e.message);
       }
     }
   });
+}
+
+/**
+ * The buttons under one card's photo: "Add to cart" on the built-in CRM's cards (once some are in
+ * the chat's cart, − N + instead), and its page. Null when there are none. `qty`: how many of it
+ * the chat's cart has.
+ */
+export function photoKeyboard(message, index, language, qty = null) {
+  const card = message.card;
+  const item = card?.items?.[index];
+  const have = qty ?? (card?.taps?.[index]?.status === "done" && card.taps[index].where === "chat" ? card.taps[index].qty || 0 : 0);
+  const rows = [];
+  if (card?.action?.crm && item?.args && message.id) {
+    const word = (v) => (v && typeof v === "object" ? v[language] || v.en || "" : String(v || ""));
+    const data = (op) => `cart:${message.id}:${index}:${op}`;
+    rows.push(have ? [{ text: "−", callback_data: data("dec") }, { text: `${word(card.action.done)}: ${have}`, callback_data: data("n") }, { text: "+", callback_data: data("inc") }] : [{ text: word(card.action.label), callback_data: data("add") }]);
+  }
+  if (item?.url) rows.push([{ text: text(language, "open"), url: item.url }]);
+  return rows.length ? rows : null;
 }
 
 // A chat isn't a catalog: the first few cards, as the AI names two or three of them anyway.
@@ -140,8 +160,8 @@ export function productPhotos(card) {
   if (card?.type !== "products") return [];
   const price = (i) => (i.price == null ? "" : typeof i.price === "number" ? `${i.price.toLocaleString("ru-RU").replace(/\u00a0/g, " ")}${i.currency ? ` ${i.currency}` : ""}` : String(i.price));
   return (card.items || [])
-    .filter((i) => i.image)
-    .map((i) => ({ url: i.image, link: i.url || null, caption: [i.title, [price(i), i.subtitle].filter(Boolean).join(" · ")].filter(Boolean).join("\n") }));
+    .map((i, index) => ({ index, url: i.image, link: i.url || null, caption: [i.title, [price(i), i.subtitle].filter(Boolean).join(" · ")].filter(Boolean).join("\n") }))
+    .filter((p) => p.url);
 }
 
 /**

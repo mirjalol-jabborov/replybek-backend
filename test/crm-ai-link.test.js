@@ -17,7 +17,7 @@ const ok = (r, status = 200) => {
 };
 const names = (entries) => entries.map((e) => e.tool.name).sort();
 const READS = { booking: ["crm_free_times", "crm_list_services", "crm_my_bookings"], store: ["crm_find_products", "crm_my_orders", "crm_order_options"] };
-const WRITES = { booking: ["crm_book", "crm_cancel_booking", "crm_move_booking"], store: ["crm_place_order"] };
+const WRITES = { booking: ["crm_book", "crm_cancel_booking", "crm_move_booking"], store: ["crm_add_to_cart", "crm_cart", "crm_place_order", "crm_update_cart"] };
 const all = (...parts) => ["crm_identify_customer", ...parts.flat()].sort();
 
 /* ───── The normaliser (pure) ───── */
@@ -152,16 +152,16 @@ test("tools go to the chosen agent only, on allowed channels, at each module's l
   // Bek chosen: the tools move with the choice.
   ok(await s.link({ agentId: s.bek.id }));
   assert.deepEqual(await crmTools(s.aziza, widget), []);
-  assert.equal((await crmTools(s.bek, bekChat)).length, 11);
+  assert.equal((await crmTools(s.bek, bekChat)).length, 14);
 
   // Channels: website off, Telegram on (Telegram Business counts as Telegram). The Playground always works.
   ok(await s.link({ channels: { widget: false, telegram: true } }));
   assert.deepEqual(await crmTools(s.aziza, widget), []);
-  assert.equal((await crmTools(s.aziza, telegram)).length, 11);
-  assert.equal((await crmTools(s.aziza, business_)).length, 11);
+  assert.equal((await crmTools(s.aziza, telegram)).length, 14);
+  assert.equal((await crmTools(s.aziza, business_)).length, 14);
   ok(await s.link({ channels: { widget: false, telegram: false } }));
   assert.deepEqual(await crmTools(s.aziza, telegram), []);
-  assert.equal((await crmTools(s.aziza)).length, 11, "the Playground");
+  assert.equal((await crmTools(s.aziza)).length, 14, "the Playground");
   assert.deepEqual((await runCrmTool({ agent: s.aziza, conversationId: telegram, tool: { name: "crm_list_services" }, args: {} })).output, { error: "unavailable" });
 
   // Levels: Bookings answers only, Orders off.

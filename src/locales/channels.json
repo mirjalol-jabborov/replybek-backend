@@ -358,5 +358,20 @@
     "hi": "देखें",
     "id": "Lihat",
     "pl": "Zobacz"
+  },
+  "cartMax": {
+    "en": "At most {max} of one item",
+    "uz": "Bitta mahsulotdan koʻpi bilan {max} ta",
+    "ru": "Не больше {max} шт. одного товара"
+  },
+  "cartLeft": {
+    "en": "Only {left} left",
+    "uz": "Faqat {left} ta qoldi",
+    "ru": "Осталось только {left}"
+  },
+  "cartGone": {
+    "en": "This item can't be ordered now",
+    "uz": "Bu mahsulotni hozir buyurtma qilib boʻlmaydi",
+    "ru": "Этот товар сейчас нельзя заказать"
   }
 }

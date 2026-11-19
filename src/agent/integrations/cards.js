@@ -32,7 +32,11 @@ export function displayCard(display, output, source = {}) {
     })
     .filter((i) => i.title);
   if (!items.length) return null;
-  const action = display.action && source.integration_id ? { integration_id: source.integration_id, tool: display.action.tool, label: display.action.label, done: display.action.done || null, ...(display.action.quantity ? { quantity: display.action.quantity } : {}) } : null;
+  // An integration's button runs its write tool; the built-in CRM's ("Add to cart") has none (crm: true).
+  const crm = display.action?.crm === true && source.crm === true;
+  const action = display.action && (source.integration_id || crm)
+    ? { integration_id: crm ? null : source.integration_id, tool: display.action.tool, label: display.action.label, done: display.action.done || null, ...(display.action.quantity ? { quantity: display.action.quantity } : {}), ...(display.action.max ? { max: display.action.max } : {}), ...(crm ? { crm: true } : {}) }
+    : null;
   return { type: "products", items, ...(display.layout === "list" ? { layout: "list" } : {}), ...(action ? { action } : {}) };
 }
 
