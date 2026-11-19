@@ -32,7 +32,7 @@ router.delete("/products/:id", admin, wrap(async (req, res) => res.json(await de
 // Pictures: upload one and get its path back (for a product that isn't saved yet), or set a product's picture in one go.
 router.post("/products/images", acceptImage, wrap(async (req, res) => res.status(201).json(await uploadImage(ws(req), req.file))));
 router.post("/products/:id/image", acceptImage, wrap(async (req, res) => res.json(await setProductImage(ws(req), by(req), req.params.id, req.file))));
-router.get("/products/images/:name", wrap((req, res) => sendImage(res, ws(req), req.params.name)));
+router.get("/products/images/:name", wrap((req, res) => sendImage(res, ws(req), req.params.name, { w: req.query.w })));
 
 // Stock
 router.post("/stock/receive", validate(receiveSchema), wrap(async (req, res) => res.json(await receive(ws(req), by(req), req.valid))));

@@ -7,7 +7,8 @@
 // The page shows them (GET /page-images/:name) only while it is on, and only the current ones.
 import crypto from "node:crypto";
 import { HttpError } from "../../core/http.js";
-import { putFile, getFile, removeFile } from "../../core/storage.js";
+import { putFile, removeFile } from "../../core/storage.js";
+import { widthOf, pictureAt, removeWithCopies, cacheFor } from "../../core/thumbs.js";
 import { read, write, asQ } from "../db.js";
 import { agentsOf } from "../core/ai-link.js";
 import { acceptImage } from "../store/images.js";
@@ -43,7 +44,7 @@ async function keep(workspace, kind, name) {
     return { pageImages, old: before[kind], changes: { top: { settings: view(data, workspace, cfg.timezone, await agentsOf(asQ(c), workspace)).settings } } };
   });
   const { old, ...body } = out;
-  if (old && old !== name) await removeFile(keyOf(workspace.id, old)).catch(() => {});
+  if (old && old !== name) await removeWithCopies(keyOf(workspace.id, old)).catch(() => {});
   return body;
 }
 
@@ -70,13 +71,15 @@ export const removePageImage = (workspace, kind) => keep(workspace, kind, "");
  * (`forPage`). Anything else, a replaced picture too, is the page's 404. The settings tab's preview
  * (GET /w/:wid/crm/public/images/:name, the workspace's people) shows them whether the page is on or not.
  * The headers are the product pictures' own (Store's sendImage): a picture's name never changes, so
- * the viewer's browser may keep it.
+ * a browser may keep it, and on the page (anyone's to see) a CDN too. `w`: the request's `?w=`, for a
+ * smaller WebP copy (core/thumbs.js), as for product pictures.
  */
-export async function sendPageImage(res, ws, name, { forPage = true } = {}) {
+export async function sendPageImage(res, ws, name, { forPage = true, w } = {}) {
+  const width = widthOf(w);
   const current = Object.values(await read(ws.id, async (q, cfg) => (forPage && openPart(cfg, "any"), imagesOf(cfg))));
   const type = NAME.test(String(name)) && current.includes(name) && TYPES.find(([ext]) => name.endsWith(`.${ext}`));
-  const data = type && (await getFile(keyOf(ws.id, name)));
-  if (!data) throw pageNotFound();
-  res.set({ "Content-Type": type[1], "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "private, max-age=31536000, immutable" });
-  res.end(data);
+  const pic = type && (await pictureAt(keyOf(ws.id, name), width));
+  if (!pic) throw pageNotFound();
+  res.set({ "Content-Type": pic.type || type[1], "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": cacheFor(forPage) });
+  res.end(pic.data);
 }

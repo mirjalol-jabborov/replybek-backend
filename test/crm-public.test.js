@@ -656,9 +656,9 @@ test("pictures: an uploaded one is served to the page while a product on sale sh
   assert.equal(shown, `/public/crm/${x.slug}/images/${name}`);
   const got = await x.pub("GET", `/images/${name}`);
   assert.equal(got.status, 200);
-  // The one answer here that may be kept: by the viewer's browser only (never a shared cache),
-  // since a picture's name never changes and the page shows it again and again.
-  assert.match(got.headers.get("cache-control"), /^private, /);
+  // The one answer here that may be kept, by a CDN too: it is what the page shows anyone, and a
+  // picture's name never changes. A week at most in a shared cache (s-maxage).
+  assert.equal(got.headers.get("cache-control"), "public, max-age=86400, s-maxage=604800");
   assert.equal(got.headers.get("x-content-type-options"), "nosniff");
   ok(await x.b.call("PUT", `${x.crm}/products/${p.id}`, { onSale: false }));
   assert.equal((await x.pub("GET", `/images/${name}`)).status, 404);
@@ -813,7 +813,7 @@ test("page pictures: admins upload a cover and a logo; the page shows them while
   assert.equal(got.status, 200);
   assert.equal(got.headers.get("content-type"), "image/png");
   assert.equal(got.headers.get("x-content-type-options"), "nosniff");
-  assert.match(got.headers.get("cache-control"), /^private, /);
+  assert.match(got.headers.get("cache-control"), /^public, /);
   assert.equal((await x.pub("GET", `/page-images/${logo.pageImages.logo}`)).headers.get("content-type"), "image/jpeg");
 
   // Saving the tab's text fields keeps them; PUT /settings can't set them.

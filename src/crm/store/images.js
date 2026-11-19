@@ -7,7 +7,8 @@
 import crypto from "node:crypto";
 import multer from "multer";
 import { HttpError, notFound } from "../../core/http.js";
-import { putFile, getFile, removeFile } from "../../core/storage.js";
+import { putFile, removeFile } from "../../core/storage.js";
+import { widthOf, pictureAt, removeWithCopies, cacheFor } from "../../core/thumbs.js";
 import { query } from "../../core/db.js";
 import { write, isUuid } from "../db.js";
 import { storeChanges } from "./rows.js";
@@ -77,7 +78,7 @@ async function forget(workspaceId, paths, { stale = false } = {}) {
       : { rows: [] };
     return { removed: [...rows.map((r) => r.name), ...legacy.filter((n) => !shown.some((s) => s.image === pathOf(workspaceId, n)))] };
   });
-  for (const name of removed) await removeFile(keyOf(workspaceId, name)).catch(() => {});
+  for (const name of removed) await removeWithCopies(keyOf(workspaceId, name)).catch(() => {});
 }
 
 /** After a write took this picture off a product: removed when it was uploaded and no product shows it now. */
@@ -144,11 +145,20 @@ export async function shownToCustomers(workspaceId, name) {
   return rows.length > 0;
 }
 
-/** Sends an uploaded picture, with headers that stop a browser from reading it as anything else. */
-export async function sendImage(res, workspace, name) {
+/**
+ * Sends an uploaded picture, with headers that stop a browser from reading it as anything else.
+ * `w`: the request's `?w=`, for a smaller WebP copy (core/thumbs.js). `shared`: the picture is one
+ * anyone may see (a shop page's, the AI agent's), so a CDN may keep it too; else only the viewer's
+ * browser does. A name never changes, so either may keep it long.
+ */
+export async function sendImage(res, workspace, name, { w, shared = false, jpegUnlessWebp } = {}) {
+  const width = widthOf(w);
   const kind = NAME.test(name) && KINDS.find(([ext]) => name.endsWith(`.${ext}`));
-  const data = kind && (await getFile(keyOf(workspace.id, name)));
-  if (!data) throw notFound("Picture not found");
-  res.set({ "Content-Type": kind[1], "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "private, max-age=31536000, immutable" });
-  res.end(data);
+  // jpegUnlessWebp: the request's Accept, for a caller that may not take WebP (see bridge/media.js).
+  const format = jpegUnlessWebp !== undefined && !/image\/webp/.test(jpegUnlessWebp || "") ? "jpeg" : "webp";
+  const pic = kind && (await pictureAt(keyOf(workspace.id, name), width, format));
+  if (!pic) throw notFound("Picture not found");
+  res.set({ "Content-Type": pic.type || kind[1], "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": cacheFor(shared) });
+  if (width && jpegUnlessWebp !== undefined) res.set("Vary", "Accept");
+  res.end(pic.data);
 }

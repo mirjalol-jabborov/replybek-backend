@@ -77,7 +77,7 @@ const human = (fn) => (req) => (req.valid.url ? decoy() : fn(req));
 
 router.get("/", front, answer((req) => showFront(ws(req))));
 // The page's own cover and logo (images.js): while any part of the page is on.
-router.get("/page-images/:name", front, wrap((req, res) => sendPageImage(res, ws(req), req.params.name)));
+router.get("/page-images/:name", front, wrap((req, res) => sendPageImage(res, ws(req), req.params.name, { w: req.query.w })));
 
 router.get("/services", booking, answer((req) => listServices(ws(req))));
 router.get("/slots", booking, validate(slotsQuery, "query"), answer((req) => listSlots(ws(req), req.valid)));
@@ -88,7 +88,7 @@ router.post("/bookings/:ref/cancel", booking, writable, validate(tokenBody), ans
 
 router.get("/products", shop, answer((req) => listCatalogue(ws(req), req.params.slug)));
 router.get("/categories", shop, answer((req) => listCategories(ws(req))));
-router.get("/images/:name", shop, wrap((req, res) => sendPicture(res, ws(req), req.params.name)));
+router.get("/images/:name", shop, wrap((req, res) => sendPicture(res, ws(req), req.params.name, req.query.w)));
 router.post("/orders", shop, writable, validate(orderBody), answer(human((req) => placeOrder(ws(req), req.valid)), 201));
 router.get("/orders/:ref", shop, validate(lookupQuery, "query"), answer((req) => showOrder(ws(req), req.params.ref, req.valid.token)));
 
