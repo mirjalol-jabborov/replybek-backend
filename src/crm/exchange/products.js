@@ -16,8 +16,8 @@ import { listProducts, listMovements, postMoves, productCreateSchema, OPENING } 
 import { HEADERS, header, yesNo, readYesNo } from "../shared/sheets.js";
 import { given, changesOf, findInList, listName, readNumber, shapeReason } from "./cells.js";
 
-const EXPORTED = ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved"];
-const PRODUCT_KEYS = ["name", "category", "unit", "onSale"];
+const EXPORTED = ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved", "description"];
+const PRODUCT_KEYS = ["name", "category", "unit", "onSale", "description"];
 const VARIANT_KEYS = ["sku", "price", "cost", "lowAt"];
 
 /** The columns an import knows. "variant" and "reserved" are read only; "stock" is read only on rows that match. */
@@ -28,7 +28,7 @@ export async function productsSheet(q, cfg, lang) {
   const rows = [];
   for (const p of await listProducts(q, cfg)) {
     for (const v of p.variants.filter((x) => !x.archived)) {
-      rows.push([p.name, optionsText(p.options, v.values), v.sku, listName(cfg.data.productCategories, p.category, lang), listName(cfg.data.units, p.unit, lang), v.price, v.cost, v.lowAt, yesNo(p.onSale, lang), v.stock, v.reserved, v.id]);
+      rows.push([p.name, optionsText(p.options, v.values), v.sku, listName(cfg.data.productCategories, p.category, lang), listName(cfg.data.units, p.unit, lang), v.price, v.cost, v.lowAt, yesNo(p.onSale, lang), v.stock, v.reserved, p.description, v.id]);
     }
   }
   return { header: [...EXPORTED.map((k) => header(k, lang)), header("id", lang)], rows };
@@ -50,6 +50,7 @@ function sentOf(cfg, v, stored) {
     if (sent.unit === undefined) return { skip: { code: "bad_unit", value: v.unit } };
   }
   for (const key of ["price", "cost", "lowAt"]) if (given(v, key)) sent[key] = readNumber(v[key]);
+  if (given(v, "description")) sent.description = String(v.description);
   if (given(v, "onSale")) {
     sent.onSale = readYesNo(v.onSale);
     if (sent.onSale === undefined) return { skip: { code: "bad_value", column: "onSale" } };
@@ -79,7 +80,7 @@ export async function planProducts(q, cfg, table) {
   const skus = [...new Set(table.rows.map((r) => (r.values.sku || "").toLowerCase()).filter(Boolean))];
   const { rows: known } = await q(
     `SELECT v.id, v.product_id AS "productId", v.sku, v.price::float8 AS price, v.cost::float8 AS cost, v.low_at AS "lowAt",
-            p.name, p.category, p.unit, p.on_sale AS "onSale",
+            p.name, p.category, p.unit, p.on_sale AS "onSale", p.description,
             p.updated_at::text || ' ' || md5(row(v.sku, v.price, v.cost, v.low_at, v.option_values, v.position)::text) AS stamp
        FROM crm_variants v JOIN crm_products p ON p.workspace_id = v.workspace_id AND p.id = v.product_id
       WHERE v.workspace_id = $1 AND NOT v.archived AND (v.id = ANY($2::uuid[]) OR (lower(v.sku) = ANY($3::text[]) AND v.sku <> ''))`,
@@ -125,7 +126,7 @@ export async function planProducts(q, cfg, table) {
     }
     if (!stored) {
       if (sku) seenSku.set(sku, n);
-      plan.add.push({ row: n, values: { name: sent.name, category: sent.category || "", unit: sent.unit || cfg.data.units[0]?.id || "", onSale: sent.onSale ?? true, sku: sent.sku || "", price: sent.price || 0, cost: sent.cost || 0, lowAt: sent.lowAt || 0, opening: sent.opening || 0 } });
+      plan.add.push({ row: n, values: { name: sent.name, category: sent.category || "", unit: sent.unit || cfg.data.units[0]?.id || "", onSale: sent.onSale ?? true, description: sent.description || "", sku: sent.sku || "", price: sent.price || 0, cost: sent.cost || 0, lowAt: sent.lowAt || 0, opening: sent.opening || 0 } });
       continue;
     }
     const product = Object.fromEntries(PRODUCT_KEYS.filter((k) => sent[k] !== undefined && !same(sent[k], stored[k])).map((k) => [k, sent[k]]));
@@ -157,9 +158,9 @@ export async function applyProducts(c, cfg, q, user, plan, branchId) {
   try {
     if (adds.length) {
       await c.query(
-        `INSERT INTO crm_products (id, workspace_id, name, category, unit, on_sale)
-         SELECT x.id, $1, x.name, x.category, x.unit, x.on_sale FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[]) AS x(id, name, category, unit, on_sale)`,
-        [cfg.workspaceId, col(adds, (a) => a.productId), col(adds, (a) => a.name), col(adds, (a) => a.category), col(adds, (a) => a.unit), col(adds, (a) => a.onSale)]
+        `INSERT INTO crm_products (id, workspace_id, name, category, unit, on_sale, description)
+         SELECT x.id, $1, x.name, x.category, x.unit, x.on_sale, x.description FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[]) AS x(id, name, category, unit, on_sale, description)`,
+        [cfg.workspaceId, col(adds, (a) => a.productId), col(adds, (a) => a.name), col(adds, (a) => a.category), col(adds, (a) => a.unit), col(adds, (a) => a.onSale), col(adds, (a) => a.description)]
       );
       await c.query(
         `INSERT INTO crm_variants (id, workspace_id, product_id, sku, price, cost, low_at)
@@ -185,10 +186,10 @@ export async function applyProducts(c, cfg, q, user, plan, branchId) {
     if (products.length) {
       await c.query(
         `UPDATE crm_products p SET name = COALESCE(x.name, p.name), category = COALESCE(x.category, p.category), unit = COALESCE(x.unit, p.unit),
-                on_sale = COALESCE(x.on_sale, p.on_sale), updated_at = now()
-           FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[]) AS x(id, name, category, unit, on_sale)
+                on_sale = COALESCE(x.on_sale, p.on_sale), description = COALESCE(x.description, p.description), updated_at = now()
+           FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[]) AS x(id, name, category, unit, on_sale, description)
           WHERE p.workspace_id = $1 AND p.id = x.id`,
-        [cfg.workspaceId, col(products, (u) => u.id), col(products, (u) => u.name ?? null), col(products, (u) => u.category ?? null), col(products, (u) => u.unit ?? null), col(products, (u) => u.onSale ?? null)]
+        [cfg.workspaceId, col(products, (u) => u.id), col(products, (u) => u.name ?? null), col(products, (u) => u.category ?? null), col(products, (u) => u.unit ?? null), col(products, (u) => u.onSale ?? null), col(products, (u) => u.description ?? null)]
       );
     }
     const touched = [...new Set([...adds.map((a) => a.productId), ...plan.update.map((u) => u.productId)])];

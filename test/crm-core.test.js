@@ -249,13 +249,15 @@ test("settings save the keys that were sent, merge settings and fields one level
   assert.equal((await snap(o)).rev, shaped.body.rev, "a refused save changes nothing, not even rev");
 });
 
-test("the AI agent shows as connected only with the agent product", async () => {
+test("the AI agent shows as connected only with the agent product and an agent", async () => {
   const o = await crmOwner();
   const on = await o.b.call("PUT", `${o.crm}/settings`, { settings: { aiConnected: true } });
   assert.equal(on.body.changes.top.settings.aiConnected, false, "nothing to connect to");
   await o.b.call("POST", `/w/${o.ws.id}/products`, { add: "agent" });
   assert.equal((await snap(o)).settings.aiConnected, false, "adding the product doesn't switch the connection on by itself");
-  assert.equal((await o.b.call("PUT", `${o.crm}/settings`, { settings: { aiConnected: true } })).body.changes.top.settings.aiConnected, true);
+  assert.equal((await o.b.call("PUT", `${o.crm}/settings`, { settings: { aiConnected: true } })).body.changes.top.settings.aiConnected, false, "no agent made yet");
+  assert.equal((await o.b.call("POST", `/w/${o.ws.id}/agents`, { name: "Aziza" })).status, 201);
+  assert.equal((await snap(o)).settings.aiConnected, true, "the switch from before now reads as that agent");
   assert.equal((await snap(o)).settings.aiConnected, true);
 });
 

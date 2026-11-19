@@ -64,7 +64,7 @@ const like = (word) => `%${word.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 
 /**
  * Products on sale that a customer can order now (something is left of one of them), found by
- * `words`: each word in the name, an option's name or value, a SKU or the category's name, in
+ * `words`: each word in the name, the description, an option's name or value, a SKU or the category's name, in
  * any letter case. Answers { found: how many match, products: the newest `limit` of them, as
  * productsForCustomers gives them }. The search runs in the database, one page at a time.
  */
@@ -74,7 +74,7 @@ export async function findForCustomers(q, cfg, { words = [], limit }) {
   const match = words.map((word) => {
     const w = add(like(word));
     const categories = add(cfg.data.productCategories.filter((c) => names(c.name).some((n) => n.includes(word.toLowerCase()))).map((c) => c.id));
-    return `AND (p.name ILIKE ${w} OR p.category = ANY(${categories}::text[])
+    return `AND (p.name ILIKE ${w} OR p.description ILIKE ${w} OR p.category = ANY(${categories}::text[])
       OR EXISTS (SELECT 1 FROM crm_variants v WHERE v.workspace_id = p.workspace_id AND v.product_id = p.id AND v.sku ILIKE ${w})
       OR EXISTS (SELECT 1 FROM jsonb_array_elements(p.options) o WHERE o->>'name' ILIKE ${w} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(o->'values') x WHERE x ILIKE ${w})))`;
   });

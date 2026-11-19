@@ -11,6 +11,7 @@ import { read, isUuid } from "./db.js";
 import { TOP_KEYS } from "./defaults.js";
 import { modules } from "./modules.js";
 import { view } from "./core/settings.js";
+import { agentsOf } from "./core/ai-link.js";
 import { listCustomers, linkedCustomers, findCustomers, customerCounts } from "./core/customers.js";
 import { narrowTo } from "./branches/index.js";
 import { addDays, dayOf } from "./shared/time.js";
@@ -84,7 +85,7 @@ export function snapshot(req, { only, recent, ids }) {
       out.me = { id: req.user.id, name: req.user.name, staffId: null };
       for (const m of modules) if (m.me) Object.assign(out.me, await m.me(ctx));
     }
-    const lists = view(cfg.data, req.workspace, cfg.timezone);
+    const lists = view(cfg.data, req.workspace, cfg.timezone, want("settings") ? await agentsOf(q, req.workspace) : []);
     for (const key of TOP_KEYS) if (want(key)) out[key] = lists[key];
     const windows = {};
     // Linked customers are those the window's rows are about, so those rows are read even when only

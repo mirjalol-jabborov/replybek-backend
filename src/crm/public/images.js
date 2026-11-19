@@ -8,7 +8,8 @@
 import crypto from "node:crypto";
 import { HttpError } from "../../core/http.js";
 import { putFile, getFile, removeFile } from "../../core/storage.js";
-import { read, write } from "../db.js";
+import { read, write, asQ } from "../db.js";
+import { agentsOf } from "../core/ai-link.js";
 import { acceptImage } from "../store/images.js";
 import { openPart, pageNotFound } from "./pages.js";
 import { imagesOf } from "./settings.js";
@@ -39,7 +40,7 @@ async function keep(workspace, kind, name) {
     const pageImages = { ...before, [kind]: name };
     const data = { ...cfg.data, settings: { ...cfg.data.settings, pageImages } };
     await c.query("UPDATE crm_settings SET data = $2, updated_at = now() WHERE workspace_id = $1", [workspace.id, JSON.stringify(data)]);
-    return { pageImages, old: before[kind], changes: { top: { settings: view(data, workspace, cfg.timezone).settings } } };
+    return { pageImages, old: before[kind], changes: { top: { settings: view(data, workspace, cfg.timezone, await agentsOf(asQ(c), workspace)).settings } } };
   });
   const { old, ...body } = out;
   if (old && old !== name) await removeFile(keyOf(workspace.id, old)).catch(() => {});

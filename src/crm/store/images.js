@@ -62,13 +62,19 @@ async function forget(workspaceId, paths, { stale = false } = {}) {
     const { rows } = await c.query(
       `DELETE FROM crm_product_images i
         WHERE i.workspace_id = $1 AND (i.name = ANY($2::text[]) OR ($3 AND i.created_at < now() - interval '1 day'))
-          AND NOT EXISTS (SELECT 1 FROM crm_products p WHERE p.workspace_id = i.workspace_id AND p.image = $4 || i.name)
+          AND NOT EXISTS (SELECT 1 FROM crm_products p WHERE p.workspace_id = i.workspace_id AND (p.image = $4 || i.name OR p.gallery @> jsonb_build_array($4 || i.name)))
         RETURNING i.name`,
       [workspaceId, names, stale, pathOf(workspaceId, "")]
     );
     // An upload from before its row existed (none in a new database) goes by its path alone.
     const legacy = names.filter((n) => !rows.some((r) => r.name === n));
-    const { rows: shown } = legacy.length ? await c.query("SELECT image FROM crm_products WHERE workspace_id = $1 AND image = ANY($2::text[])", [workspaceId, legacy.map((n) => pathOf(workspaceId, n))]) : { rows: [] };
+    const { rows: shown } = legacy.length
+      ? await c.query(
+          `SELECT x.path AS image FROM unnest($2::text[]) AS x(path)
+            WHERE EXISTS (SELECT 1 FROM crm_products p WHERE p.workspace_id = $1 AND (p.image = x.path OR p.gallery @> jsonb_build_array(x.path)))`,
+          [workspaceId, legacy.map((n) => pathOf(workspaceId, n))]
+        )
+      : { rows: [] };
     return { removed: [...rows.map((r) => r.name), ...legacy.filter((n) => !shown.some((s) => s.image === pathOf(workspaceId, n)))] };
   });
   for (const name of removed) await removeFile(keyOf(workspaceId, name)).catch(() => {});
@@ -76,6 +82,8 @@ async function forget(workspaceId, paths, { stale = false } = {}) {
 
 /** After a write took this picture off a product: removed when it was uploaded and no product shows it now. */
 export const dropUpload = (workspaceId, path) => forget(workspaceId, [path]).catch(() => {});
+/** The same for several pictures at once (the photos a product write let go). */
+export const dropUploads = (workspaceId, paths) => forget(workspaceId, paths).catch(() => {});
 
 /**
  * Stores a picture and answers with its path: { image }. The path is on this API (the app puts
@@ -124,12 +132,12 @@ export async function setProductImage(workspace, user, productId, file) {
 /**
  * Whether anyone may see this uploaded picture (a public page, a chat with the AI agent, which
  * Telegram fetches without a session): only while a product on sale that customers can order
- * shows it. That is what the business offers anyone anyway.
+ * shows it, as its main photo or one of the others. That is what the business offers anyone anyway.
  */
 export async function shownToCustomers(workspaceId, name) {
   if (!NAME.test(String(name))) return false;
   const { rows } = await query(
-    `SELECT 1 FROM crm_products p WHERE p.workspace_id = $1 AND p.image = $2 AND p.on_sale
+    `SELECT 1 FROM crm_products p WHERE p.workspace_id = $1 AND (p.image = $2 OR p.gallery @> jsonb_build_array($2::text)) AND p.on_sale
         AND EXISTS (SELECT 1 FROM crm_variants v WHERE v.workspace_id = p.workspace_id AND v.product_id = p.id AND NOT v.archived) LIMIT 1`,
     [workspaceId, pathOf(workspaceId, name)]
   );

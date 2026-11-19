@@ -34,7 +34,10 @@ export async function sendPicture(res, ws, name) {
 
 /* ───── The catalogue ───── */
 
-/** GET products: { products } on sale, each variant with whether it can be ordered and how many are left (capped). */
+/**
+ * GET products: { products } on sale, each with its description and photos, and each variant with
+ * whether it can be ordered and how many are left (capped).
+ */
 export function listCatalogue(ws, slug) {
   return read(ws.id, async (q, cfg) => {
     openPart(cfg, "shop");
@@ -46,6 +49,9 @@ export function listCatalogue(ws, slug) {
         category: p.category,
         unit: unit(p.unit),
         image: pictureOf(ws, slug, p.image),
+        // Every photo, the main one first (the same as `image`); [] when there is none.
+        images: p.images.map((path) => pictureOf(ws, slug, path)).filter(Boolean),
+        description: p.description,
         options: p.options,
         variants: p.variants.map((v) => ({ id: v.id, values: v.values, price: v.price, available: v.left > 0, left: capped(v.left) })),
       })),
