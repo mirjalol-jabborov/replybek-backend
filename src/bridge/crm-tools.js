@@ -4,9 +4,9 @@
 // its widget router also mounts the photo route (media.js). The CRM's code never imports this
 // folder, and the agent's code imports the CRM only through it.
 //
-// The tools exist only when the workspace has both products, the business connected the AI agent
-// in CRM settings (aiConnected) and the module is on; the ones that change something also need
-// aiAct. Otherwise crmTools() is empty and the agent answers exactly as without a CRM.
+// The tools exist only for the agent the business chose in CRM settings (settings.ai), on the
+// channels it allowed, for each module at the level it set: "answer" gives the lookups, "act" also
+// the changes (access.js). Otherwise crmTools() is empty and the agent answers exactly as without a CRM.
 // Every change waits for the customer's Confirm on a card (pending_actions with source 'crm'),
 // and the CRM's rules are asked again when they press it. A newer card for the same change takes
 // the older one's place. Answers to the agent are codes.
@@ -43,7 +43,7 @@ const ajv = new Ajv({ strict: false, allErrors: true });
 const checks = new Map(TOOLS.map((t) => [t.name, ajv.compile(modelInput(t.input))]));
 
 /** Whether this workspace's CRM, as it is now, offers the tool. */
-const offered = (tool, access) => (!tool.module || access.modules[tool.module]) && (tool.kind !== "write" || access.act);
+const offered = (tool, access) => (!tool.module || access.modules[tool.module]) && (tool.kind !== "write" || access.act[tool.module]);
 
 /**
  * The CRM tools an answer may use, in the shape the agent's own tools have:
@@ -141,7 +141,7 @@ async function propose(access, def, plan) {
 /** The change on Confirm: the CRM's rules again, then the write. { status, result } or { status: "failed", refusal }. */
 async function carryOut(row, conversationId) {
   const def = BY_NAME.get(row.tool);
-  const access = def?.op && (await crmAccess({ workspace_id: row.workspace_id, public_key: row.public_key }, conversationId));
+  const access = def?.op && (await crmAccess({ id: row.agent_id, workspace_id: row.workspace_id, public_key: row.public_key }, conversationId));
   if (!access || !offered(def, access)) return { status: "failed", refusal: { error: "unavailable" } };
   const link = await currentLink(access);
   if (!ready(link)) return { status: "failed", refusal: unknown(link) };
@@ -167,7 +167,7 @@ async function carryOut(row, conversationId) {
 export async function decideCrmAction(conversationId, actionId, confirm) {
   if (!/^[0-9a-f-]{36}$/i.test(actionId || "")) return null;
   const { rows } = await query(
-    `SELECT a.tool, a.args, a.summary, c.workspace_id, w.name, ag.public_key
+    `SELECT a.tool, a.args, a.summary, c.workspace_id, w.name, ag.id AS agent_id, ag.public_key
        FROM pending_actions a JOIN conversations c ON c.id = a.conversation_id JOIN workspaces w ON w.id = c.workspace_id JOIN agents ag ON ag.id = c.agent_id
       WHERE a.id = $1 AND a.conversation_id = $2 AND a.source = 'crm'`,
     [actionId, conversationId]

@@ -38,8 +38,9 @@ const SETTINGS = () => ({
   lowStockAlerts: true,
   rules: RULES(),
   delivery: DELIVERY(),
-  // The CRM works without the Replybek AI agent. The snapshot shows aiConnected only when the
-  // workspace also has the agent product.
+  // The CRM works without the Replybek AI agent. Which agent works here, where and how far is
+  // settings.ai (core/ai-link.js), saved once someone chooses; until then these two keys from
+  // before are read as it.
   aiConnected: false,
   aiAct: true,
   // The guided setup's own record; what is set up is read from the data itself.

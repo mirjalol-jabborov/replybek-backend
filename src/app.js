@@ -33,6 +33,7 @@ import knowledge from "./agent/knowledge/routes.js";
 import inbox from "./agent/inbox/routes.js";
 import integrations from "./agent/integrations/routes.js";
 import crmRoutes from "./crm/index.js";
+import { crmRouter as crmAgentLink, agentRouter as agentCrmLink } from "./bridge/link.js";
 import "./agent/channels/notice-sender.js"; // the Telegram bot as a way the CRM's messages reach a customer
 import { router as crmPageRoutes } from "./crm/public/page-routes.js";
 
@@ -44,9 +45,9 @@ workspaceRoutes.use(requireWorkspace);
 workspaceRoutes.use(agentRoutesNeedAgent);
 // Adding a product and the whole CRM sit above the trial lock: the CRM isn't billed yet.
 workspaceRoutes.use(products);
-workspaceRoutes.use("/crm", requireProduct("crm"), crmRoutes);
+workspaceRoutes.use("/crm", requireProduct("crm"), crmAgentLink, crmRoutes);
 workspaceRoutes.use(readOnlyUntilTrial);
-workspaceRoutes.use(workspace, team, activity, analytics, billing, onboarding, agents, channels, answers, knowledge, inbox, integrations);
+workspaceRoutes.use(workspace, team, activity, analytics, billing, onboarding, agents, agentCrmLink, channels, answers, knowledge, inbox, integrations);
 
 const app = express();
 app.disable("x-powered-by");

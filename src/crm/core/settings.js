@@ -3,7 +3,7 @@
 // two people can edit at once and the app's copy can be old.
 import { z } from "zod";
 import { HttpError } from "../../core/http.js";
-import { write } from "../db.js";
+import { write, asQ } from "../db.js";
 import { TOP_KEYS } from "../defaults.js";
 import { mergeChanges } from "../changes.js";
 import { listId as id, hm, hmEnd, day, moment, text, label } from "../shapes.js";
@@ -11,6 +11,7 @@ import { modules, add, countUses, moveStage, checkSettings } from "../modules.js
 import { APPT_KINDS, ORDER_KINDS, FIELD_TYPES, checkStages, moveTarget, removedIds } from "../shared/index.js";
 import { toMin, isZoneName } from "../shared/time.js";
 import { customerCols, sourceUses } from "./customers.js";
+import { aiShape, aiLink, agentsOf, mirrorOldKeys } from "./ai-link.js";
 
 /* ───── Shapes ───── */
 
@@ -108,6 +109,9 @@ function bodySchema() {
       remindOn: z.boolean(),
       confirmByAi: z.boolean(),
       lowStockAlerts: z.boolean(),
+      // Which AI agent works here, where and how far (ai-link.js). aiConnected / aiAct are the
+      // keys from before it, still taken from older apps.
+      ai: aiShape,
       aiConnected: z.boolean(),
       aiAct: z.boolean(),
       // The business's clock: kept as the workspace's time zone (crm_settings.timezone), not in the
@@ -150,12 +154,14 @@ export const settingsSchema = z.lazy(() => (built ||= bodySchema()));
 const hasAgent = (workspace) => (workspace.products || []).includes("agent");
 
 /**
- * The lists and settings as the app gets them. The AI agent shows as connected only when the
- * workspace has the agent product and switched the connection on. `settings.timezone` is the
- * business's clock (cfg.timezone), the zone every "now" of the server is read in.
+ * The lists and settings as the app gets them. `settings.ai` is the link to the AI agent as it
+ * holds now (ai-link.js), and `settings.aiConnected` says whether an agent is connected: only with
+ * the agent product and an agent that still exists. `agents`: agentsOf(). `settings.timezone` is
+ * the business's clock (cfg.timezone), the zone every "now" of the server is read in.
  */
-export function view(data, workspace, timezone) {
-  return { ...data, settings: { ...data.settings, timezone, aiConnected: Boolean(data.settings.aiConnected) && hasAgent(workspace) } };
+export function view(data, workspace, timezone, agents) {
+  const ai = aiLink(data.settings, data.modules, hasAgent(workspace) ? agents : []);
+  return { ...data, settings: { ...data.settings, timezone, ai, aiConnected: Boolean(ai.agentId) } };
 }
 
 /**
@@ -171,6 +177,26 @@ async function newZone(c, cfg, sent) {
 }
 
 /* ───── Saving ───── */
+
+/**
+ * The AI agent's link as it is saved. Connecting means something only for a workspace that has
+ * the agent product. A link in the new shape names one of this workspace's agents (else 400
+ * bad_agent) and keeps the old keys in step; the old keys sent alone (an older app) take over
+ * again, so `ai` goes.
+ */
+function linkToSave(settings, sent = {}, workspace, agents) {
+  if (sent.ai) {
+    if (sent.ai.agentId && hasAgent(workspace) && !agents.some((a) => a.id === sent.ai.agentId)) {
+      throw new HttpError(400, "Choose one of this workspace's AI agents.", { code: "bad_agent" });
+    }
+    const ai = hasAgent(workspace) ? sent.ai : { ...sent.ai, agentId: null };
+    return { ...settings, ai, ...mirrorOldKeys(ai) };
+  }
+  const next = { ...settings };
+  if (sent.aiConnected !== undefined || sent.aiAct !== undefined) delete next.ai;
+  if (!hasAgent(workspace)) next.aiConnected = false;
+  return next;
+}
 
 const STAGES = { apptStages: APPT_KINDS, orderStages: ORDER_KINDS };
 // Lists whose items other rows point at by id: an item in use can't be removed.
@@ -201,8 +227,8 @@ export function saveSettings(workspace, body) {
     const zone = await newZone(c, cfg, body.settings?.timezone);
     if (body.settings) delete next.settings.timezone;
     if (toMin(next.settings.dayStart) >= toMin(next.settings.dayEnd)) throw new HttpError(400, "The day must end after it starts.", { code: "day_hours" });
-    // Connecting the AI agent means something only for a workspace that has it.
-    if (!hasAgent(workspace)) next.settings = { ...next.settings, aiConnected: false };
+    const agents = await agentsOf(asQ(c), workspace);
+    next.settings = linkToSave(next.settings, body.settings, workspace, agents);
 
     for (const key of GUARDED) {
       if (body[key] === undefined) continue;
@@ -246,7 +272,7 @@ export function saveSettings(workspace, body) {
 
     await checkSettings(c, cfg, next);
     await c.query("UPDATE crm_settings SET data = $2, timezone = COALESCE($3, timezone), updated_at = now() WHERE workspace_id = $1", [workspace.id, JSON.stringify(next), zone]);
-    const shown = view(next, workspace, zone || cfg.timezone);
+    const shown = view(next, workspace, zone || cfg.timezone, agents);
     return { changes: mergeChanges(...changes, { top: Object.fromEntries(TOP_KEYS.filter((k) => body[k] !== undefined).map((k) => [k, shown[k]])) }) };
   });
 }

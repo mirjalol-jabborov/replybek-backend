@@ -54,3 +54,6 @@ CREATE TABLE IF NOT EXISTS crm_bridge_items (
 
 -- A newer card for the same change retires the older one still waiting in the conversation.
 CREATE INDEX IF NOT EXISTS pending_actions_crm_waiting ON pending_actions (conversation_id) WHERE source = 'crm' AND status = 'pending';
+
+-- Whether an agent's website chat is in use (CRM settings, the AI agent section: its channels).
+CREATE INDEX IF NOT EXISTS conversations_agent_channel ON conversations (agent_id, channel);
