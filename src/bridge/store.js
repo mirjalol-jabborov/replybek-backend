@@ -14,12 +14,23 @@ import { forCustomer } from "../crm/shared/customer.js";
 import { kindOf, stageOf } from "../crm/shared/lists.js";
 import { asCustomer, ensureCustomer, rememberItem, mineTest, capReached, capAnswer } from "./customer.js";
 import { imageUrl } from "./media.js";
+import { fillProductUrl } from "../crm/core/ai-link.js";
 import { word, dayWords, moneyText, nameIn, listName } from "./wording.js";
 import { id, day } from "./inputs.js";
 import { optionText, orderable, resolveLines } from "./lines.js";
 import { cartAsked, cartRows, takeOut, CART_ACTION } from "./cart.js";
 
 const SHOWN = 8; // products in one answer; the customer narrows the search for more
+
+/**
+ * The page a product's card opens: the business's own address for it (settings.ai.productUrl, with
+ * the product's id, or the sku of its first option that has one), else the CRM's shop page when it
+ * is open (that page opens a product only from inside it, so the link is to the page), else null.
+ */
+export function productLink(access, p, variants = p.variants || []) {
+  const sku = variants.map((v) => v.sku).find((x) => typeof x === "string" && x.trim());
+  return (access.productUrl && fillProductUrl(access.productUrl, { id: p.id, sku })) || access.shopPage || null;
+}
 
 /* ───── Lookups ───── */
 
@@ -32,6 +43,7 @@ async function findProducts(access, args, lang) {
       products: products.map((p) => {
         const variants = orderable(p);
         const low = Math.min(...variants.map((v) => v.price));
+        const url = productLink(access, p, variants);
         return {
           id: p.id,
           name: p.name,
@@ -40,6 +52,8 @@ async function findProducts(access, args, lang) {
           price: low,
           priceText: moneyText(lang, low),
           image: imageUrl(access, p.image),
+          // The product's page, which its card opens.
+          ...(url ? { url } : {}),
           // What it is and what's in it (the team's text, cut short), and a few more photos.
           ...(p.description ? { description: p.description.length > 400 ? `${p.description.slice(0, 400).trimEnd()}…` : p.description } : {}),
           ...(p.images?.length > 1 ? { images: p.images.slice(0, 4).map((name) => imageUrl(access, name)) } : {}),
@@ -206,10 +220,10 @@ export const tools = [
     module: "store",
     kind: "read",
     description:
-      "Products on sale that can be ordered now, with price, options and what is left (left: up to 10, past that it is simply available). They are shown to the customer as cards with photos; where the agent may take orders, each card has a quantity and an \"Add to cart\" button. Ids here are what crm_add_to_cart and crm_place_order take.",
+      "Products on sale that can be ordered now, with price, options and what is left (left: up to 10, past that it is simply available). They are shown to the customer as cards with photos; where the agent may take orders, each card has a quantity and an \"Add to cart\" button. url is the product's page, which its card opens. Ids here are what crm_add_to_cart and crm_place_order take.",
     when: "The customer asks what is sold, for a product, its price, options or whether it is in stock. Search with a word or two from the product's name; leave the search out to browse.",
     input: { type: "object", properties: { search: { type: "string", maxLength: 100 } }, additionalProperties: false },
-    display: { items: "products", title: "name", image: "image", subtitle: "choices", price: "priceText", id: "id" },
+    display: { items: "products", title: "name", image: "image", subtitle: "choices", price: "priceText", id: "id", url: "url" },
     // The cards' button, only where the agent may act in the Store (crm-tools.js adds it then).
     cardAction: CART_ACTION,
     run: findProducts,

@@ -9,23 +9,42 @@ import { query } from "../core/db.js";
 import { writeRefusal } from "../core/billing/product-access.js";
 import { read } from "../crm/db.js";
 import { aiLink, agentsOf, levelsOf, cartOf } from "../crm/core/ai-link.js";
+import { pageOf } from "../crm/public/settings.js";
+import { appOrigins } from "../core/auth/session.js";
 
 /** The CRM's name for the channel a conversation came in on. */
 const CHANNELS = { widget: "widget", telegram: "telegram", telegram_business: "telegram" };
 
-/** The link of a workspace that has both products, as it holds now: { ai, modules, agents }, or null. */
+/**
+ * Where the CRM app, and with it its public pages, is: the APP_ORIGIN entry at crm.<domain>
+ * (production lists "https://app.replybek.uz,https://crm.replybek.uz"), else its dev address
+ * outside production. Null when there is none: no card links to the shop page then.
+ */
+export function crmOrigin() {
+  const found = appOrigins().find((o) => /^https?:\/\/crm\./i.test(o));
+  return found || (process.env.NODE_ENV === "production" ? null : "http://localhost:5192");
+}
+
+/** The CRM's own shop page when it is open (settings.publicPage), else null. */
+function shopPageOf(cfg) {
+  const page = pageOf(cfg);
+  const origin = page.on.shop && crmOrigin();
+  return origin ? `${origin}/p/${encodeURIComponent(page.slug)}/shop` : null;
+}
+
+/** The link of a workspace that has both products, as it holds now: { ai, modules, agents, shopPage }, or null. */
 export async function linkOf(workspace) {
   if (!workspace.products.includes("agent") || !workspace.products.includes("crm")) return null;
   return read(workspace.id, async (q, cfg) => {
     const agents = await agentsOf(q, workspace);
-    return { ai: aiLink(cfg.data.settings, cfg.data.modules, agents), modules: cfg.data.modules, agents };
+    return { ai: aiLink(cfg.data.settings, cfg.data.modules, agents), modules: cfg.data.modules, agents, shopPage: shopPageOf(cfg) };
   });
 }
 
 /**
  * The CRM around one chat, or null when the AI agent may not work in it:
  * { workspace: { id, name, products }, agentKey, conversationId, channel, visitor,
- *   levels: { booking, store }, modules: { booking, store }, act: { booking, store } }.
+ *   levels: { booking, store }, modules: { booking, store }, act: { booking, store }, cart, productUrl, shopPage }.
  * `agent` needs id and workspace_id. `conversationId` null is the Playground: only lookups work.
  */
 export async function crmAccess(agent, conversationId = null) {
@@ -53,6 +72,10 @@ export async function crmAccess(agent, conversationId = null) {
     act: { booking: levels.booking === "act" && writable, store: levels.store === "act" && writable },
     // Where a card's "Add to cart" puts things (settings.ai.cart): the chat's cart or the website's.
     cart: cartOf(link.ai.cart),
+    // Where a product card opens (store.js productLink): the business's own product page address
+    // (settings.ai.productUrl), else the CRM's shop page when it is open.
+    productUrl: link.ai.productUrl || "",
+    shopPage: link.shopPage,
   };
 }
 
