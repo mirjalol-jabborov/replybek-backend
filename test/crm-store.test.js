@@ -96,7 +96,7 @@ test("products: the demo's plain product, checks, edits and delete", async () =>
   assert.equal(made.id, p.id);
   assert.ok(made.rev > 1);
   const [v] = p.variants;
-  assert.deepEqual(p, { id: p.id, name: "Red roses", sku: "RR-1", category: "roses", price: 120000, cost: 70000, unit: "pcs", image: "/products/roses.jpg", onSale: true, stock: 12, reserved: 0, lowAt: 5, options: [], variants: [{ id: v.id, values: {}, sku: "RR-1", price: 120000, cost: 70000, stock: 12, reserved: 0, lowAt: 5 }], createdAt: p.createdAt });
+  assert.deepEqual(p, { id: p.id, name: "Red roses", sku: "RR-1", category: "roses", price: 120000, cost: 70000, unit: "pcs", image: "/products/roses.jpg", images: ["/products/roses.jpg"], description: "", onSale: true, stock: 12, reserved: 0, lowAt: 5, options: [], variants: [{ id: v.id, values: {}, sku: "RR-1", price: 120000, cost: 70000, stock: 12, reserved: 0, lowAt: 5 }], createdAt: p.createdAt });
   assert.match(p.createdAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d$/);
   // Opening stock is a receipt in the ledger, written by the person who made the product.
   const [m] = made.changes.set.movements;
@@ -255,6 +255,91 @@ test("product pictures: upload, show, replace", async () => {
   assert.equal((await o.b.call("GET", `${o.crm}/products/images/..%2F..%2Fsecret.png`)).status, 404);
   // The demo's static paths stay valid.
   assert.equal(ok(await o.b.call("PUT", `${o.crm}/products/${p.id}`, { image: "/products/8f2e4b26641260fa5c39.jpg" })).changes.set.products[0].image, "/products/8f2e4b26641260fa5c39.jpg");
+});
+
+test("product description: plain text with its line breaks, cleaned and limited", async () => {
+  const o = await crmOwner();
+  const made = ok(await o.b.call("POST", `${o.crm}/products`, { name: "Peonies", price: 1000, description: "  Pink peonies.\r\n\r\n\r\n\r\nComposition: 15 peonies\u202e, eucalyptus  \n<b>no html</b>  " }), 201).changes.set.products[0];
+  assert.equal(made.description, "Pink peonies.\n\nComposition: 15 peonies, eucalyptus\n<b>no html</b>");
+  assert.equal((await one(o, "products", made.id)).description, made.description, "in the snapshot too");
+  const edited = ok(await o.b.call("PUT", `${o.crm}/products/${made.id}`, { description: "Line one\nLine two" })).changes.set.products[0];
+  assert.equal(edited.description, "Line one\nLine two");
+  assert.equal(ok(await o.b.call("PUT", `${o.crm}/products/${made.id}`, { name: "Peonies, pink" })).changes.set.products[0].description, "Line one\nLine two", "kept when not sent");
+  assert.equal(ok(await o.b.call("PUT", `${o.crm}/products/${made.id}`, { description: "" })).changes.set.products[0].description, "");
+  // Up to 2000 characters.
+  ok(await o.b.call("PUT", `${o.crm}/products/${made.id}`, { description: "x".repeat(2000) }));
+  assert.equal((await o.b.call("PUT", `${o.crm}/products/${made.id}`, { description: "x".repeat(2001) })).status, 400);
+  assert.equal((await o.b.call("POST", `${o.crm}/products`, { name: "Y", description: 5 })).status, 400);
+  // A product made before descriptions has "".
+  assert.equal((await product(o)).description, "");
+});
+
+test("product gallery: up to 8 photos in order, the first is the main one; old products keep their one image", async () => {
+  const o = await crmOwner();
+  const other = await crmOwner("Aziz", "Other shop");
+  const png = Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n", "latin1"), Buffer.alloc(40, 7)]);
+  const upload = async (b = o) => {
+    const f = new FormData();
+    f.append("file", new Blob([png]), "x.png");
+    return ok(await b.b.call("POST", `${b.crm}/products/images`, f), 201).image;
+  };
+  const shown = async (path) => (await fetch(base + path, { headers: { Cookie: o.b.cookie } })).status;
+  const [a, b, c] = [await upload(), await upload(), await upload()];
+  const made = ok(await o.b.call("POST", `${o.crm}/products`, { name: "Bouquet", price: 1000, images: [a, b, c] }), 201).changes.set.products[0];
+  assert.deepEqual([made.image, made.images], [a, [a, b, c]]);
+  assert.deepEqual((await one(o, "products", made.id)).images, [a, b, c], "in the snapshot");
+  // Reordered: the new first is the main one.
+  const put = (body) => o.b.call("PUT", `${o.crm}/products/${made.id}`, body);
+  let p = ok(await put({ images: [c, a, b] })).changes.set.products[0];
+  assert.deepEqual([p.image, p.images], [c, [c, a, b]]);
+  // `image` alone changes only the main photo, as before galleries; the others stay.
+  const d = await upload();
+  p = ok(await put({ image: d })).changes.set.products[0];
+  assert.deepEqual(p.images, [d, a, b]);
+  assert.equal(await shown(c), 404, "the main photo it replaced is removed");
+  // Making a photo of the gallery the main one moves it, never shows it twice.
+  p = ok(await put({ image: b })).changes.set.products[0];
+  assert.deepEqual(p.images, [b, a]);
+  assert.equal(await shown(d), 404);
+  // An empty main photo makes the next one the main one.
+  p = ok(await put({ image: "" })).changes.set.products[0];
+  assert.deepEqual([p.image, p.images], [a, [a]]);
+  assert.equal(await shown(b), 404);
+  // A photo taken out of the gallery is removed unless another product shows it (as its main photo or in its gallery).
+  const [e, f] = [await upload(), await upload()];
+  const twin = ok(await o.b.call("POST", `${o.crm}/products`, { name: "Twin", price: 1, image: f }), 201).changes.set.products[0];
+  ok(await put({ images: [a, e, f] }));
+  ok(await put({ images: [a] }));
+  assert.deepEqual([await shown(e), await shown(f), await shown(a)], [404, 200, 200]);
+  ok(await o.b.call("PUT", `${o.crm}/products/${twin.id}`, { images: [a] }));
+  assert.equal(await shown(f), 404, "the last product that showed it let it go");
+  assert.equal(await shown(a), 200, "both still show a");
+  // POST products/:id/image keeps the gallery.
+  const g = await upload();
+  ok(await put({ images: [a, g] }));
+  const form = new FormData();
+  form.append("file", new Blob([png]), "y.png");
+  const set = ok(await o.b.call("POST", `${o.crm}/products/${made.id}/image`, form));
+  assert.deepEqual(set.changes.set.products[0].images, [set.image, g]);
+  // Limits and checks: 8 at most, each once, each a same-site path, each upload still there.
+  const eight = await Promise.all(Array.from({ length: 8 }, () => upload()));
+  assert.equal(ok(await put({ images: eight })).changes.set.products[0].images.length, 8);
+  assert.equal((await put({ images: [...eight, await upload()] })).status, 400);
+  assert.equal((await put({ images: [eight[0], eight[0]] })).status, 400);
+  assert.equal((await put({ images: ["https://evil.example/x.jpg"] })).status, 400);
+  assert.equal((await put({ images: [""] })).status, 400);
+  const foreign = await upload(other);
+  assert.deepEqual([(await put({ images: [eight[0], foreign] })).status], [200], "another workspace's path is only a path: not served");
+  const gone = `/w/${o.ws.id}/crm/products/images/${crypto.randomUUID()}.png`;
+  assert.deepEqual(rules(await put({ images: [eight[0], gone] })), { status: 400, code: "bad_image", hard: undefined, soft: undefined });
+  // Deleting the product removes every photo only it showed.
+  const h = await upload();
+  const lone = ok(await o.b.call("POST", `${o.crm}/products`, { name: "Lone", price: 1, images: [await upload(), h] }), 201).changes.set.products[0];
+  ok(await o.b.call("DELETE", `${o.crm}/products/${lone.id}`));
+  assert.equal(await shown(h), 404);
+  // A product without photos: image "" and images [].
+  assert.deepEqual(ok(await put({ images: [] })).changes.set.products[0].images, []);
+  assert.equal((await one(o, "products", made.id)).image, "");
 });
 
 test("stock: receive, write off, count", async () => {

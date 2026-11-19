@@ -79,7 +79,7 @@ test("export: customers and products read back in the language asked for", async
   assert.equal(ru.rows.find((r) => r[0] === "Malika")[4], "Звонок");
 
   const products = await download(o, "products.xlsx?lang=uz");
-  assert.deepEqual(products.rows[0], ["Mahsulot", "Variant", "Artikul", "Kategoriya", "Oʻlchov birligi", "Narx", "Tannarx", "Kam qoldiq chegarasi", "Sotuvda", "Qoldiq", "Buyurtmalarga ajratilgan", "ID"]);
+  assert.deepEqual(products.rows[0], ["Mahsulot", "Variant", "Artikul", "Kategoriya", "Oʻlchov birligi", "Narx", "Tannarx", "Kam qoldiq chegarasi", "Sotuvda", "Qoldiq", "Buyurtmalarga ajratilgan", "Tavsif", "ID"]);
   // One row per variant; numbers are numbers.
   assert.deepEqual(products.rows.slice(1).map((r) => r.slice(0, 10)), [
     ["Tulips", "Red", "T-R", "", "dona", "30000", "10000", "0", "Ha", "5"],
@@ -153,6 +153,24 @@ test("customers: preview says what would happen and saves nothing; apply does ex
 
   // A preview works once.
   assert.equal((await apply(o, p.token)).body.code, "preview_used");
+});
+
+test("products: the description goes out in the export and comes back in by an import", async () => {
+  const o = await shop();
+  ok(await o.b.call("PUT", `${o.crm}/products/${o.roses}`, { description: "Red roses.\nFrom Ecuador." }));
+  const out = await download(o, "products.xlsx?lang=en");
+  const at = out.rows[0].indexOf("Description");
+  assert.equal(out.rows.find((r) => r[0] === "Roses")[at], "Red roses.\nFrom Ecuador.");
+  // Changed for a product that is there, given to a new one, kept when the cell is blank.
+  const p = ok(await preview(o, "products", book(["Product", "SKU", "Price", "Description"], [["Roses", "R-1", "100000", "Red roses, 60 cm."], ["Lilies", "L-9", "50000", "White lilies."], ["Tulips", "T-R", "30000", ""]])));
+  assert.deepEqual(p.update.map((u) => u.changes), [[{ key: "description", from: "Red roses.\nFrom Ecuador.", to: "Red roses, 60 cm." }]]);
+  ok(await apply(o, p.token));
+  const after = (await snap(o, "products")).products;
+  assert.deepEqual(["Roses", "Lilies"].map((n) => after.find((x) => x.name === n).description), ["Red roses, 60 cm.", "White lilies."]);
+  assert.equal(after.find((x) => x.name === "Tulips").description, "");
+  // Too long: skipped, as the product form would refuse it.
+  const long = ok(await preview(o, "products", book(["SKU", "Description"], [["R-1", "x".repeat(2001)]])));
+  assert.deepEqual(reasons(long), [[2, "too_long"]]);
 });
 
 test("products: preview, every skip reason, apply with opening stock", async () => {
@@ -515,7 +533,7 @@ test("the import's column words are the shared ones, the same an export writes",
   for (const lang of ["en", "ru", "uz"]) {
     const at = ["en", "ru", "uz"].indexOf(lang);
     const products = await download(o, `products.xlsx?lang=${lang}`);
-    assert.deepEqual(products.rows[0], ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved", "id"].map((k) => HEADERS[k][at]));
+    assert.deepEqual(products.rows[0], ["product", "variant", "sku", "category", "unit", "price", "cost", "lowAt", "onSale", "stock", "reserved", "description", "id"].map((k) => HEADERS[k][at]));
     // Each spelling the shared list has for a column is one the import reads as that column.
     const p = ok(await preview(o, "products", book(HEADERS.sku.slice(at, at + 1).concat(HEADERS.price.at(-1)), [["R-1", "100000"]])));
     assert.deepEqual(p.columns.map((c) => c.key), ["sku", "price"]);
