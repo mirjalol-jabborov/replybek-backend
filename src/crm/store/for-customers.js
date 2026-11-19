@@ -59,6 +59,35 @@ export async function productsForCustomers(q, cfg, ids) {
     .filter((p) => p.variants.length);
 }
 
+// Latin and Cyrillic, the way Uzbek and Russian words are written in Uzbekistan (oʻ, gʻ with any apostrophe).
+const TO_CYR = [["shch", "щ"], ["sh", "ш"], ["ch", "ч"], ["ya", "я"], ["yu", "ю"], ["yo", "ё"], ["ts", "ц"],
+  ["oʻ", "ў"], ["o'", "ў"], ["o‘", "ў"], ["gʻ", "ғ"], ["g'", "ғ"], ["g‘", "ғ"],
+  ["a", "а"], ["b", "б"], ["v", "в"], ["g", "г"], ["d", "д"], ["e", "е"], ["j", "ж"], ["z", "з"], ["i", "и"], ["y", "й"], ["k", "к"],
+  ["l", "л"], ["m", "м"], ["n", "н"], ["o", "о"], ["p", "п"], ["r", "р"], ["s", "с"], ["t", "т"], ["u", "у"], ["f", "ф"], ["x", "х"],
+  ["h", "ҳ"], ["q", "қ"], ["c", "к"], ["w", "в"]];
+const TO_LAT = { а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "yo", ж: "j", з: "z", и: "i", й: "y", к: "k", л: "l", м: "m", н: "n",
+  о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "x", ц: "ts", ч: "ch", ш: "sh", щ: "shch", ъ: "", ы: "i", ь: "", э: "e",
+  ю: "yu", я: "ya", ў: "oʻ", ғ: "gʻ", қ: "q", ҳ: "h" };
+function toCyr(w) {
+  let out = "";
+  let i = 0;
+  while (i < w.length) {
+    const hit = TO_CYR.find(([l]) => w.startsWith(l, i));
+    if (hit) {
+      out += hit[1];
+      i += hit[0].length;
+    } else out += w[i++];
+  }
+  return out;
+}
+const toLat = (w) => [...w].map((ch) => TO_LAT[ch] ?? ch).join("");
+/** A search word as typed and in the other alphabet; Russian names write х and к where Uzbek has ҳ and қ, so both. */
+export function spellings(word) {
+  const w = word.toLowerCase();
+  const cyr = toCyr(w);
+  return [...new Set([w, cyr, cyr.replace(/ҳ/g, "х").replace(/қ/g, "к"), toLat(w)])].filter(Boolean);
+}
+
 const names = (name) => (name && typeof name === "object" ? Object.values(name) : [name]).filter(Boolean).map((n) => String(n).toLowerCase());
 const like = (word) => `%${word.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 
@@ -72,11 +101,16 @@ export async function findForCustomers(q, cfg, { words = [], limit }) {
   const params = base(cfg);
   const add = (v) => `$${params.push(v)}`;
   const match = words.map((word) => {
-    const w = add(like(word));
-    const categories = add(cfg.data.productCategories.filter((c) => names(c.name).some((n) => n.includes(word.toLowerCase()))).map((c) => c.id));
-    return `AND (p.name ILIKE ${w} OR p.description ILIKE ${w} OR p.category = ANY(${categories}::text[])
+    // The word as typed, and in the other alphabet ("pion" also finds "пион"): customers write Uzbek
+    // in Latin or Cyrillic, and product names are in either.
+    const one = (form) => {
+      const w = add(like(form));
+      const categories = add(cfg.data.productCategories.filter((c) => names(c.name).some((n) => n.includes(form))).map((c) => c.id));
+      return `p.name ILIKE ${w} OR p.description ILIKE ${w} OR p.category = ANY(${categories}::text[])
       OR EXISTS (SELECT 1 FROM crm_variants v WHERE v.workspace_id = p.workspace_id AND v.product_id = p.id AND v.sku ILIKE ${w})
-      OR EXISTS (SELECT 1 FROM jsonb_array_elements(p.options) o WHERE o->>'name' ILIKE ${w} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(o->'values') x WHERE x ILIKE ${w})))`;
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements(p.options) o WHERE o->>'name' ILIKE ${w} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(o->'values') x WHERE x ILIKE ${w}))`;
+    };
+    return `AND (${spellings(word).map(one).join(" OR ")})`;
   });
   const { rows } = await q(
     `WITH left_now AS (${LEFT})

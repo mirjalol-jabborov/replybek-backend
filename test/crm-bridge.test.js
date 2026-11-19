@@ -370,6 +370,8 @@ test("store through a conversation: products as cards with photos, delivery opti
   assert.ok(byText.products[0].description.startsWith("A box with peonies inside."));
   assert.ok(byText.products[0].description.length <= 401 && byText.products[0].description.endsWith("…"));
   assert.equal("description" in all.products.find((p) => p.id === s.roses), false, "no description, no field");
+  // A word in the other alphabet finds it too ("гифт" is "gift" in Cyrillic).
+  assert.deepEqual((await c.run("crm_find_products", { search: "гифт" })).output.products.map((p) => p.name), ["Gift box"]);
 
   const options = (await c.run("crm_order_options", { day: D(1) })).output;
   assert.deepEqual(options.delivery.map((m) => [m.method, m.needsAddress, m.fee]), [["courier", true, 30000], ["pickup", false, 0]]);
