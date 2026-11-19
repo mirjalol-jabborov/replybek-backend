@@ -42,6 +42,8 @@ const SETTINGS = () => ({
   // workspace also has the agent product.
   aiConnected: false,
   aiAct: true,
+  // The guided setup's own record; what is set up is read from the data itself.
+  onboarding: { finishedAt: null, dismissedAt: null, skipped: [] },
 });
 const SOURCES = () => [
   { id: "telegram", name: "Telegram", icon: "send" },

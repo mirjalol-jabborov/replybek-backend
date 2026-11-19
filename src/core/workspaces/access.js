@@ -7,9 +7,12 @@ const RANK = { agent: 1, admin: 2, owner: 3 };
 /**
  * For routes under /w/:wid. Checks the signed-in user belongs to the workspace and sets
  * req.workspace and req.role. Someone outside the workspace gets 404, so ids don't leak.
+ * Until the person confirms their email address no workspace opens: 403 { code: "email_unverified" },
+ * the one check for every workspace route of both products (the confirmation itself is under /auth).
  */
 export async function requireWorkspace(req, res, next) {
   try {
+    if (!req.user.email_verified) throw new HttpError(403, "Confirm your email address to open the workspace.", { code: "email_unverified" });
     const { wid } = req.params;
     if (!/^[0-9a-f-]{36}$/i.test(wid)) throw notFound("Workspace not found");
     const { rows } = await query(

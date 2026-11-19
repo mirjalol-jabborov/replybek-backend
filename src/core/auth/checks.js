@@ -28,3 +28,8 @@ export const loginSchema = z.object({
   email: z.string().trim().email().max(200),
   password: z.string().min(1).max(200),
 });
+
+// Confirming the email address: the code as typed (spaces allowed), the link's token, a new address.
+export const verifyCodeSchema = z.object({ code: z.string().trim().max(20) });
+export const verifyLinkSchema = z.object({ token: z.string().min(20).max(100) });
+export const changeEmailSchema = z.object({ email: z.string().trim().email().max(200) });

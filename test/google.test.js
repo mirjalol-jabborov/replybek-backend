@@ -108,3 +108,26 @@ test("a token for another app is refused", async () => {
   assert.equal(r.cookie, undefined);
   assert.match(decodeURIComponent(r.location), /didn't finish/);
 });
+
+test("Google confirms the email: a new Google account opens its workspace straight away", async () => {
+  const { me, cookie } = await signInWithGoogle({ sub: "g-8", email: "malika@confirmed.uz", email_verified: true, name: "Malika" });
+  assert.equal(me.user.email_verified, true);
+  assert.equal(me.verification, undefined);
+  const ws = await fetch(`${setup.base}/w/${me.workspaces[0].id}`, { headers: { Cookie: cookie } });
+  assert.equal(ws.status, 200);
+});
+
+test("Google sign-in to an unconfirmed password account confirms it, and whoever typed that address is locked out", async () => {
+  // Someone registers with an address that isn't theirs and never confirms it.
+  const squatter = setup.browser();
+  const r = await squatter.call("POST", "/auth/register", { name: "Stranger", email: "jasur@claimed.uz", password: "correct horse battery", workspace_name: "Taken" });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.user.email_verified, false);
+  // The address's real owner signs in with Google, which has checked the address.
+  const { me, cookie } = await signInWithGoogle({ sub: "g-9", email: "jasur@claimed.uz", email_verified: true, name: "Jasur" });
+  assert.equal(me.user.email_verified, true);
+  assert.equal((await fetch(`${setup.base}/w/${me.workspaces[0].id}`, { headers: { Cookie: cookie } })).status, 200);
+  assert.equal((await squatter.call("GET", "/auth/me")).status, 401, "the stranger's session ends");
+  const pw = await setup.browser().call("POST", "/auth/login", { email: "jasur@claimed.uz", password: "correct horse battery" });
+  assert.equal(pw.status, 401, "and the password they chose no longer works");
+});
