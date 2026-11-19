@@ -43,6 +43,9 @@ async function findProducts(access, args, lang) {
           price: low,
           priceText: moneyText(lang, low),
           image: imageUrl(access, p.image),
+          // What it is and what's in it (the team's text, cut short), and a few more photos.
+          ...(p.description ? { description: p.description.length > 400 ? `${p.description.slice(0, 400).trimEnd()}…` : p.description } : {}),
+          ...(p.images?.length > 1 ? { images: p.images.slice(0, 4).map((name) => imageUrl(access, name)) } : {}),
           choices: (p.options || []).map((o) => `${o.name}: ${o.values.filter((val) => variants.some((v) => v.values?.[o.id] === val)).join(", ")}`).join("; "),
           // How many are left, at most LEFT_CAP: past it, "available".
           variants: variants.map((v) => ({ variant: v.id, option: optionText(p, v), price: v.price, left: capped(v.left) })),
